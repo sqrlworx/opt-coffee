@@ -1,0 +1,99 @@
+# forum
+
+Office hours where anyone can be the expert. Experts announce office hours and askers submit and +1 questions until a deadline. A moderator seeds, groups, and orders the questions. The expert records video answers back to back in the order they pick: each question is played to them, they answer, and Save moves on to the following question. Then they publish them to subscribers' feeds.
+
+Questions can be typed or spoken. Typed questions are read aloud and spoken ones are transcribed, so every question can be read and played back. Answer videos get transcripts and subtitles. Readers watch the published answers as one video, with a short summary underneath that lets them jump around in it.
+
+## Run it
+
+```bash
+cd forum
+npm run seed      # optional: demo data (users maya, leo, sam, priya, jo; password "password123")
+npm run dev       # http://localhost:3000, with the "Acting as" user switcher in the nav bar
+npm start         # same, without the switcher
+npm test
+```
+
+Requires Node 22.13+ (uses the built-in `node:sqlite`). The app has no required dependencies and no build step.
+
+Joining the published answers into one video needs `ffmpeg` (with `ffprobe`) on the PATH. Without it, readers get the answers one by one. Speech (spoken questions, read-aloud and transcripts) also needs [uv](https://docs.astral.sh/uv/) and `ffmpeg`. Without uv it's switched off and everything else works. On first start, uv installs the Python dependencies and the models download (a few GB in total, cached afterwards). Speech is ready once the log shows the models loading.
+
+| Env var | Default | |
+|---|---|---|
+| `PORT` | `3000` | |
+| `FORUM_DB` | `forum.db` | SQLite file path |
+| `FORUM_MEDIA` | `media` | Directory for recorded answer videos |
+| `FORUM_MODERATOR` | `auto` | `auto` uses Claude if `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` is set, else heuristics. `heuristic` / `claude` force one. |
+| `FORUM_CLAUDE_MODEL` | `claude-opus-5-5` | |
+| `FORUM_SPEECH` | `auto` | `auto` turns speech on if `uv` is on the PATH. `on` / `off` force it. |
+| `FORUM_WHISPER_MODEL` | `small.en` | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) model for speech-to-text. `base.en` is faster; `medium.en` is more accurate; drop `.en` for other languages. |
+| `FORUM_VOICE` | `af_heart` | [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) voice that reads typed questions aloud |
+| `FORUM_DEV_LOGIN` | off | `1` turns on the user switcher (same as `npm run dev`). **Anyone can then act as any user with no password, so never enable it on a deployed server.** |
+
+To use the Claude moderator, run `npm install` (it pulls in the optional `@anthropic-ai/sdk`) and set an API key.
+
+Recording needs camera and microphone access, and browsers only allow that on `localhost` or over HTTPS. Put a deployed server behind TLS.
+
+## How it works
+
+**Lifecycle.** An office hour is `open` until its question deadline, or until the expert closes it early. After that it is `closed`: no new questions or votes. Once the expert publishes it becomes `published` (to readers, once its video is ready; see Watching), which is final: the answers, their order, and the videos are locked. The "answers expected" date is shown to askers but never enforced.
+
+**Feed.** The feed is computed per request from subscriptions. There is no fan-out table.
+- *Announced* items go to subscribers of the expert.
+- *Published* items go to subscribers of the expert **or** of the office hour, once the answers' video is ready.
+- Feed cards are teasers that link to the office hour page. You can't ask questions or read answers in the feed. Published cards show the answer count and the first three question titles.
+- Asking a question automatically subscribes you to that office hour, so you see the answer.
+
+**Anonymous questions.** When enabled, the author is stored, so the asker can still see "you (hidden)". It is never returned to anyone else, including the expert.
+
+**Moderator** (`src/moderator/`):
+- *Seed suggestions*: based on the expert's bio and expertise plus the topic. The expert picks which ones to post. They then appear as "Suggested by moderator" and can be +1'd.
+- *Grouping*: TF-IDF clustering, with labels taken from shared terms. With Claude enabled, page loads serve the heuristic grouping right away. Claude's grouping is computed in the background and cached per question set, so pages never wait on the LLM.
+- *Suggested order*: start with the most popular group, then repeatedly pick the next group by `0.6·popularity + 0.4·relatedness` to the previous one. Within a group, most-voted first. Votes count toward popularity. So does the asker's own question, but seed questions don't get that extra point.
+- The expert can take the suggested order wholesale or build their own: add, reorder, remove, answer. Only queued questions with a recorded answer are published, in queue order.
+- *Summaries* of published answers, for the short transcript under the video: the question in at most a few words, then the answer's main points (at most three). The heuristic summary is extractive: a sentence from each third of the answer, the one using the answer's most frequent words. Summaries are computed per request, like grouping: with Claude, the heuristic one is served marked `pending` while Claude's is written in the background and cached, and the page checks back for it. Only the answer after the question is summarized, and a corrected transcript gets a new summary.
+
+**Video answers.** Answers are videos the expert records live in the planner. There is no file upload. They're recorded in *sessions*: the expert clicks **Answer from here** on any queued question (or **Start answering**, which starts at question 1), and the camera stays on while they work down the answer order. Each question's audio (the asker's recording, or the typed text read aloud) is played to the expert and mixed into the recording. It's downloaded and decoded before that question's take starts recording (the next question's while the current one is answered), so the clip starts with the question, not a pause while it loads. When it ends, they answer. **Save** keeps that take and plays the following question; on the last question it ends the session. **Skip** leaves the question's answer as it was and moves on. **Start over** replays the question and discards the take. **Exit** ends the session: if they've started answering, recording pauses and they choose **Save** or **Discard** for that answer (or **Keep recording**); while the question is still playing there's nothing to keep, so it exits right away. Esc does the same as Exit. On the last question there's no Skip, since that's the same as exiting without saving. A question without audio yet is shown on screen for the expert to read out. Starting on a question that already has an answer asks first; an answered question coming up later in the session is flagged, and answering it again replaces the old answer. Each question is its own take: the browser starts a new `MediaRecorder` on the same camera stream when the expert moves on, so takes need no server-side splitting, and each one uploads in the background while the session continues. Once saved, a take keeps playing from the browser's copy for as long as the expert stays on the page, so the player doesn't reload by downloading the video it already has. The take for a question is its answer, the question followed by the response, and that clip is what readers see on the Q&A page. `PUT /api/questions/:id/video?answerStart=<seconds>` records where the answer starts within the take, and the written transcript on the public page leaves out the question part before that point. The browser records MP4 where supported (Chrome, Safari), otherwise WebM (Firefox). Takes are capped at 10 minutes. The expert can **Remove** an answer. If saving fails, the take stays in the browser with **Try again** / **Discard**, and publishing waits until every take is saved. Each take is sent as the raw request body and saved in `FORUM_MEDIA` under a random name. Videos are served from `/media/<name>` with Range support, so seeking works. Players seek a millisecond in once the metadata loads, so browsers show the first frame instead of a blank player. Draft videos are visible only to the expert; published ones are public. Files that no draft or published answer uses any more are deleted when a take is replaced or removed. On publish, recordings for questions that weren't published are deleted too. Experts should wear headphones: the question is mixed in digitally, so a mic that also hears it from the speakers records it twice.
+
+**Watching.** Readers watch the published answers as one video. On publish, `src/video.js` joins the takes end to end in the published order, in the background with ffmpeg. Each take is re-encoded to 1280×720, 30 fps H.264/AAC first. Takes can be MP4 or WebM, from different cameras, and the browser's recordings have no reliable durations. The parts are then joined without re-encoding again into an MP4 that streams before it has fully downloaded. The office hour stores the file and where each answer starts and ends in it (`video_chapters`). This takes a few minutes for a long office hour. Until it's done, readers see the office hour as it was when questions closed: the API reports it as `closed`, with no answers, and it isn't in feeds or Explore's "Recently answered" yet. The expert sees it as published, with a note that the video is being processed. Their page polls `GET /api/office-hours/:id/video` and shows the video as soon as it's ready. If joining fails, or without ffmpeg, the page shows each answer's own video instead. On startup, the server picks up pending joins and joins office hours published before this existed. The joined video is public, like the answers.
+- *The player* has its own controls, so the captions and orb stay on in fullscreen. It has play, a timeline with a tick where each answer starts, captions on/off, mute and fullscreen. Keys: Space/K play, ←/→ 5 seconds, F fullscreen, C captions, M mute. The controls fade while it plays until the pointer moves.
+- *Captions* are drawn at the bottom from the answers' transcripts, each shifted by where its answer starts, and drop lower while the controls are hidden. They come up while the question plays too (it's in the recording), in italics.
+- *An orb* glows at the top left while a question is being played: the start of each take, up to its `answerStart`. It pulses with how loud the question is (the video's sound goes through a Web Audio analyser, set up on the first click on play; without it, the orb just breathes), next to who asked ("Maya asks", "Someone asks" for anonymous questions, "Suggested question" for moderator seeds).
+- *The summary* under the video lists each question in short, with who asked it, and its answer's main points. Each question and answer is one thing to click: clicking anywhere on it plays it from the start of its take, where the question is. The one being played is highlighted. Answers still being transcribed are summarized when their transcript is ready.
+- *The full transcript* is folded away below. The expert can still correct it there; the captions and summary follow.
+
+**Speech** (`src/speech/`). Speech runs locally: faster-whisper for speech-to-text and Kokoro for text-to-speech, in `worker.py`. The server starts two long-lived worker processes with uv, so models load once. One worker serves askers waiting on a transcript; the other does background work, so a long answer video never holds up an asker.
+- *Spoken questions.* The asker records up to 90 seconds in the browser. When they stop, the recording goes to `POST /api/office-hours/:id/recordings` and is transcribed while they wait (a couple of seconds). Nothing is asked yet: the asker listens back, checks the transcript and corrects anything misheard, then asks. That's `POST /api/office-hours/:id/questions` with the `recording` and the checked transcript lines, which become the question's text, so grouping, ordering and the feed treat it like a typed question. Unasked recordings are private to the asker, deleted when they re-record or discard, and cleaned up after a day. If nothing intelligible was said, or transcription fails, the recording isn't kept; the asker still has it in the browser and can try again. Anonymous questions hide the name, but the recording is public and the voice may be recognizable; the ask form says so.
+- *Typed questions,* including moderator seeds, are read aloud in the background with the default voice. They show "Preparing audio…" until it's done.
+- *Answer videos* are transcribed in the background after each take. A transcript belongs to its video file (the `transcripts` table), so the draft and the published answer share one. Drafts' transcripts are as private as the drafts. An answer can be published before its transcript is ready; it shows up when done.
+- *Captions.* Word timings from Whisper become subtitle cues: at most two lines and six seconds, ending early at sentence ends and pauses. Cues are served as WebVTT at `/media/<file>.vtt`, with the same access rules as the recording. When answers are shown one by one, each video loads them as a subtitle track (use the player's CC button); the joined video draws them itself (see Watching). Transcripts are shown under answers, and a spoken question's text is its transcript. Both highlight the cue being spoken, clicking a cue plays from there, and each has a "Download captions (.vtt)" link.
+- *Correcting transcripts.* Speech-to-text makes mistakes, so transcripts are corrected line by line. Each line is one subtitle and keeps its timing, which keeps the subtitles in sync; clearing a line removes it. Askers correct a spoken question before asking it (above); once asked, it doesn't change. The expert can correct an answer's transcript in the planner, and also after publishing, on the public page (`PUT /api/questions/:id/answer-transcript`). Publishing locks the answer, not typos in its transcript, which may only have finished after publishing. Corrected transcripts are marked "edited", and their captions URL changes so browsers don't keep showing the old subtitles.
+- *Progress lives in the database,* so on startup the server resumes pending work. It also catches up on anything recorded before speech existed, or while it was off. The page polls `GET /api/questions/:id` while something is pending. Failures show as "couldn't be transcribed"; nothing retries them automatically.
+
+**Drafts and publishing.** Before publishing, the planner edits a private working copy (`plan_position`, `answer_video`). The answer order saves itself whenever it changes, so leaving or refreshing the planner doesn't lose it. Publishing copies it once into a snapshot (`published_position`, `published_answer_video`), and the public page and feed read only that snapshot. Publishing is one-way. Afterwards the planner redirects to the public page, and the API refuses edits with 409: plan saves, recording or removing videos, and publishing again. An upload that is still in flight when the expert publishes is also rejected, and its file is discarded.
+
+## Layout
+
+```
+server.js               entry point
+src/app.js              HTTP routes (JSON API, video upload/streaming, static files)
+src/db.js               SQLite schema
+src/auth.js             scrypt passwords, cookie sessions
+src/moderator/          heuristic.js · claude.js · index.js (facade, fallback, caching)
+src/speech/             worker.py (Whisper + Kokoro) · index.js (worker processes) · jobs.js (background queue) · captions.js (cues, WebVTT)
+src/video.js            joining published answers into one video with ffmpeg, and its background queue
+public/                 vanilla-JS single-page app (hash routing)
+scripts/seed.js         demo data
+test/                   node:test — moderator unit tests, API lifecycle tests, speech tests (with a fake engine), video tests (a fake joiner, plus real ffmpeg if installed)
+```
+
+## Not built yet
+
+- Notifications beyond the feed (email/push when an office hour is published)
+- Editing or deleting questions; editing office hour details or deadlines after announcing
+- Moderation/reporting, rate limiting, pagination
+- Expert moving questions between moderator groups by hand
+- Transcoding answers one by one: the joined video is H.264 MP4, but until it's ready (or without ffmpeg) a take recorded as WebM in Firefox won't play in older Safari
+- Retrying a failed join (restarting the server only resumes pending ones), or a download link for the joined video
+- Retrying failed speech jobs (other than restarting the server, which only retries pending ones), or typing a transcript for a recording that couldn't be transcribed
+- Hosted speech APIs, or a GPU. Speech runs on the server's CPU: a 2-minute answer takes about a minute to transcribe with `small.en`

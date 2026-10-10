@@ -1,0 +1,114 @@
+// Claude-backed moderator. Loaded only when Anthropic credentials are configured;
+// every method throws on failure so the caller can fall back to the heuristics.
+
+const MODEL = process.env.FORUM_CLAUDE_MODEL ?? 'claude-opus-5-5';
+
+const SYSTEM = `You are the moderator of "forum", an app where experts host office hours and other people ask them questions.
+Your job is to help the conversation be useful: suggest thoughtful seed questions, and organize submitted questions.
+Write questions the way a curious, respectful audience member would: specific, open-ended, one question each, no preamble.`;
+
+const SUGGEST_SCHEMA = {
+  type: 'object',
+  properties: { questions: { type: 'array', items: { type: 'string' } } },
+  required: ['questions'],
+  additionalProperties: false,
+};
+
+const GROUP_SCHEMA = {
+  type: 'object',
+  properties: {
+    groups: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          question_ids: { type: 'array', items: { type: 'integer' } },
+        },
+        required: ['label', 'question_ids'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['groups'],
+  additionalProperties: false,
+};
+
+const SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    question: { type: 'string' },
+    points: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['question', 'points'],
+  additionalProperties: false,
+};
+
+export async function createClaudeModerator() {
+  const { default: Anthropic } = await import('@anthropic-ai/sdk');
+  const client = new Anthropic();
+
+  async function ask(prompt, schema) {
+    const response = await client.beta.messages.create({
+      model: MODEL,
+      max_tokens: 4096,
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      system: SYSTEM,
+      output_config: { effort: 'low', format: { type: 'json_schema', schema } },
+      messages: [{ role: 'user', content: prompt }],
+    });
+    if (response.stop_reason !== 'end_turn') {
+      throw new Error(`Claude moderator stopped with ${response.stop_reason}`);
+    }
+    const text = response.content.find((b) => b.type === 'text')?.text;
+    if (!text) throw new Error('Claude moderator returned no text');
+    return JSON.parse(text);
+  }
+
+  return {
+    name: 'claude',
+
+    async suggestQuestions(expert, officeHour, { existing = [], count = 6 } = {}) {
+      const prompt = [
+        `Suggest ${count} seed questions for this office hour.`,
+        '',
+        `<expert>\nName: ${expert.displayName}\nExpertise: ${expert.expertise.join(', ') || '(none listed)'}\nBio: ${expert.bio || '(none)'}\n</expert>`,
+        `<office_hour>\nTitle: ${officeHour.title}\nTopic: ${officeHour.topic || '(open topic)'}\nDescription: ${officeHour.description || '(none)'}\n</office_hour>`,
+        existing.length
+          ? `<already_asked>\n${existing.map((q) => `- ${q}`).join('\n')}\n</already_asked>\nDo not repeat or closely paraphrase anything already asked.`
+          : '',
+        'Draw on the expert\'s specific background so the questions could not be asked of just anyone. Mix practical, reflective, and forward-looking questions.',
+      ].join('\n');
+      const { questions } = await ask(prompt, SUGGEST_SCHEMA);
+      return questions.map((q) => q.trim()).filter(Boolean).slice(0, count);
+    },
+
+    async groupQuestions(questions) {
+      const prompt = [
+        'Group these office-hour questions so that questions about the same underlying subject are together.',
+        'Every question id must appear in exactly one group. A question that fits nowhere gets its own group.',
+        'Labels should be 1-4 words, Title Case, naming the shared subject.',
+        '',
+        '<questions>',
+        ...questions.map((q) => `[${q.id}] ${q.body}`),
+        '</questions>',
+      ].join('\n');
+      const { groups } = await ask(prompt, GROUP_SCHEMA);
+      return groups.map((g) => ({ label: g.label, questionIds: g.question_ids }));
+    },
+
+    async summarizeAnswer({ question, answer }) {
+      const prompt = [
+        "Summarize one answer from an office hour. It's shown as a short transcript under the video of the answers.",
+        '',
+        `<question>\n${question}\n</question>`,
+        `<answer_transcript>\n${answer}\n</answer_transcript>`,
+        '',
+        'question: the question restated in at most 12 words.',
+        'points: the 1-3 main points of the answer, in the order they were made. Each is one plain sentence of at most 20 words that states the point itself (not "The expert says..."). Skip small talk.',
+      ].join('\n');
+      return ask(prompt, SUMMARY_SCHEMA);
+    },
+  };
+}

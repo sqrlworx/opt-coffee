@@ -1,0 +1,19 @@
+{
+  "name": "forum",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Office hours: ask experts questions, moderated and grouped.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev",
+    "seed": "node scripts/seed.js",
+    "test": "node --test --test-reporter=spec \"test/*.test.js\""
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "*"
+  }
+}
