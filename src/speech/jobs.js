@@ -28,7 +28,7 @@ export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) 
       if (!db.prepare('SELECT 1 FROM transcripts WHERE media = ?').get(name)) return;
       try {
         const { text, words } = await speech.transcribe(join(mediaDir, name));
-        db.prepare("UPDATE transcripts SET status = 'ready', text = ?, cues = ?, updated_at = ? WHERE media = ?").run(text, JSON.stringify(cuesFromWords(words)), now(), name);
+        db.prepare("UPDATE transcripts SET status = 'ready', text = ?, cues = ?, words = ?, updated_at = ? WHERE media = ?").run(text, JSON.stringify(cuesFromWords(words)), JSON.stringify(words), now(), name);
       } catch (err) {
         // A recording deleted mid-job has no transcript left to mark, and nothing worth reporting.
         const { changes } = db.prepare("UPDATE transcripts SET status = 'failed', updated_at = ? WHERE media = ?").run(now(), name);

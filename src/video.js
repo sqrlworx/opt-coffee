@@ -7,7 +7,10 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
+const sleep = promisify(setTimeout);
 const FFMPEG_TIMEOUT = 30 * 60_000; // a take is at most 10 minutes; re-encoding it is quicker than that
+const TRANSCRIPT_WAIT = 30 * 60_000; // longest a finished join waits for transcripts to burn in
+const TRANSCRIPT_POLL = 1000;
 const WIDTH = 1280;
 const HEIGHT = 720;
 
@@ -17,9 +20,13 @@ const HEIGHT = 720;
  * browser's recordings have no reliable durations. The re-encoded parts are then put end to end
  * without re-encoding again.
  *
+ * With a `finisher` (src/finish), each take is finished instead of just re-encoded: lit and graded
+ * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. If that
+ * fails, the takes are joined as recorded.
+ *
  * Returns null when ffmpeg isn't on the PATH.
  */
-export function createVideoJoiner({ log = console.warn } = {}) {
+export function createVideoJoiner({ finisher = null, log = console.warn } = {}) {
   if (spawnSync('ffmpeg', ['-version']).error || spawnSync('ffprobe', ['-version']).error) {
     log('[video] ffmpeg not found, so published answers are shown one by one instead of as one video');
     return null;
@@ -27,31 +34,60 @@ export function createVideoJoiner({ log = console.warn } = {}) {
   const ffmpeg = (args) => run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args], { timeout: FFMPEG_TIMEOUT, maxBuffer: 10_000_000 });
   const probe = async (file, entries) => (await run('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file])).stdout.trim();
 
+  // The takes as recorded, brought to the same size, frame rate and codecs.
+  async function reencode(takes, dir) {
+    const parts = [];
+    for (const [i, { file }] of takes.entries()) {
+      const part = join(dir, `${i}.mp4`);
+      // Every take has sound, but a part without any would break joining, so give it silence.
+      const silent = !(await probe(file, 'stream=codec_type')).includes('audio');
+      await ffmpeg([
+        '-i', file,
+        ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-shortest'] : []),
+        '-vf', `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`,
+        '-af', 'aresample=48000:async=1',
+        '-ac', '2',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-c:a', 'aac', '-b:a', '128k',
+        part,
+      ]);
+      parts.push(part);
+    }
+    return parts;
+  }
+
+  // The takes finished, or null if that failed.
+  async function finish(takes, dir) {
+    const parts = takes.map((_, i) => join(dir, `finished_${i}.mp4`));
+    try {
+      await finisher.finish(
+        takes.map((t, i) => ({ input: t.file, output: parts[i], answer_start: t.answerStart ?? null, cues: t.cues ?? null, words: t.words ?? null })),
+        dir,
+      );
+      return parts;
+    } catch (err) {
+      log(`[video] finishing failed, so the takes are joined as recorded: ${err.message}`);
+      return null;
+    }
+  }
+
   return {
+    /** Whether takes are finished, with their captions burned in: worth waiting for transcripts. */
+    finishing: Boolean(finisher),
+
     /**
-     * Writes the videos in `files`, in order, into one MP4 at `out`.
-     * @returns {Promise<number[]>} how long each part is in the result, in seconds
+     * Writes the takes, in order, into one MP4 at `out`. A take is a file name, or
+     * {file, answerStart, cues, words} with what finishing uses: where the answer starts after the
+     * question, and the transcript's cues and word timings.
+     * @returns {Promise<{durations: number[], captioned: boolean[]}>} how long each part is in the
+     *   result, in seconds, and whether its captions are burned in
      */
-    async join(files, out) {
+    async join(takes, out) {
       const dir = mkdtempSync(join(tmpdir(), 'forum_join_'));
       try {
-        const parts = [];
-        for (const [i, file] of files.entries()) {
-          const part = join(dir, `${i}.mp4`);
-          // Every take has sound, but a part without any would break joining, so give it silence.
-          const silent = !(await probe(file, 'stream=codec_type')).includes('audio');
-          await ffmpeg([
-            '-i', file,
-            ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-shortest'] : []),
-            '-vf', `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`,
-            '-af', 'aresample=48000:async=1',
-            '-ac', '2',
-            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
-            '-c:a', 'aac', '-b:a', '128k',
-            part,
-          ]);
-          parts.push(part);
-        }
+        takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
+        const finished = finisher ? await finish(takes, dir) : null;
+        const parts = finished ?? (await reencode(takes, dir));
         // The concat demuxer starts each part where the previous one ends, by its duration.
         const durations = [];
         for (const part of parts) durations.push(Number(await probe(part, 'format=duration')));
@@ -59,7 +95,7 @@ export function createVideoJoiner({ log = console.warn } = {}) {
         writeFileSync(list, parts.map((p) => `file '${p}'\n`).join(''));
         await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', `${out}.part`]);
         await rename(`${out}.part`, out);
-        return durations;
+        return { durations, captioned: takes.map((t) => Boolean(finished && t.cues?.length)) };
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(`${out}.part`, { force: true });
@@ -72,33 +108,70 @@ export function createVideoJoiner({ log = console.warn } = {}) {
  * Background work joining each published office hour's answers into one video, one at a time.
  * Progress lives in the database (office_hours.video_status), so `resume()` at startup picks up
  * anything pending, or published before joining existed.
+ *
+ * When the joiner finishes takes, joining waits for transcripts still being made, so captions can
+ * be burned in, and `refresh()` makes the video again after a transcript is corrected.
  */
-export function createVideoJobs({ db, joiner, mediaDir, log = console.error }) {
+export function createVideoJobs({ db, joiner, mediaDir, log = console.error, transcriptWait = TRANSCRIPT_WAIT }) {
   let tail = Promise.resolve();
   const enqueue = (job) => {
     tail = tail.then(job).catch((err) => log(err));
   };
+  const refreshing = new Set();
+
+  // The answers' transcripts, by video, once none is still being made (or the wait runs out).
+  async function transcripts(videos) {
+    const marks = videos.map(() => '?').join(', ');
+    const pending = db.prepare(`SELECT 1 FROM transcripts WHERE status = 'pending' AND media IN (${marks})`);
+    for (const until = Date.now() + transcriptWait; pending.get(...videos) && Date.now() < until; ) await sleep(TRANSCRIPT_POLL);
+    const rows = db.prepare(`SELECT media, cues, words FROM transcripts WHERE status = 'ready' AND media IN (${marks})`).all(...videos);
+    return new Map(rows.map((r) => [r.media, { cues: JSON.parse(r.cues), words: r.words ? JSON.parse(r.words) : null }]));
+  }
+
+  // Joins the answers into a new file. A first join publishes it or marks joining failed; a remake
+  // replaces the current video only once the new one is ready.
+  async function render(officeHourId, { remake = false } = {}) {
+    const answers = db
+      .prepare('SELECT id, published_answer_video AS video, published_answer_start AS answerStart FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position')
+      .all(officeHourId);
+    const name = `${randomBytes(16).toString('hex')}.mp4`;
+    try {
+      if (!answers.length) throw new Error('nothing was published');
+      const texts = joiner.finishing ? await transcripts(answers.map((a) => a.video)) : new Map();
+      const takes = answers.map((a) => ({ file: join(mediaDir, a.video), answerStart: a.answerStart, ...texts.get(a.video) }));
+      const { durations, captioned } = await joiner.join(takes, join(mediaDir, name));
+      // Where each answer starts and ends in the joined video: [question id, start, end, captions
+      // burned in] in seconds.
+      let at = 0;
+      const chapters = answers.map((a, i) => [a.id, round(at), round((at += durations[i])), captioned[i] ? 1 : 0]);
+      const old = db.prepare('SELECT video FROM office_hours WHERE id = ?').get(officeHourId)?.video;
+      db.prepare("UPDATE office_hours SET video = ?, video_status = 'ready', video_chapters = ? WHERE id = ?").run(name, JSON.stringify(chapters), officeHourId);
+      if (old) rmSync(join(mediaDir, old), { force: true });
+    } catch (err) {
+      rmSync(join(mediaDir, name), { force: true });
+      if (!remake) db.prepare("UPDATE office_hours SET video_status = 'failed' WHERE id = ?").run(officeHourId);
+      log(`[video] ${remake ? 'remaking the video' : 'joining the answers'} of office hour ${officeHourId} failed: ${err.message}`);
+    }
+  }
 
   /** Queues joining a published office hour's answers, in their published order. */
   function joinAnswers(officeHourId) {
     db.prepare("UPDATE office_hours SET video_status = 'pending' WHERE id = ?").run(officeHourId);
+    enqueue(() => render(officeHourId));
+  }
+
+  /**
+   * Queues making a published office hour's video again, after one of its transcripts was
+   * corrected, when its captions are burned in. One remake picks up every correction made before
+   * it starts; until it's done, readers keep the current video.
+   */
+  function refresh(officeHourId) {
+    if (!joiner.finishing || refreshing.has(officeHourId)) return;
+    refreshing.add(officeHourId);
     enqueue(async () => {
-      const answers = db
-        .prepare('SELECT id, published_answer_video AS video FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position')
-        .all(officeHourId);
-      const name = `${randomBytes(16).toString('hex')}.mp4`;
-      try {
-        if (!answers.length) throw new Error('nothing was published');
-        const durations = await joiner.join(answers.map((a) => join(mediaDir, a.video)), join(mediaDir, name));
-        // Where each answer starts and ends in the joined video: [question id, start, end] in seconds.
-        let at = 0;
-        const chapters = answers.map((a, i) => [a.id, round(at), round((at += durations[i]))]);
-        db.prepare("UPDATE office_hours SET video = ?, video_status = 'ready', video_chapters = ? WHERE id = ?").run(name, JSON.stringify(chapters), officeHourId);
-      } catch (err) {
-        rmSync(join(mediaDir, name), { force: true });
-        db.prepare("UPDATE office_hours SET video_status = 'failed' WHERE id = ?").run(officeHourId);
-        log(`[video] joining the answers of office hour ${officeHourId} failed: ${err.message}`);
-      }
+      refreshing.delete(officeHourId);
+      const oh = db.prepare('SELECT video_status, video_chapters FROM office_hours WHERE id = ?').get(officeHourId);
+      if (oh?.video_status === 'ready' && JSON.parse(oh.video_chapters).some((c) => c[3])) await render(officeHourId, { remake: true });
     });
   }
 
@@ -109,6 +182,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error }) {
 
   return {
     join: joinAnswers,
+    refresh,
     resume,
     /** Resolves once every queued job, including ones queued meanwhile, has finished. */
     async idle() {

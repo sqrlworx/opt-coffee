@@ -186,11 +186,14 @@ function publishedAnswers(questions) {
     .map(publishedAnswer);
 }
 
-/** The published answers as one video, or null without ffmpeg. `chapters` place each answer in it. */
+/**
+ * The published answers as one video, or null without ffmpeg. `chapters` place each answer in it;
+ * `captions` is true where its captions are burned into the picture, so players don't draw them again.
+ */
 function joinedVideo(oh) {
   if (!oh.video_status) return null;
   const ready = oh.video_status === 'ready';
-  const chapters = ready ? JSON.parse(oh.video_chapters).map(([questionId, start, end]) => ({ questionId, start, end })) : [];
+  const chapters = ready ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned]) => ({ questionId, start, end, captions: Boolean(captioned) })) : [];
   return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, chapters };
 }
 
@@ -645,7 +648,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const oh = getOfficeHour(q.office_hour_id);
       requireExpert(oh, user);
       const name = oh.published_at ? q.published_answer_video : q.answer_video;
-      correctTranscript(name, body.cues).save();
+      // Captions burned into the joined video are remade from the corrected transcript.
+      if (correctTranscript(name, body.cues).save() && oh.published_at) videoJobs?.refresh(oh.id);
       return { transcript: transcriptOf(db, name) };
     },
     { auth: true },

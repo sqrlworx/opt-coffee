@@ -657,10 +657,11 @@ function icon(name) {
 
 // The published answers as one video: the takes joined end to end on the server (src/video.js).
 // It has its own controls, so captions and the orb stay on it in fullscreen. Captions are drawn at
-// the bottom; while a question is being played, a glowing orb at the top left pulses with the
-// asker's voice and says who asked. `chapters` place each answer in the video, and its
-// transcript's cues are timed from the start of its take. `update(q)` picks up a transcript that's
-// ready or corrected.
+// the bottom, except for answers whose captions are burned into the video (`captions` on their
+// chapter, when the server finished it); while a question is being played, a glowing orb at the
+// top left pulses with the asker's voice and says who asked. `chapters` place each answer in the
+// video, and its transcript's cues are timed from the start of its take. `update(q)` picks up a
+// transcript that's ready or corrected.
 function jointPlayer(answers, { src, chapters }) {
   const byId = new Map(answers.map((q) => [q.id, q]));
   const parts = chapters.filter((c) => byId.has(c.questionId)).map((c) => ({ ...c, q: byId.get(c.questionId) }));
@@ -668,7 +669,9 @@ function jointPlayer(answers, { src, chapters }) {
   const partAt = (t) => parts.find((p) => t < p.end) ?? parts.at(-1);
   let cues = []; // [start, end, text] over the whole video
   const recue = () => {
-    cues = parts.flatMap(({ start, end, q }) => (q.transcript?.status === 'ready' ? q.transcript.cues.map(([s, e, text]) => [start + s, Math.min(start + e, end), text]) : []));
+    cues = parts.flatMap(({ start, end, q, captions }) =>
+      !captions && q.transcript?.status === 'ready' ? q.transcript.cues.map(([s, e, text]) => [start + s, Math.min(start + e, end), text]) : [],
+    );
   };
   recue();
 
@@ -680,6 +683,7 @@ function jointPlayer(answers, { src, chapters }) {
   const btn = (label, text, onclick) => h('button', { type: 'button', class: 'jp-btn', title: label, 'aria-label': label, onclick }, text);
   const playBtn = btn('Play (k)', icon('play'), () => toggle());
   const ccBtn = btn('Captions (c)', 'CC', () => setCaptions(!captionsOn));
+  ccBtn.hidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
   const muteBtn = btn('Mute (m)', icon('sound'), () => (video.muted = !video.muted));
   const fullscreenBtn = btn('Fullscreen (f)', icon('fullscreen'), () => toggleFullscreen());
   const time = h('span', { class: 'jp-time' });

@@ -12,6 +12,7 @@ import { createVideoJoiner } from '../src/video.js';
 
 // Stands in for ffmpeg: a "video" says how long it is ("take: <label> <seconds>s"), and joining
 // writes them one after another. `hold(t)` makes joining wait until released, `failNext` fails it.
+// Takes come as {file, answerStart, cues, words}.
 let gate = null;
 let failNext = false;
 const hold = (t) => {
@@ -26,17 +27,17 @@ const hold = (t) => {
 };
 const joins = [];
 const fakeJoiner = {
-  async join(files, out) {
+  async join(takes, out) {
     await gate;
     if (failNext) {
       failNext = false;
       writeFileSync(out, 'half a video'); // a failed join mustn't leave this behind
       throw new Error('ffmpeg exited with code 1');
     }
-    const takes = files.map((f) => readFileSync(f, 'utf8'));
-    joins.push(takes);
-    writeFileSync(out, takes.join('\n'));
-    return takes.map((t) => Number(/ ([\d.]+)s$/.exec(t)[1]));
+    const videos = takes.map((t) => readFileSync(t.file, 'utf8'));
+    joins.push(videos);
+    writeFileSync(out, videos.join('\n'));
+    return { durations: videos.map((v) => Number(/ ([\d.]+)s$/.exec(v)[1])), captioned: videos.map(() => false) };
   },
 };
 
@@ -136,7 +137,7 @@ test('publishing joins the answers into one public video, in the published order
   const { video } = await reader('GET', `/api/office-hours/${ohId}`);
   assert.equal(video.status, 'ready');
   assert.match(video.src, /^\/media\/[0-9a-f]{32}\.mp4$/);
-  assert.deepEqual(video.chapters, [{ questionId: ids[2], start: 0, end: 4 }, { questionId: ids[0], start: 4, end: 11.5 }]);
+  assert.deepEqual(video.chapters, [{ questionId: ids[2], start: 0, end: 4, captions: false }, { questionId: ids[0], start: 4, end: 11.5, captions: false }]);
   assert.deepEqual((await reader('GET', `/api/office-hours/${ohId}/video`)).video, video);
   // Anyone can watch it, like the published answers.
   const res = await reader.media(video.src);
@@ -176,7 +177,7 @@ test('on startup, office hours published before joining existed, or mid-join, ar
     await resumed.idle();
     const rows = oldDb.prepare('SELECT id, video, video_status, video_chapters FROM office_hours ORDER BY id').all();
     assert.equal(rows[0].video_status, 'ready');
-    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9]]);
+    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9, 0]]);
     assert.ok(existsSync(join(dir, rows[0].video)));
     assert.equal(rows[1].video_status, null);
   } finally {
@@ -217,13 +218,152 @@ test('ffmpeg joins takes of different formats, sizes and frame rates', { skip: !
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=360x640:rate=25:duration=1', '-c:v', 'libx264', join(dir, 'c.mp4'));
     const joiner = createVideoJoiner();
     const out = join(dir, 'joined.mp4');
-    const durations = await joiner.join(['a.webm', 'b.mp4', 'c.mp4'].map((f) => join(dir, f)), out);
+    const { durations, captioned } = await joiner.join(['a.webm', 'b.mp4', 'c.mp4'].map((f) => join(dir, f)), out);
+    assert.deepEqual(captioned, [false, false, false]);
     assert.equal(durations.length, 3);
     [2, 1.5, 1].forEach((secs, i) => assert.ok(Math.abs(durations[i] - secs) < 0.1, `part ${i}: ${durations[i]}s`));
     const total = Number(probe(out, 'format=duration'));
     assert.ok(Math.abs(total - durations.reduce((a, b) => a + b)) < 0.1, `joined: ${total}s`);
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     assert.deepEqual(readdirSync(dir).sort(), ['a.webm', 'b.mp4', 'c.mp4', 'joined.mp4']); // nothing left over
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A joiner that finishes takes, as with src/finish: it records what it's given, and its captions
+// are burned in for every take with a transcript. `gate` holds it until released.
+function finishingJoiner() {
+  const joiner = {
+    calls: [],
+    gate: null,
+    finishing: true,
+    async join(takes, out) {
+      await joiner.gate;
+      joiner.calls.push(takes.map(({ file, ...rest }) => ({ video: readFileSync(file, 'utf8'), ...rest })));
+      writeFileSync(out, `finished, version ${joiner.calls.length}`);
+      return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)) };
+    },
+  };
+  return joiner;
+}
+
+async function finishingApp(t) {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_finish_'));
+  const fdb = openDb(':memory:');
+  const joiner = finishingJoiner();
+  const fapp = createApp({ db: fdb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, joiner });
+  const srv = createServer(fapp);
+  await new Promise((resolve) => srv.listen(0, resolve));
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { db: fdb, app: fapp, joiner, dir, base: () => `http://localhost:${srv.address().port}` };
+}
+
+const answerVideo = (fdb, id) => fdb.prepare('SELECT answer_video FROM questions WHERE id = ?').get(id).answer_video;
+const setTranscript = (fdb, media, status, cues = null, words = null) =>
+  fdb
+    .prepare(
+      `INSERT INTO transcripts (media, status, text, cues, words, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (media) DO UPDATE SET status = excluded.status, text = excluded.text, cues = excluded.cues, words = excluded.words`,
+    )
+    .run(media, status, cues ? cues.map((c) => c[2]).join(' ') : null, cues && JSON.stringify(cues), words && JSON.stringify(words), new Date().toISOString());
+
+test('finished joins wait for transcripts being made, and their chapters say which captions are burned in', async (t) => {
+  const f = await finishingApp(t);
+  const expert = await register('finish_host', f.base);
+  const asker = await register('finish_asker', f.base);
+  const { officeHour } = await expert('POST', '/api/office-hours', { title: 'Finishing', questionsDeadline: inDays(1), answersExpectedAt: inDays(2) });
+  const ids = [];
+  for (const body of ['Will this be captioned?', 'And this one?']) {
+    const { question } = await asker('POST', `/api/office-hours/${officeHour.id}/questions`, { body });
+    assert.equal((await expert('PUT', `/api/questions/${question.id}/video?answerStart=1.5`, take(body, 5))).status, 200);
+    ids.push(question.id);
+  }
+  await expert('PUT', `/api/office-hours/${officeHour.id}/plan`, { items: ids.map((questionId) => ({ questionId })) });
+  // The first answer's transcript is still being made; the second never got one.
+  const cues = [[0, 1.4, 'Will this be captioned?'], [1.6, 4, 'Yes, it will.']];
+  const words = [[0, 0.3, ' Will'], [0.3, 0.5, ' this'], [0.5, 0.7, ' be'], [0.7, 1.4, ' captioned?'], [1.6, 2, ' Yes,'], [2, 2.4, ' it'], [2.4, 4, ' will.']];
+  setTranscript(f.db, answerVideo(f.db, ids[0]), 'pending');
+  await expert('POST', `/api/office-hours/${officeHour.id}/publish`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(f.joiner.calls.length, 0); // waiting for it
+  setTranscript(f.db, answerVideo(f.db, ids[0]), 'ready', cues, words);
+  await f.app.idle();
+
+  assert.equal(f.joiner.calls.length, 1);
+  const [first, second] = f.joiner.calls[0];
+  assert.deepEqual([first.video, first.answerStart, first.cues, first.words], ['take: Will this be captioned? 5s', 1.5, cues, words]);
+  assert.deepEqual([second.video, second.cues], ['take: And this one? 5s', undefined]);
+  const { video } = await asker('GET', `/api/office-hours/${officeHour.id}`);
+  assert.equal(video.status, 'ready');
+  assert.deepEqual(video.chapters, [{ questionId: ids[0], start: 0, end: 5, captions: true }, { questionId: ids[1], start: 5, end: 10, captions: false }]);
+});
+
+test('correcting a published transcript remakes a finished video, and readers keep the old one until then', async (t) => {
+  const f = await finishingApp(t);
+  const expert = await register('remake_host', f.base);
+  const asker = await register('remake_asker', f.base);
+  const reader = client(f.base);
+  const { ohId, ids } = await recorded(expert, asker, [['Does a fix reach the captions?', 5]]);
+  setTranscript(f.db, answerVideo(f.db, ids[0]), 'ready', [[0, 2, 'Does a fix reach the captions?'], [2, 4, 'It does, eventualy.']]);
+  await expert('POST', `/api/office-hours/${ohId}/publish`);
+  await f.app.idle();
+  const before = (await reader('GET', `/api/office-hours/${ohId}`)).video.src;
+  const oldFile = join(f.dir, before.split('/').pop());
+  assert.ok(existsSync(oldFile));
+
+  let release;
+  f.joiner.gate = new Promise((resolve) => (release = resolve));
+  t.after(() => release());
+  const lines = ['Does a fix reach the captions?', 'It does, eventually.'];
+  assert.equal((await expert('PUT', `/api/questions/${ids[0]}/answer-transcript`, { cues: lines })).status, 200);
+  await expert('PUT', `/api/questions/${ids[0]}/answer-transcript`, { cues: lines }); // nothing changed: no second remake
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  let page = await reader('GET', `/api/office-hours/${ohId}`);
+  assert.deepEqual([page.video.status, page.video.src], ['ready', before]); // the remake is under way
+  release();
+  await f.app.idle();
+
+  assert.equal(f.joiner.calls.length, 2);
+  assert.deepEqual(f.joiner.calls[1][0].cues, [[0, 2, 'Does a fix reach the captions?'], [2, 4, 'It does, eventually.']]);
+  page = await reader('GET', `/api/office-hours/${ohId}`);
+  assert.notEqual(page.video.src, before);
+  assert.equal(await (await reader.media(page.video.src)).text(), 'finished, version 2');
+  assert.ok(!existsSync(oldFile)); // replaced
+});
+
+test('a joiner with a finisher joins the finished parts, or the takes as recorded if finishing fails', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_finisher_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+  try {
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=440:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=1', '-f', 'lavfi', '-i', 'sine=f=660:duration=1', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'b.mp4'));
+    const takes = [{ file: join(dir, 'a.mp4'), answerStart: 0.5, cues: [[0, 1, 'Hello there.']], words: null }, { file: join(dir, 'b.mp4') }];
+    // Stands in for src/finish: renders each take at 1080p, as the real one does.
+    let given = null;
+    const finisher = {
+      async finish(jobs) {
+        given = jobs;
+        for (const job of jobs) ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.output);
+        return {};
+      },
+    };
+    const finished = await createVideoJoiner({ finisher }).join(takes, join(dir, 'finished.mp4'));
+    assert.deepEqual(given.map((j) => [j.answer_start, j.cues]), [[0.5, [[0, 1, 'Hello there.']]], [null, null]]);
+    assert.deepEqual(finished.captioned, [true, false]);
+    assert.deepEqual(probe(join(dir, 'finished.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1920,1080']);
+    assert.ok(Math.abs(Number(probe(join(dir, 'finished.mp4'), 'format=duration')) - 3) < 0.1);
+
+    const logs = [];
+    const failing = { finish: async () => Promise.reject(new Error('the models could not be downloaded')) };
+    const plain = await createVideoJoiner({ finisher: failing, log: (msg) => logs.push(msg) }).join(takes, join(dir, 'plain.mp4'));
+    assert.deepEqual(plain.captioned, [false, false]); // the player draws them instead
+    assert.deepEqual(probe(join(dir, 'plain.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
+    assert.match(logs.join('\n'), /finishing failed, so the takes are joined as recorded: the models could not be downloaded/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

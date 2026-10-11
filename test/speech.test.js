@@ -316,7 +316,10 @@ test('on startup, unfinished and never-done speech work is picked up', async () 
     const q = oldDb.prepare('SELECT audio, audio_status FROM questions WHERE id = 1').get();
     assert.equal(q.audio_status, 'ready');
     assert.equal(readFileSync(join(dir, q.audio), 'utf8'), 'spoken: An old question?');
-    assert.equal(oldDb.prepare('SELECT text FROM transcripts').get().text, 'An old answer.');
+    const transcript = oldDb.prepare('SELECT text, words FROM transcripts').get();
+    assert.equal(transcript.text, 'An old answer.');
+    // Word timings are kept too, for captions burned into a finished video.
+    assert.deepEqual(JSON.parse(transcript.words), [[0, 0.4, ' An'], [0.5, 0.9, ' old'], [1, 1.4, ' answer.']]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

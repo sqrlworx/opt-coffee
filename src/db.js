@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   published_at        TEXT,
   video               TEXT,                 -- the published answers joined into one video (file in the media dir)
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
-  video_chapters      TEXT                  -- JSON [[question_id, start, end], ...]: where each answer is in the video, in seconds
+  video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   status     TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),
   text       TEXT,
   cues       TEXT,                            -- JSON [[start, end, text], ...]; served as WebVTT at /media/<media>.vtt
+  words      TEXT,                            -- JSON [[start, end, word], ...] from speech-to-text, for captions timed word by word
   edited_at  TEXT,                            -- last hand correction of the text
   updated_at TEXT NOT NULL
 );
@@ -145,6 +146,7 @@ function migrate(db) {
   }
   const transcriptColumns = new Set(db.prepare('PRAGMA table_info(transcripts)').all().map((c) => c.name));
   if (!transcriptColumns.has('edited_at')) db.exec('ALTER TABLE transcripts ADD COLUMN edited_at TEXT');
+  if (!transcriptColumns.has('words')) db.exec('ALTER TABLE transcripts ADD COLUMN words TEXT');
 }
 
 export function transaction(db, fn) {

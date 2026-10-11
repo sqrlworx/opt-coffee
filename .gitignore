@@ -2,3 +2,5 @@ node_modules/
 forum.db
 forum.db-*
 media/
+__pycache__/
+.env
