@@ -149,7 +149,7 @@ textarea { resize: vertical; }
 .cue-edit { display: flex; align-items: center; gap: 8px; }
 .cue-edit input { padding: 5px 8px; font-size: 0.92rem; }
 .cue-time { width: 40px; flex-shrink: 0; font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-.play-btn { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-left: 2px; vertical-align: -4px; border: 1px solid var(--line); border-radius: 50%; background: var(--card); color: var(--accent); font-size: 0.6rem; cursor: pointer; }
+.play-btn { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-left: 2px; vertical-align: middle; border: 1px solid var(--line); border-radius: 50%; background: var(--card); color: var(--accent); font-size: 0.6rem; cursor: pointer; }
 .play-face, .play-face .icon { display: contents; }
 .play-btn svg { width: 12px; height: 12px; }
 .play-btn:hover, .play-btn.playing { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }

@@ -492,20 +492,15 @@ function watchQuestion(id, el, done, then) {
 }
 
 // Transcript cues as text that follows playback: the cue being spoken is highlighted, and
-// clicking a cue plays from there. `media` can be a list of recordings of the same speech (a
-// question asked on camera, and its sound); the text follows whichever plays, and clicking plays
-// the first.
+// clicking a cue plays from there.
 function syncedCues(media, cues, cls) {
-  const [first, ...more] = [media].flat();
   const spans = cues.map(([start, , text]) =>
-    h('span', { class: 'cue', title: `Play from ${fmtDuration(start)}`, onclick: () => ((first.currentTime = start), first.play().catch(() => {})) }, text),
+    h('span', { class: 'cue', title: `Play from ${fmtDuration(start)}`, onclick: () => ((media.currentTime = start), media.play().catch(() => {})) }, text),
   );
-  for (const m of [first, ...more]) {
-    m.addEventListener('timeupdate', () => {
-      const t = m.currentTime;
-      cues.forEach(([start, end], i) => spans[i].classList.toggle('active', t >= start && t < end));
-    });
-  }
+  media.addEventListener('timeupdate', () => {
+    const t = media.currentTime;
+    cues.forEach(([start, end], i) => spans[i].classList.toggle('active', t >= start && t < end));
+  });
   return h('p', { class: cls }, spans.flatMap((span, i) => (i ? [' ', span] : [span])));
 }
 
@@ -573,8 +568,8 @@ function playButton(q, media) {
 
 // A question's text, with a play button once there's audio (a typed question's is read aloud in
 // the background, so a pending one is watched). A spoken question's text is its transcript,
-// which follows along as the recording plays. One asked on camera has a second button that plays
-// its video, shown under the text while it plays.
+// which follows along as the recording plays. One asked on camera plays its video instead (it
+// has the sound too), shown under the text while it plays.
 function questionText(q) {
   if (!q.audio) {
     const body = h('p', { class: 'q-body' }, q.body);
@@ -586,16 +581,12 @@ function questionText(q) {
     }
     return body;
   }
-  const audio = h('audio', { src: q.audio, preload: 'none' });
   const video = q.askerVideo ? h('video', { class: 'q-video', src: q.askerVideo, preload: 'none', playsinline: true, hidden: true }) : null;
+  const media = video ?? h('audio', { src: q.audio, preload: 'none' });
   const cues = q.audioTranscript?.cues;
-  const body = cues?.length ? syncedCues([audio, video].filter(Boolean), cues, 'q-body') : h('p', { class: 'q-body' }, q.body);
-  body.append(' ', playButton(q, audio));
+  const body = cues?.length ? syncedCues(media, cues, 'q-body') : h('p', { class: 'q-body' }, q.body);
+  body.append(' ', playButton(q, media));
   if (!video) return body;
-  body.append(' ', playButton(q, video));
-  // One at a time: they're the same question.
-  audio.addEventListener('play', () => video.pause());
-  video.addEventListener('play', () => audio.pause());
   // Shown once it has a picture: on a slow connection it would be an empty black box until then.
   video.addEventListener('playing', () => (video.hidden = false));
   video.addEventListener('pause', () => (video.hidden = true));
