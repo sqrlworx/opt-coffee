@@ -18,7 +18,7 @@ const MAX_QUESTION_VIDEO = 60_000_000; // so is one asked on camera
 const MAX_SPOKEN_QUESTION = 2000; // characters of transcript; people say more than they'd type
 const MAX_ANSWER_START = 600; // seconds; a take is capped at 10 minutes in the browser
 const MIME = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp',
   '.webm': 'video/webm', '.mp4': 'video/mp4', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.vtt': 'text/vtt; charset=utf-8',
 };
 // What MediaRecorder produces: WebM in Chrome/Firefox, MP4 in Safari (and newer Chrome), Ogg in Firefox.
@@ -179,6 +179,8 @@ function questionView(db, q, viewer) {
     // Asked on camera: the asker's video. Its sound is `audio`, and the transcript is of that.
     askerVideo: mediaUrl(q.asker_video),
     audioTranscript,
+    // How the mouth moves saying `audio`, for the jolly that says the question in the joined video.
+    lipSync: q.lip_sync ? `/api/questions/${q.id}/lip-sync` : null,
     planPosition: q.plan_position,
     answerVideo: mediaUrl(q.answer_video),
     answerStart: q.answer_start,
@@ -616,7 +618,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         if (oh.expert_id !== user.id) subscribe(user.id, 'office_hour', oh.id);
         return Number(lastInsertRowid);
       });
-      if (!recording) speechJobs?.speak(id);
+      // A typed question is read aloud, with its lip sync; a spoken one gets its recording's.
+      if (recording) speechJobs?.lipSync(id);
+      else speechJobs?.speak(id);
       return { question: stripPrivate(loadQuestions(db, oh.id, user).find((q) => q.id === id)) };
     },
     { auth: true },
@@ -666,7 +670,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         if (text.length > MAX_SPOKEN_QUESTION) throw new HttpError(400, 'That question is too long. Please keep it shorter.');
         const cues = cuesFromWords(heard.words);
         transaction(db, () => {
-          db.prepare("INSERT INTO transcripts (media, status, text, cues, updated_at) VALUES (?, 'ready', ?, ?, ?)").run(name, text, JSON.stringify(cues), now());
+          db.prepare("INSERT INTO transcripts (media, status, text, cues, words, updated_at) VALUES (?, 'ready', ?, ?, ?, ?)").run(name, text, JSON.stringify(cues), JSON.stringify(heard.words), now());
           db.prepare('INSERT INTO recordings (media, video, user_id, office_hour_id, created_at) VALUES (?, ?, ?, ?, ?)').run(name, video, user.id, oh.id, now());
         });
         return { recording: { id: name, text, cues } };
@@ -715,6 +719,13 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     const q = loadQuestions(db, oh.id, user).find((x) => x.id === Number(params.id));
     if (oh.published_at && q.publishedPosition != null && (!processing(oh) || oh.expert_id === user?.id)) return { question: withSummary(publishedAnswer(q)) };
     return { question: oh.expert_id === user?.id ? q : stripPrivate(q) };
+  });
+
+  // A question's lip sync (its `lipSync`), which is as public as its audio.
+  route('GET', '/api/questions/:id/lip-sync', ({ params }) => {
+    const q = db.prepare('SELECT lip_sync FROM questions WHERE id = ?').get(Number(params.id));
+    if (!q?.lip_sync) throw new HttpError(404, 'This question has no lip sync');
+    return { lipSync: JSON.parse(q.lip_sync) };
   });
 
   function setVote(params, user, on) {

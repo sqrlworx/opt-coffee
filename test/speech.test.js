@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { createModerator } from '../src/moderator/index.js';
@@ -13,10 +14,13 @@ import { createSpeech } from '../src/speech/index.js';
 
 // Stands in for Whisper and Kokoro: a "recording" holds the text that was said, and reading
 // text aloud writes a file holding that text. A "video" holds what was said too, which taking its
-// sound out copies, unless it's "[silent]". Records which lane each transcription used.
+// sound out copies, unless it's "[silent]". Records which lane each transcription used. Lip sync
+// has a frame per word: of the text read aloud, or of the words a recording's is made from
+// (recorded in `synced`; without them the recording is transcribed again).
 // `hold(t)` makes background work wait, like a slow engine, until the returned function is called
 // (or test `t` ends, so a failing assertion can't leave the queue stuck).
 const lanes = [];
+const synced = [];
 let gate = null;
 const hold = (t) => {
   let resolve;
@@ -46,6 +50,13 @@ const fakeSpeech = {
     await gate;
     if (text.includes('[mute]')) throw new Error('the text produced no speech');
     writeFileSync(out, `spoken: ${text}`);
+    return { duration: 1, mouth: { fps: 30, frames: text.split(' ').map(() => [0.5, 1, 0.5]) } };
+  },
+  async lipSync(file, words) {
+    await gate;
+    synced.push({ file, words });
+    const heard = words ?? (await this.transcribe(file)).words;
+    return { mouth: { fps: 30, frames: heard.map(() => [0.4, 0.9, 0.3]) } };
   },
 };
 
@@ -154,6 +165,46 @@ test('captions: the question at the start of a take is captioned as it was asked
   assert.deepEqual(takeCaptions(spoken, take, null).cues, take.cues);
 });
 
+// ---------- lip sync ----------
+
+// src/speech/lipsync.py, run with uv in a small environment with just numpy.
+const SPEECH = fileURLToPath(new URL('../src/speech', import.meta.url));
+const noUv = spawnSync('uv', ['--version']).error && 'uv is not installed';
+const lipsync = (code) => {
+  const out = execFileSync('uv', ['run', '--quiet', '--no-project', '--with', 'numpy', 'python', '-c', `import json\nimport numpy as np\nimport lipsync\n${code}`], { cwd: SPEECH, encoding: 'utf8' });
+  return JSON.parse(out.trim().split('\n').at(-1));
+};
+const ms = (secs) => Math.round(secs * 1000) / 1000;
+
+test('lip sync: the mouth opens on vowels and shuts for m, b, p and silence', { skip: noUv }, () => {
+  const { fps, frames } = lipsync(`
+# "ma ma" said from 0.2 to 1 second of 1.4: loud while it's said, silent around it
+rate = 16000
+t = np.arange(int(1.4 * rate)) / rate
+audio = (0.3 * np.sin(2 * np.pi * 220 * t) * ((t > 0.2) & (t < 1.0))).astype(np.float32)
+phones = [('m', 0.2, 0.3), ('ɑ', 0.3, 0.6), ('m', 0.6, 0.7), ('ɑ', 0.7, 1.0)]
+print(json.dumps(lipsync.track(phones, audio, rate)))
+`);
+  assert.equal(fps, 30);
+  assert.equal(frames.length, 42);
+  const at = (secs) => frames[Math.floor(secs * fps)];
+  assert.deepEqual(at(0.05), [0, 1, at(0.05)[2]]); // silence: shut, at rest
+  assert.ok(at(0.45)[0] > 0.6); // "a"
+  assert.ok(frames.slice(17, 21).some(([open]) => open === 0)); // the second "m" shuts it, between the vowels
+  assert.equal(at(1.3)[0], 0);
+  assert.ok(at(0.45)[2] > at(0.05)[2] + 0.3); // there's more energy while it's said
+});
+
+test('lip sync: phonemes are timed by Kokoro, or spread over the words heard', { skip: noUv }, () => {
+  // Kokoro's durations count 600-sample frames at 24 kHz, after a start token; symbols it doesn't know are dropped.
+  const kokoro = lipsync(`print(json.dumps(lipsync.kokoro_phones('h☃i', [5, 2, 4, 1], {'h', 'i'}, 1.0)))`);
+  assert.deepEqual(kokoro.map(([p, start, end]) => [p, ms(start), ms(end)]), [['h', 1.05, 1.1], ['i', 1.1, 1.2]]);
+  // A word's vowels take twice as long as its consonants. Punctuation says nothing, but a word
+  // with no phonemes (unknown to the G2P) still opens the mouth.
+  const words = lipsync(`print(json.dumps(lipsync.word_phones([(0.0, 0.3, 'hˈu'), (0.5, 0.8, '...'), (1.0, 1.2, '')])))`);
+  assert.deepEqual(words.map(([p, start, end]) => [p, ms(start), ms(end)]), [['h', 0, 0.1], ['u', 0.1, 0.3], ['ə', 1, 1.2]]);
+});
+
 // ---------- asking ----------
 
 test('asking out loud: the transcript becomes the question, with public audio and captions', async () => {
@@ -260,10 +311,28 @@ test('asking on camera: the video goes with the question, and its sound is the r
   assert.equal(answer.askerVideo, q.askerVideo);
   assert.equal(answer.audio, q.audio);
   assert.notEqual(answer.video, q.askerVideo);
+  // The jolly says it until the video has a frame to show.
+  assert.equal(answer.lipSync, `/api/questions/${q.id}/lip-sync`);
 
   // MP4 works too.
   const mp4 = await askOutLoud(asker, await officeHour(expert), said('And from Safari?'), { type: 'video/mp4' });
   assert.match(mp4.question.askerVideo, /\.mp4$/);
+});
+
+test('a spoken question gets the lip sync of its recording, from the words heard when it was recorded', async () => {
+  const expert = await register('lips_expert');
+  const asker = await register('lips_asker');
+  const ohId = await officeHour(expert);
+  const { question: q } = await askOutLoud(asker, ohId, said('Does the jolly move its lips?'));
+  assert.equal(q.lipSync, null); // it's made in the background
+  await app.idle();
+  const heard = [[0, 0.4, ' Does'], [0.5, 0.9, ' the'], [1, 1.4, ' jolly'], [1.5, 1.9, ' move'], [2, 2.4, ' its'], [2.5, 2.9, ' lips?']];
+  assert.deepEqual(synced.at(-1), { file: join(mediaDir, q.audio.slice('/media/'.length)), words: heard });
+  assert.ok(!lanes.some((l) => l.said === q.body && !l.interactive)); // not transcribed again
+  const { question } = await client()('GET', `/api/questions/${q.id}`);
+  assert.equal(question.lipSync, `/api/questions/${q.id}/lip-sync`);
+  assert.equal((await client()('GET', question.lipSync)).lipSync.frames.length, heard.length);
+  assert.equal((await client()('GET', '/api/questions/99999/lip-sync')).status, 404);
 });
 
 test('asking on camera: a video without sound is refused; discarding one deletes the video too', async () => {
@@ -337,6 +406,10 @@ test('typed questions and moderator seeds are read aloud in the background', asy
   const audio = await stranger.media(read.audio);
   assert.equal(audio.headers.get('content-type'), 'audio/mp4');
   assert.equal(await audio.text(), 'spoken: What is your favorite index type?');
+  // Reading it aloud gave its lip sync too, which anyone can fetch.
+  assert.equal(read.lipSync, `/api/questions/${question.id}/lip-sync`);
+  assert.deepEqual((await stranger('GET', read.lipSync)).lipSync, { fps: 30, frames: Array(6).fill([0.5, 1, 0.5]) });
+  assert.equal((await stranger('GET', `/api/questions/${muted.id}/lip-sync`)).status, 404);
   const seed = (await stranger('GET', `/api/office-hours/${ohId}`)).groups.flatMap((g) => g.questions).find((q) => q.source === 'moderator');
   assert.equal(seed.audioStatus, 'ready');
   // A failure is reported, and leaves no file behind.
@@ -419,22 +492,31 @@ test('on startup, unfinished and never-done speech work is picked up', async () 
   const dir = mkdtempSync(join(tmpdir(), 'forum_speech_resume_'));
   try {
     const oldDb = openDb(':memory:');
-    // Data from before speech existed: a typed question with no audio, an answer video with no transcript.
+    // Data from before speech existed: a typed question with no audio, an answer video with no
+    // transcript. And from before lip sync: a spoken question, transcribed without word timings.
+    const spoken = `${'b'.repeat(32)}.weba`;
     oldDb.exec(`
       INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (1, 'old', 'Old', 'x', '2026-01-01');
       INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at) VALUES (1, 1, 'Old', '2026-01-02', '2026-01-03', '2026-01-01');
       INSERT INTO questions (id, office_hour_id, author_id, body, created_at, answer_video) VALUES (1, 1, 1, 'An old question?', '2026-01-01', '${'a'.repeat(32)}.webm');
+      INSERT INTO questions (id, office_hour_id, author_id, body, asked_with, audio, audio_status, created_at) VALUES (2, 1, 1, 'Spoken long ago?', 'audio', '${spoken}', 'ready', '2026-01-01');
+      INSERT INTO transcripts (media, status, text, cues, updated_at) VALUES ('${spoken}', 'ready', 'Spoken long ago?', '[[0, 1.4, "Spoken long ago?"]]', '2026-01-01');
     `);
     writeFileSync(join(dir, `${'a'.repeat(32)}.webm`), said('An old answer.'));
+    writeFileSync(join(dir, spoken), said('Spoken long ago?'));
     const resumed = createApp({ db: oldDb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, speech: fakeSpeech });
     await resumed.idle();
-    const q = oldDb.prepare('SELECT audio, audio_status FROM questions WHERE id = 1').get();
+    const q = oldDb.prepare('SELECT audio, audio_status, lip_sync FROM questions WHERE id = 1').get();
     assert.equal(q.audio_status, 'ready');
     assert.equal(readFileSync(join(dir, q.audio), 'utf8'), 'spoken: An old question?');
-    const transcript = oldDb.prepare('SELECT text, words FROM transcripts').get();
+    assert.equal(JSON.parse(q.lip_sync).frames.length, 3);
+    const transcript = oldDb.prepare('SELECT text, words FROM transcripts WHERE media = ?').get(`${'a'.repeat(32)}.webm`);
     assert.equal(transcript.text, 'An old answer.');
     // Word timings are kept too, for captions burned into a finished video.
     assert.deepEqual(JSON.parse(transcript.words), [[0, 0.4, ' An'], [0.5, 0.9, ' old'], [1, 1.4, ' answer.']]);
+    // The spoken question is transcribed again for its words, which time its lip sync.
+    assert.deepEqual(synced.at(-1), { file: join(dir, spoken), words: null });
+    assert.equal(JSON.parse(oldDb.prepare('SELECT lip_sync FROM questions WHERE id = 2').get().lip_sync).frames.length, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

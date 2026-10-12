@@ -27,13 +27,16 @@ stdin/stdout, one JSON object per line:
     {"id": 1, "op": "transcribe", "file": "media/a.weba"}
         -> {"id": 1, "ok": true, "text": "...", "words": [[start, end, " word"], ...]}
     {"id": 2, "op": "speak", "text": "...", "out": "media/b.m4a"}
-        -> {"id": 2, "ok": true, "duration": 3.2}
-    {"id": 3, "op": "load", "models": ["whisper", "kokoro"]}
-        -> {"id": 3, "ok": true}
+        -> {"id": 2, "ok": true, "duration": 3.2, "mouth": {"fps": 30, "frames": [[open, width, energy], ...]}}
+    {"id": 3, "op": "lipsync", "file": "media/a.weba", "words": [[start, end, " word"], ...] or null}
+        -> {"id": 3, "ok": true, "mouth": {...}}
+    {"id": 4, "op": "load", "models": ["whisper", "kokoro"]}
+        -> {"id": 4, "ok": true}
     any failure -> {"id": n, "ok": false, "error": "..."}
 
-Speech-to-text is faster-whisper; text-to-speech is Kokoro-82M. Models load on first use and
-stay loaded. Requests are handled one at a time. Logs go to stderr.
+Speech-to-text is faster-whisper; text-to-speech is Kokoro-82M. `mouth` is the speech's lip
+sync (see lipsync.py). Models load on first use and stay loaded. Requests are handled one at a
+time. Logs go to stderr.
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ import sys
 import warnings
 
 SAMPLE_RATE = 24000  # Kokoro's output rate
+WHISPER_RATE = 16000
 
 
 class Engines:
@@ -79,22 +83,8 @@ class Engines:
         return self._kokoro
 
     def transcribe(self, file: str) -> dict:
-        import numpy as np
-
-        # Decode with ffmpeg rather than faster-whisper's PyAV path, which breaks across PyAV
-        # releases. Whisper wants 16 kHz mono.
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", file,
-            "-vn", "-f", "f32le", "-ac", "1", "-ar", "16000", "-",
-        ]  # fmt: skip
-        result = subprocess.run(cmd, capture_output=True, check=False)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"couldn't decode the recording: {result.stderr.decode(errors='replace').strip()}"
-            )
-        audio = np.frombuffer(result.stdout, np.float32)
         segments, _ = self.whisper().transcribe(
-            audio, beam_size=5, word_timestamps=True, vad_filter=True
+            decode(file), beam_size=5, word_timestamps=True, vad_filter=True
         )
         text, words = [], []
         for seg in segments:
@@ -104,14 +94,32 @@ class Engines:
             ]
         return {"text": "".join(text).strip(), "words": words}
 
+    def lip_sync(self, file: str, words: list | None) -> dict:
+        """A recording's lip sync, from its words as transcribed (transcribed again if not given)."""
+        import lipsync
+
+        if not words:
+            words = self.transcribe(file)["words"]
+        g2p = self.kokoro().g2p
+        phones = lipsync.word_phones(
+            [(start, end, g2p(w.strip())[0]) for start, end, w in words if w.strip()]
+        )
+        return {"mouth": lipsync.track(phones, decode(file), WHISPER_RATE)}
+
     def speak(self, text: str, out: str) -> dict:
+        import lipsync
         import numpy as np
 
-        chunks = [
-            r.audio.numpy()
-            for r in self.kokoro()(text, voice=self.voice)
-            if r.audio is not None
-        ]
+        pipeline = self.kokoro()
+        chunks, phones, offset = [], [], 0.0
+        for r in pipeline(text, voice=self.voice):
+            if r.audio is None:
+                continue
+            phones += lipsync.kokoro_phones(
+                r.phonemes, r.pred_dur.tolist(), pipeline.model.vocab, offset
+            )
+            chunks.append(r.audio.numpy())
+            offset += len(chunks[-1]) / SAMPLE_RATE
         if not chunks:
             raise ValueError("the text produced no speech")
         audio = np.concatenate(chunks).astype(np.float32)
@@ -130,7 +138,29 @@ class Engines:
                 f"ffmpeg failed: {result.stderr.decode(errors='replace').strip()}"
             )
         os.replace(part, out)
-        return {"duration": round(len(audio) / SAMPLE_RATE, 2)}
+        return {
+            "duration": round(len(audio) / SAMPLE_RATE, 2),
+            "mouth": lipsync.track(phones, audio, SAMPLE_RATE),
+        }
+
+
+def decode(file: str):
+    """A recording as 16 kHz mono samples, as Whisper wants it.
+
+    Decoded with ffmpeg rather than faster-whisper's PyAV path, which breaks across PyAV releases.
+    """
+    import numpy as np
+
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", file,
+        "-vn", "-f", "f32le", "-ac", "1", "-ar", str(WHISPER_RATE), "-",
+    ]  # fmt: skip
+    result = subprocess.run(cmd, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"couldn't decode the recording: {result.stderr.decode(errors='replace').strip()}"
+        )
+    return np.frombuffer(result.stdout, np.float32)
 
 
 def log(msg: str):
@@ -160,6 +190,8 @@ def main():
                 reply = engines.transcribe(req["file"])
             elif op == "speak":
                 reply = engines.speak(req["text"], req["out"])
+            elif op == "lipsync":
+                reply = engines.lip_sync(req["file"], req.get("words"))
             elif op == "load":
                 for name in req.get("models", []):
                     getattr(engines, name)()

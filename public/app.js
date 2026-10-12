@@ -616,13 +616,6 @@ function qaList(answers, videos) {
 const askedBy = (q) => (q.source === 'moderator' ? 'suggested by the moderator' : q.anonymous ? 'anonymous' : q.author?.displayName);
 // Who's asking, over the video while a question is played.
 const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`);
-// Their initials, shown in place of their video when there isn't one.
-const askerInitials = (q) =>
-  q.source === 'moderator'
-    ? '✦'
-    : q.anonymous || !q.author
-      ? '?'
-      : q.author.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((word) => [...word][0].toUpperCase()).join('');
 
 // The whole Q&A as text, to read straight through: each question, then the transcript of its answer.
 // `onChange(q)` hears when an answer's transcript becomes ready or is corrected. `collapsed` folds
@@ -700,14 +693,156 @@ function icon(name) {
   return el;
 }
 
+// The Muse jolly, which says a question nobody asked on camera. jolly.webp is the jolly with its
+// eyes and mouth painted out; they're drawn here instead, so it can blink and talk. Coordinates
+// are in that picture's pixels.
+const JOLLY = {
+  src: '/jolly.webp',
+  view: [70, 73, 660, 495], // the part shown (x, y, width, height); the rest leaves room to sway
+  pivot: [400, 1178], // its feet, below the picture: it sways and bounces on them
+  ink: '#1a1714',
+  // shine: the highlight's centre, radii and angle
+  eyes: [
+    { at: [286.3, 284], r: [22.9, 24.2], shine: [298.8, 272.8, 5.3, 3.2, 0.96] },
+    { at: [514.3, 283.7], r: [22.5, 23.8], shine: [524.1, 272, 6.7, 3.9, 0.84] },
+  ],
+  mouth: { at: [402.6, 340.4], halfWidth: 33, sag: 13, jaw: 28, line: 6.5 }, // at: the bottom of its smile
+};
+
+// The jolly on a canvas. `draw(pose, blink, t)` shows it with a pose from a question's lip sync,
+// [open, width, energy] (see src/speech/lipsync.py), its eyes `blink` (0-1) shut, `t` seconds
+// into the question, which sets its idle sway.
+function jolly() {
+  const canvas = h('canvas', { class: 'jp-jolly' });
+  const ctx = canvas.getContext('2d');
+  const image = new Image();
+  let last = null;
+  image.onload = () => last && draw(...last);
+  image.src = JOLLY.src;
+
+  function eye({ at: [x, y], r: [rx, ry], shine: [sx, sy, srx, sry, angle] }, blink) {
+    // It blinks by squashing, as the lid comes down.
+    const squash = 1 - 0.9 * blink;
+    ctx.save();
+    ctx.translate(x, y + 0.45 * ry * (1 - squash));
+    ctx.scale(1, squash);
+    ctx.fillStyle = JOLLY.ink;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, 2 * Math.PI);
+    ctx.fill();
+    if (blink < 0.6) {
+      ctx.globalAlpha = 1 - blink / 0.6;
+      ctx.translate(sx - x, sy - y);
+      ctx.rotate(angle);
+      ctx.scale(srx, sry);
+      const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      glow.addColorStop(0, 'rgba(226, 220, 209, 0.95)');
+      glow.addColorStop(0.6, 'rgba(226, 220, 209, 0.9)');
+      glow.addColorStop(1, 'rgba(226, 220, 209, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, 1, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function mouth(open, width) {
+    const { at: [mx, my], halfWidth, sag, jaw, line } = JOLLY.mouth;
+    const hw = halfWidth * width;
+    const depth = jaw * open;
+    const top = my - 0.12 * depth; // the upper lip lifts a little
+    const bottom = my + depth;
+    // Narrow shapes (oh, oo) are round, with the corners halfway down the opening; wide ones keep
+    // the smile, flattening as the jaw drops.
+    const round = Math.min(1, Math.max(0, (0.85 - width) / 0.4)) * Math.min(1, 4 * open);
+    const smile = my - sag * width * (1 - 0.5 * open);
+    const corner = smile + ((top + bottom) / 2 - smile) * round;
+    // A lip from one corner to the other through `y` in the middle: a parabola, or boxier with `box`.
+    const lip = (path, from, to, y, box) => {
+      const reach = ((to - from) * (1 - box)) / 3;
+      const control = (4 * y - corner) / 3;
+      path.bezierCurveTo(from + reach, control, to - reach, control, to, corner);
+    };
+    const path = new Path2D();
+    path.moveTo(mx - hw, corner);
+    lip(path, mx - hw, mx + hw, top, round);
+    ctx.lineWidth = line;
+    ctx.lineCap = ctx.lineJoin = 'round';
+    ctx.strokeStyle = JOLLY.ink;
+    if (depth < 0.5) return ctx.stroke(path);
+    lip(path, mx + hw, mx - hw, bottom, 0.35 + 0.65 * round);
+    path.closePath();
+    ctx.save();
+    ctx.clip(path);
+    const inside = ctx.createLinearGradient(0, top, 0, bottom);
+    inside.addColorStop(0, '#2a0f10');
+    inside.addColorStop(1, '#5e2328');
+    ctx.fillStyle = inside;
+    ctx.fillRect(mx - hw - line, Math.min(corner, top) - line, 2 * (hw + line), bottom - Math.min(corner, top) + 2 * line);
+    ctx.fillStyle = '#d9737f'; // the tongue, behind the lower lip
+    ctx.beginPath();
+    ctx.ellipse(mx, bottom, 0.55 * hw, Math.min(0.42 * depth, 10), 0, 0, 2 * Math.PI);
+    ctx.fill();
+    ctx.restore();
+    ctx.stroke(path);
+  }
+
+  function draw(pose, blink, t) {
+    last = [pose, blink, t];
+    const [vx, vy, vw, vh] = JOLLY.view;
+    const w = Math.round(canvas.clientWidth * devicePixelRatio);
+    if (!w || !image.naturalWidth) return;
+    if (canvas.width !== w) {
+      canvas.width = w;
+      canvas.height = Math.round((w * vh) / vw);
+    }
+    const [open, width, energy] = pose;
+    const scale = w / vw;
+    ctx.setTransform(scale, 0, 0, scale, -vx * scale, -vy * scale);
+    // A slow sway and breathing, and it rises a little on the louder parts.
+    const wave = (period, phase = 0) => Math.sin((2 * Math.PI * t) / period + phase);
+    const [px, py] = JOLLY.pivot;
+    const breathe = 0.005 * wave(3.4);
+    ctx.translate(px, py - 1.5 * wave(3.7, 0.9) - 7 * energy);
+    ctx.rotate(((wave(5.3, 0.4) + 0.4 * wave(2.9, 1.7)) * Math.PI) / 180);
+    ctx.scale(1 + breathe - 0.006 * energy, 1 + breathe + 0.012 * energy);
+    ctx.translate(-px, -py);
+    ctx.drawImage(image, 0, 0);
+    for (const e of JOLLY.eyes) eye(e, blink);
+    mouth(open, width);
+  }
+
+  return { el: canvas, draw };
+}
+
+// How far shut the jolly's eyes are `t` seconds into a question: it blinks every 2-5 seconds,
+// at random but the same each time the question with id `seed` plays.
+function blinkAt(seed, t) {
+  let state = seed;
+  const random = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let x = Math.imul(state ^ (state >>> 15), 1 | state);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 2 ** 32;
+  };
+  for (let start = 0.6 + 1.2 * random(); start <= t; start += 2.2 + 2.8 * random()) {
+    const since = t - start;
+    if (since < 0.07) return since / 0.07;
+    if (since < 0.1) return 1;
+    if (since < 0.23) return 1 - (since - 0.1) / 0.13;
+  }
+  return 0;
+}
+
 // The published answers as one video: the takes joined end to end on the server (src/video.js).
 // It has its own controls, so captions and the asker stay on it in fullscreen. Captions are drawn
 // at the bottom, except for answers whose captions are burned into the video (`captions` on their
 // chapter, when the server finished it). While a question is being played, a picture at the top
 // left shows who asked: the asker's video for a question asked on camera, kept in step with the
-// question, and otherwise their initials, pulsing with their voice. `chapters` place each answer
-// in the video; its question's cues and its transcript's are timed from the start of its take.
-// `update(q)` picks up a transcript that's ready or corrected.
+// question, and otherwise the jolly saying it. `chapters` place each answer in the video; its
+// question's cues and its transcript's are timed from the start of its take. `update(q)` picks up
+// a transcript that's ready or corrected.
 function jointPlayer(answers, { src, chapters }) {
   const byId = new Map(answers.map((q) => [q.id, q]));
   const parts = chapters.filter((c) => byId.has(c.questionId)).map((c) => ({ ...c, q: byId.get(c.questionId) }));
@@ -725,9 +860,9 @@ function jointPlayer(answers, { src, chapters }) {
 
   const video = fixDuration(h('video', { class: 'jp-video', src, preload: 'metadata', playsinline: true }), { firstFrame: true });
   const caption = h('span', { class: 'jp-caption', hidden: true });
-  const initials = h('span', { class: 'jp-initials' });
+  const stand = jolly(); // stands in for an asker who wasn't on camera
   const faceSlot = h('span', { class: 'jp-face-slot' });
-  const pip = h('span', { class: 'jp-pip' }, h('span', { class: 'jp-voice' }, h('span', { class: 'jp-ring' }), initials), faceSlot);
+  const pip = h('span', { class: 'jp-pip' }, stand.el, faceSlot);
   const asker = h('span', { class: 'jp-asker' });
   const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, pip, asker);
   const btn = (label, text, onclick) => h('button', { type: 'button', class: 'jp-btn', title: label, 'aria-label': label, onclick }, text);
@@ -775,9 +910,10 @@ function jointPlayer(answers, { src, chapters }) {
     video.play().catch(() => {});
   };
 
-  // The initials pulse with how loud the question is. That means routing the video's sound through
-  // Web Audio, which browsers only allow starting from a click or key press, as play() always is.
-  // If it can't be set up, they just breathe.
+  // Until a question's lip sync has loaded, or if it has none, the jolly's mouth follows how loud
+  // the question is. That means routing the video's sound through Web Audio, which browsers only
+  // allow starting from a click or key press, as play() always is. If it can't be set up, the
+  // mouth stays shut.
   let analyser = null; // false once it's been tried and failed
   let samples = null;
   let level = 0; // 0-1, smoothed
@@ -820,6 +956,7 @@ function jointPlayer(answers, { src, chapters }) {
     el.classList.toggle('is-fullscreen', on);
     setChildren(fullscreenBtn, icon(on ? 'exitFullscreen' : 'fullscreen'));
     fullscreenBtn.setAttribute('aria-label', on ? 'Exit fullscreen (f)' : 'Fullscreen (f)');
+    tick(); // the jolly is redrawn at its new size
   };
   el.addEventListener('fullscreenchange', onFullscreen);
   el.addEventListener('webkitfullscreenchange', onFullscreen);
@@ -856,6 +993,16 @@ function jointPlayer(answers, { src, chapters }) {
     asking.classList.toggle('has-face', Boolean(f && pictured.has(f)));
   }
 
+  // The questions' lip sync, for the jolly. Each loads while the answer before it plays.
+  const lipSyncs = new Map(); // question id -> {fps, frames}; null while it loads, or if it couldn't
+  function lipSync(q) {
+    if (q.lipSync && !lipSyncs.has(q.id)) {
+      lipSyncs.set(q.id, null);
+      api('GET', q.lipSync).then((res) => lipSyncs.set(q.id, res.lipSync), () => {});
+    }
+    return lipSyncs.get(q.id) ?? null;
+  }
+
   let askingFor = null;
   function tick() {
     const t = video.currentTime;
@@ -869,14 +1016,21 @@ function jointPlayer(answers, { src, chapters }) {
     if (q && q !== askingFor) {
       askingFor = q;
       asker.textContent = askerLabel(q);
-      initials.textContent = askerInitials(q);
     }
     asking.classList.toggle('show', Boolean(q));
     const i = parts.indexOf(part);
-    for (const p of [parts[i], parts[i + 1]]) if (started && p?.q.askerVideo) face(p.q).preload = 'auto';
-    showFace(q?.askerVideo ? face(q) : null, q ? t - part.start : 0);
+    for (const p of [parts[i], parts[i + 1]]) {
+      if (!started || !p) continue;
+      if (p.q.askerVideo) face(p.q).preload = 'auto';
+      lipSync(p.q);
+    }
+    const at = q ? t - part.start : 0;
+    showFace(q?.askerVideo ? face(q) : null, at);
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
-    pip.style.setProperty('--level', level.toFixed(3));
+    if (q && !asking.classList.contains('has-face')) {
+      const sync = lipSync(q);
+      stand.draw(sync ? (sync.frames[Math.floor(at * sync.fps)] ?? [0, 1, 0]) : [level, 1, level], blinkAt(q.id, at), at);
+    }
     fill.style.width = `${pct(t)}%`;
     time.textContent = `${fmtDuration(t)} / ${fmtDuration(total)}`;
     bar.setAttribute('aria-valuenow', String(Math.round(t)));

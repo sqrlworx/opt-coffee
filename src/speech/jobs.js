@@ -6,10 +6,11 @@ import { cuesFromWords } from './captions.js';
 const now = () => new Date().toISOString();
 
 /**
- * Background speech work, run one job at a time: transcribing answer videos and reading typed
- * questions aloud. Progress lives in the database (transcripts.status, questions.audio_status),
- * so `resume()` at startup picks up anything that was pending, or never done because it
- * predates speech support.
+ * Background speech work, run one job at a time: transcribing answer videos, reading typed
+ * questions aloud, and the lip sync of questions' speech. Progress lives in the database
+ * (transcripts.status, questions.audio_status, questions.lip_sync), so `resume()` at startup
+ * picks up anything that was pending, or never done because it predates speech support (or lip
+ * sync).
  */
 export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) {
   let tail = Promise.resolve();
@@ -37,7 +38,7 @@ export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) 
     });
   }
 
-  /** Queues reading a typed question aloud into an audio file. */
+  /** Queues reading a typed question aloud into an audio file, with its lip sync. */
   function speak(questionId) {
     db.prepare("UPDATE questions SET audio_status = 'pending' WHERE id = ?").run(questionId);
     enqueue(async () => {
@@ -45,12 +46,31 @@ export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) 
       if (!q) return;
       const name = `${randomBytes(16).toString('hex')}.m4a`;
       try {
-        await speech.speak(q.body, join(mediaDir, name));
-        db.prepare("UPDATE questions SET audio = ?, audio_status = 'ready' WHERE id = ?").run(name, questionId);
+        const { mouth } = await speech.speak(q.body, join(mediaDir, name));
+        db.prepare("UPDATE questions SET audio = ?, audio_status = 'ready', lip_sync = ? WHERE id = ?").run(name, mouth ? JSON.stringify(mouth) : null, questionId);
       } catch (err) {
         log(`[speech] reading question ${questionId} aloud failed: ${err.message}`);
         rmSync(join(mediaDir, name), { force: true });
         db.prepare("UPDATE questions SET audio_status = 'failed' WHERE id = ?").run(questionId);
+      }
+    });
+  }
+
+  /**
+   * Queues the lip sync for a question's audio, if it hasn't got one: a spoken question's, from
+   * its words as transcribed, or audio read aloud before lip sync existed. One that fails is
+   * tried again at the next startup.
+   */
+  function lipSync(questionId) {
+    enqueue(async () => {
+      const q = db.prepare('SELECT audio FROM questions WHERE id = ? AND audio IS NOT NULL AND lip_sync IS NULL').get(questionId);
+      if (!q) return;
+      const heard = db.prepare("SELECT words FROM transcripts WHERE media = ? AND status = 'ready'").get(q.audio);
+      try {
+        const { mouth } = await speech.lipSync(join(mediaDir, q.audio), heard?.words ? JSON.parse(heard.words) : null);
+        db.prepare('UPDATE questions SET lip_sync = ? WHERE id = ? AND audio = ?').run(JSON.stringify(mouth), questionId, q.audio);
+      } catch (err) {
+        log(`[speech] lip-syncing question ${questionId} failed: ${err.message}`);
       }
     });
   }
@@ -67,11 +87,13 @@ export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) 
     recordings.forEach((r) => transcribe(r.media));
     const unspoken = db.prepare("SELECT id FROM questions WHERE asked_with = 'text' AND audio IS NULL AND (audio_status IS NULL OR audio_status = 'pending')").all();
     unspoken.forEach((q) => speak(q.id));
+    db.prepare('SELECT id FROM questions WHERE audio IS NOT NULL AND lip_sync IS NULL').all().forEach((q) => lipSync(q.id));
   }
 
   return {
     transcribe,
     speak,
+    lipSync,
     resume,
     /** Resolves once every queued job, including ones queued meanwhile, has finished. */
     async idle() {

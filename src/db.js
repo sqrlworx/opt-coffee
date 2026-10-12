@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS questions (
   audio          TEXT,                      -- the question as speech: the asker's recording, or the text read aloud (file in the media dir)
   asker_video    TEXT,                      -- a question asked on camera: the asker's video (file in the media dir); its sound is also in audio
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
+  lip_sync       TEXT,                      -- how the mouth moves saying audio, for the jolly that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
   created_at     TEXT NOT NULL,
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir
@@ -141,6 +142,8 @@ function migrate(db) {
     // Questions can be asked on camera.
     db.exec('ALTER TABLE questions ADD COLUMN asker_video TEXT');
   }
+  // Questions' speech gained lip sync; questions with audio get theirs on startup.
+  if (!columns.has('lip_sync')) db.exec('ALTER TABLE questions ADD COLUMN lip_sync TEXT');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));
   if (!recordingColumns.has('video')) db.exec('ALTER TABLE recordings ADD COLUMN video TEXT');
   const officeHourColumns = new Set(db.prepare('PRAGMA table_info(office_hours)').all().map((c) => c.name));

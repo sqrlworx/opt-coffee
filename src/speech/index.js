@@ -60,9 +60,21 @@ export function createSpeech({
       }
     },
 
-    /** Reads `text` aloud into an M4A file at `out`. */
+    /**
+     * Reads `text` aloud into an M4A file at `out`.
+     * @returns {Promise<{mouth: {fps: number, frames: [number, number, number][]}}>} its lip sync (see lipsync.py)
+     */
     speak(text, out) {
       return background.request({ op: 'speak', text, out }, BACKGROUND_TIMEOUT);
+    },
+
+    /**
+     * The lip sync for a recording, from its `words` as transcribed (it's transcribed again
+     * without them).
+     * @returns {Promise<{mouth: {fps: number, frames: [number, number, number][]}}>}
+     */
+    lipSync(file, words = null) {
+      return background.request({ op: 'lipsync', file, words }, BACKGROUND_TIMEOUT);
     },
 
     /** Starts the workers and loads models now, so the first asker doesn't wait for that. */
