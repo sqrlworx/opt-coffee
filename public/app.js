@@ -698,16 +698,16 @@ function icon(name) {
 // picture's pixels.
 const FOX = {
   src: '/fox.webp',
-  view: [84, 80, 900, 675], // the part shown (x, y, width, height); the rest leaves room to sway
-  pivot: [532, 1580], // its feet, below the picture: it sways and bounces on them
+  view: [75, 90, 627, 470], // the part shown (x, y, width, height): all of it as drawn; the rest leaves room to sway
+  pivot: [389.5, 1125], // its feet, below the picture: it sways and bounces on them
   ink: '#100d0b',
   shineColor: '228, 228, 225',
   // shine: the highlight's centre, radii and angle
   eyes: [
-    { at: [353.3, 477.4], r: [36.6, 37.7], shine: [373.9, 460.1, 8.6, 5.4, 0.82] },
-    { at: [714.7, 477.2], r: [36.8, 37.3], shine: [730.2, 458.6, 10.8, 6.3, 0.78] },
+    { at: [299.1, 383.7], r: [18.3, 18.8], shine: [309.4, 375, 4.3, 2.7, 0.82] },
+    { at: [479.8, 383.6], r: [18.4, 18.6], shine: [487.6, 374.3, 5.4, 3.2, 0.78] },
   ],
-  mouth: { at: [536.3, 560.7], halfWidth: 51, sag: 20, jaw: 42, line: 10 }, // at: the bottom of its smile
+  mouth: { at: [390.6, 425.4], halfWidth: 25.5, sag: 10, jaw: 21, line: 5 }, // at: the bottom of its smile
 };
 
 // The fox on a canvas. `draw(pose, blink, t)` shows it with a pose from a question's lip sync,
@@ -809,6 +809,7 @@ function fox() {
     ctx.rotate(((wave(5.3, 0.4) + 0.4 * wave(2.9, 1.7)) * Math.PI) / 180);
     ctx.scale(1 + breathe - 0.006 * energy, 1 + breathe + 0.012 * energy);
     ctx.translate(-px, -py);
+    ctx.imageSmoothingQuality = 'high'; // it's drawn a few times smaller than it is, and fur shimmers otherwise
     ctx.drawImage(image, 0, 0);
     for (const e of FOX.eyes) eye(e, blink);
     mouth(open, width);
