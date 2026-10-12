@@ -150,7 +150,10 @@ function subscribeButton({ type, id, subscribed, label }) {
 
 function questionMeta(q) {
   const parts = [];
-  if (q.askedWith === 'audio') parts.push(h('span', { class: 'tag' }, q.audioTranscript?.edited ? '🎙 Asked out loud · transcript edited' : '🎙 Asked out loud'));
+  if (q.askedWith === 'audio') {
+    const how = q.askerVideo ? '🎥 Asked on camera' : '🎙 Asked out loud';
+    parts.push(h('span', { class: 'tag' }, q.audioTranscript?.edited ? `${how} · transcript edited` : how));
+  }
   if (q.source === 'moderator') parts.push(h('span', { class: 'tag tag-mod' }, '✦ Suggested by moderator'));
   else if (q.anonymous) parts.push(h('span', { class: 'tag' }, 'Anonymous'));
   else if (q.author) parts.push(userLink(q.author));
@@ -184,29 +187,38 @@ function askForm(oh, onAsked) {
   const textarea = h('textarea', { rows: 2, maxlength: 500, placeholder: `Ask ${oh.expert.displayName} something…`, required: true });
   const anon = oh.allowAnonymous ? h('input', { type: 'checkbox' }) : null;
   const submit = h('button', { class: 'btn btn-primary', type: 'submit' }, 'Ask');
-  // Asking out loud, when the server can transcribe. Typed questions are read aloud instead.
-  const spoken = speech ? spokenQuestion(oh, () => anon?.checked ?? false, onAsked) : null;
-  const voiceNote = h('p', { class: 'hint', hidden: true }, 'Your name is hidden, but your recording is public, and people may recognize your voice.');
+  // Asking out loud or on camera, when the server can transcribe. Typed questions are read aloud instead.
+  const anonymous = () => anon?.checked ?? false;
+  const recorders = speech ? { audio: spokenQuestion(oh, anonymous, onAsked), video: spokenQuestion(oh, anonymous, onAsked, { camera: true }) } : {};
+  const recorderList = Object.values(recorders);
+  const anonNote = h('p', { class: 'hint', hidden: true });
   let mode = 'text';
-  const modeButton = (value, label) => h('button', { type: 'button', class: 'ask-mode', 'aria-pressed': String(value === mode), onclick: () => setMode(value) }, label);
-  const modes = spoken ? h('div', { class: 'ask-modes', role: 'group', 'aria-label': 'How to ask' }, modeButton('text', '✎ Type'), modeButton('audio', '🎙 Speak')) : null;
+  const modeButton = (value, label) => h('button', { type: 'button', class: 'ask-mode', 'data-mode': value, 'aria-pressed': String(value === mode), onclick: () => setMode(value) }, label);
+  const modes = speech ? h('div', { class: 'ask-modes', role: 'group', 'aria-label': 'How to ask' }, modeButton('text', '✎ Type'), modeButton('audio', '🎙 Speak'), modeButton('video', '🎥 Video')) : null;
+
+  function showAnonNote() {
+    anonNote.hidden = !(mode !== 'text' && anon?.checked);
+    anonNote.textContent = mode === 'video'
+      ? 'Your name is hidden, but your video is public, and people may recognize you.'
+      : 'Your name is hidden, but your recording is public, and people may recognize your voice.';
+  }
 
   function setMode(value) {
     if (value === mode) return;
-    if (spoken.busy() && !confirm("Discard the recording you haven't sent?")) return;
-    spoken.close();
+    if (recorders[mode]?.busy() && !confirm("Discard the recording you haven't sent?")) return;
+    recorders[mode]?.close();
     mode = value;
-    modes.querySelectorAll('.ask-mode').forEach((b, i) => b.setAttribute('aria-pressed', String((i === 0) === (mode === 'text'))));
+    modes.querySelectorAll('.ask-mode').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
     textarea.hidden = submit.hidden = mode !== 'text';
     textarea.required = mode === 'text';
-    spoken.el.hidden = mode !== 'audio';
-    voiceNote.hidden = !(mode === 'audio' && anon?.checked);
+    for (const [kind, recorder] of Object.entries(recorders)) recorder.el.hidden = kind !== mode;
+    showAnonNote();
   }
-  anon?.addEventListener('change', () => (voiceNote.hidden = !(mode === 'audio' && anon.checked)));
-  if (spoken) {
-    spoken.el.hidden = true;
-    pageCleanup = spoken.close; // let go of the microphone on navigation
-    window.onbeforeunload = () => (spoken.busy() ? true : undefined);
+  anon?.addEventListener('change', showAnonNote);
+  if (speech) {
+    recorderList.forEach((r) => (r.el.hidden = true));
+    pageCleanup = () => recorderList.forEach((r) => r.close()); // let go of the microphone and camera on navigation
+    window.onbeforeunload = () => (recorderList.some((r) => r.busy()) ? true : undefined);
   }
 
   const form = h(
@@ -214,9 +226,9 @@ function askForm(oh, onAsked) {
     { class: 'ask' },
     modes,
     textarea,
-    spoken?.el,
+    recorderList.map((r) => r.el),
     h('div', { class: 'ask-actions' }, anon ? h('label', { class: 'check' }, anon, ' Ask anonymously') : h('span', { class: 'muted small' }, 'Your name will be shown with your question.'), submit),
-    voiceNote,
+    anonNote,
   );
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -231,11 +243,12 @@ function askForm(oh, onAsked) {
   return form;
 }
 
-// Records a question out loud. When the asker stops, the recording is transcribed, and they can
-// listen back and correct the transcript (it becomes the question's text) before asking.
-function spokenQuestion(oh, anonymous, onAsked) {
+// Records a question out loud, or on camera with `camera`. When the asker stops, the recording is
+// transcribed, and they can play it back and correct the transcript (it becomes the question's
+// text) before asking.
+function spokenQuestion(oh, anonymous, onAsked, { camera = false } = {}) {
   const box = h('div', { class: 'spoken' });
-  let stream = null; // microphone
+  let stream = null; // microphone, and camera
   let recorder = null;
   let take = null; // { blob, url } of a finished recording not yet asked
   let draft = null; // the server's transcribed copy of `take`: { id, cues }
@@ -272,19 +285,23 @@ function spokenQuestion(oh, anonymous, onAsked) {
     );
   }
 
+  // The take as it was recorded, to play back while checking the transcript.
+  const playback = (url) => (camera ? fixDuration(h('video', { class: 'q-take', src: url, controls: true, preload: 'metadata', playsinline: true }), { firstFrame: true }) : audioPlayer(url));
+
   async function record() {
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      throw new Error("This browser can't record audio. Try a recent Chrome, Firefox or Safari.");
+      throw new Error(`This browser can't record ${camera ? 'video' : 'audio'}. Try a recent Chrome, Firefox or Safari.`);
     }
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: camera ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false });
     } catch (err) {
       stopMic();
-      throw new Error(err.name === 'NotAllowedError' ? 'Allow microphone access to ask out loud.' : `Couldn't start the microphone: ${err.message}`);
+      if (err.name === 'NotAllowedError') throw new Error(camera ? 'Allow camera and microphone access to ask on camera.' : 'Allow microphone access to ask out loud.');
+      throw new Error(`Couldn't start the ${camera ? 'camera' : 'microphone'}: ${err.message}`);
     }
-    const mimeType = AUDIO_RECORDING_TYPES.find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
+    const mimeType = (camera ? RECORDING_TYPES : AUDIO_RECORDING_TYPES).find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
     const chunks = [];
-    const rec = (recorder = new MediaRecorder(stream, { mimeType }));
+    const rec = (recorder = new MediaRecorder(stream, camera ? { mimeType, videoBitsPerSecond: 1_500_000 } : { mimeType }));
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     rec.onstop = () => {
       stopMic();
@@ -303,14 +320,20 @@ function spokenQuestion(oh, anonymous, onAsked) {
       clock.textContent = fmtDuration(secs);
       if (secs >= MAX_QUESTION_SECS) stop();
     }, 250);
-    setChildren(box, buttons(h('span', { class: 'rec-pill' }, '● REC ', clock), h('button', { type: 'button', class: 'btn btn-primary', onclick: stop }, '■ Stop'), h('button', { type: 'button', class: 'btn btn-outline', onclick: close }, 'Cancel')));
+    let preview = null;
+    if (camera) {
+      preview = h('video', { class: 'q-take live', autoplay: true, playsinline: true });
+      preview.muted = true; // don't play the mic back into the room
+      preview.srcObject = stream;
+    }
+    setChildren(box, preview, buttons(h('span', { class: 'rec-pill' }, '● REC ', clock), h('button', { type: 'button', class: 'btn btn-primary', onclick: stop }, '■ Stop'), h('button', { type: 'button', class: 'btn btn-outline', onclick: close }, 'Cancel')));
   }
 
   const rerecord = action(async () => (close(), record()));
 
   async function transcribe() {
     const current = take;
-    setChildren(box, audioPlayer(current.url), buttons(h('span', { class: 'muted small' }, 'Transcribing your recording…')));
+    setChildren(box, playback(current.url), buttons(h('span', { class: 'muted small' }, 'Transcribing your recording…')));
     try {
       const { recording } = await api('POST', `/api/office-hours/${oh.id}/recordings`, current.blob);
       if (take !== current) return api('DELETE', `/api/recordings/${recording.id}`).catch(() => {}); // discarded meanwhile
@@ -321,7 +344,7 @@ function spokenQuestion(oh, anonymous, onAsked) {
       if (take === current) {
         setChildren(
           box,
-          audioPlayer(current.url),
+          playback(current.url),
           buttons(
             h('button', { type: 'button', class: 'btn btn-primary', onclick: action(transcribe) }, 'Try again'),
             h('button', { type: 'button', class: 'btn btn-outline', onclick: rerecord }, 'Re-record'),
@@ -337,7 +360,7 @@ function spokenQuestion(oh, anonymous, onAsked) {
     const lines = cueLines(draft.cues);
     setChildren(
       box,
-      audioPlayer(take.url),
+      playback(take.url),
       h(
         'div',
         { class: 'cue-editor' },
@@ -469,15 +492,20 @@ function watchQuestion(id, el, done, then) {
 }
 
 // Transcript cues as text that follows playback: the cue being spoken is highlighted, and
-// clicking a cue plays from there.
+// clicking a cue plays from there. `media` can be a list of recordings of the same speech (a
+// question asked on camera, and its sound); the text follows whichever plays, and clicking plays
+// the first.
 function syncedCues(media, cues, cls) {
+  const [first, ...more] = [media].flat();
   const spans = cues.map(([start, , text]) =>
-    h('span', { class: 'cue', title: `Play from ${fmtDuration(start)}`, onclick: () => ((media.currentTime = start), media.play().catch(() => {})) }, text),
+    h('span', { class: 'cue', title: `Play from ${fmtDuration(start)}`, onclick: () => ((first.currentTime = start), first.play().catch(() => {})) }, text),
   );
-  media.addEventListener('timeupdate', () => {
-    const t = media.currentTime;
-    cues.forEach(([start, end], i) => spans[i].classList.toggle('active', t >= start && t < end));
-  });
+  for (const m of [first, ...more]) {
+    m.addEventListener('timeupdate', () => {
+      const t = m.currentTime;
+      cues.forEach(([start, end], i) => spans[i].classList.toggle('active', t >= start && t < end));
+    });
+  }
   return h('p', { class: cls }, spans.flatMap((span, i) => (i ? [' ', span] : [span])));
 }
 
@@ -523,24 +551,30 @@ function answerTranscript(video, transcript, opts) {
   return panel;
 }
 
-// A small button after a question's text that plays `audio`: the asker's recording, or the typed
-// text read aloud. It shows while the question is hovered (see styles.css).
-function playButton(q, audio) {
-  const label = q.askedWith === 'audio' ? 'Play the question as it was asked' : 'Listen to the question';
-  const btn = h('button', { type: 'button', class: 'play-btn', title: label, 'aria-label': label, onclick: () => (audio.paused ? audio.play().catch(() => {}) : audio.pause()) }, '▶', audio);
+// A small button after a question's text that plays `media`: the asker's recording, or the typed
+// text read aloud, or the video of a question asked on camera. It shows while the question is
+// hovered (see styles.css). An <audio> goes inside it; a video is shown under the text by
+// questionText.
+function playButton(q, media) {
+  const video = media.tagName === 'VIDEO';
+  const label = video ? 'Watch the question as it was asked' : q.askedWith === 'audio' ? 'Play the question as it was asked' : 'Listen to the question';
+  const face = h('span', { class: 'play-face' });
+  const btn = h('button', { type: 'button', class: 'play-btn', title: label, 'aria-label': label, onclick: () => (media.paused ? media.play().catch(() => {}) : media.pause()) }, face, video ? null : media);
   const playing = (on) => {
     btn.classList.toggle('playing', on);
-    btn.firstChild.textContent = on ? '❚❚' : '▶';
+    setChildren(face, on ? '❚❚' : video ? icon('video') : '▶');
   };
-  audio.addEventListener('play', () => playing(true));
-  audio.addEventListener('pause', () => playing(false));
-  audio.addEventListener('ended', () => playing(false));
+  playing(false);
+  media.addEventListener('play', () => playing(true));
+  media.addEventListener('pause', () => playing(false));
+  media.addEventListener('ended', () => playing(false));
   return btn;
 }
 
 // A question's text, with a play button once there's audio (a typed question's is read aloud in
 // the background, so a pending one is watched). A spoken question's text is its transcript,
-// which follows along as the recording plays.
+// which follows along as the recording plays. One asked on camera has a second button that plays
+// its video, shown under the text while it plays.
 function questionText(q) {
   if (!q.audio) {
     const body = h('p', { class: 'q-body' }, q.body);
@@ -553,10 +587,20 @@ function questionText(q) {
     return body;
   }
   const audio = h('audio', { src: q.audio, preload: 'none' });
+  const video = q.askerVideo ? h('video', { class: 'q-video', src: q.askerVideo, preload: 'none', playsinline: true, hidden: true }) : null;
   const cues = q.audioTranscript?.cues;
-  const body = cues?.length ? syncedCues(audio, cues, 'q-body') : h('p', { class: 'q-body' }, q.body);
+  const body = cues?.length ? syncedCues([audio, video].filter(Boolean), cues, 'q-body') : h('p', { class: 'q-body' }, q.body);
   body.append(' ', playButton(q, audio));
-  return body;
+  if (!video) return body;
+  body.append(' ', playButton(q, video));
+  // One at a time: they're the same question.
+  audio.addEventListener('play', () => video.pause());
+  video.addEventListener('play', () => audio.pause());
+  // Shown once it has a picture: on a slow connection it would be an empty black box until then.
+  video.addEventListener('playing', () => (video.hidden = false));
+  video.addEventListener('pause', () => (video.hidden = true));
+  video.addEventListener('click', () => video.pause());
+  return h('div', { class: 'q-asked' }, body, video);
 }
 
 // Published answers: each question as text, then the video answer (with subtitles once its
@@ -579,6 +623,8 @@ function qaList(answers, videos) {
 }
 
 const askedBy = (q) => (q.source === 'moderator' ? 'suggested by the moderator' : q.anonymous ? 'anonymous' : q.author?.displayName);
+// Who's asking, over the video while a question is played.
+const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`);
 
 // The whole Q&A as text, to read straight through: each question, then the transcript of its answer.
 // `onChange(q)` hears when an answer's transcript becomes ready or is corrected. `collapsed` folds
@@ -648,6 +694,7 @@ const ICONS = {
   muted: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
   fullscreen: '<path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5" fill="none" stroke="currentColor" stroke-width="2.2"/>',
   exitFullscreen: '<path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5" fill="none" stroke="currentColor" stroke-width="2.2"/>',
+  video: '<path d="M3 7a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM17 10l5-3v10l-5-3z"/>',
 };
 function icon(name) {
   const el = h('span', { class: 'icon' });
@@ -659,7 +706,8 @@ function icon(name) {
 // It has its own controls, so captions and the orb stay on it in fullscreen. Captions are drawn at
 // the bottom, except for answers whose captions are burned into the video (`captions` on their
 // chapter, when the server finished it); while a question is being played, a glowing orb at the
-// top left pulses with the asker's voice and says who asked. `chapters` place each answer in the
+// top left pulses with the asker's voice and says who asked. A question asked on camera shows the
+// asker's video there instead, kept in step with the question. `chapters` place each answer in the
 // video, and its transcript's cues are timed from the start of its take. `update(q)` picks up a
 // transcript that's ready or corrected.
 function jointPlayer(answers, { src, chapters }) {
@@ -679,7 +727,8 @@ function jointPlayer(answers, { src, chapters }) {
   const caption = h('span', { class: 'jp-caption', hidden: true });
   const orb = h('span', { class: 'orb' });
   const asker = h('span', { class: 'orb-label' });
-  const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, h('span', { class: 'orb-breath' }, orb), asker);
+  const faceSlot = h('span', { class: 'jp-face-slot' });
+  const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, h('span', { class: 'orb-breath' }, orb), faceSlot, asker);
   const btn = (label, text, onclick) => h('button', { type: 'button', class: 'jp-btn', title: label, 'aria-label': label, onclick }, text);
   const playBtn = btn('Play (k)', icon('play'), () => toggle());
   const ccBtn = btn('Captions (c)', 'CC', () => setCaptions(!captionsOn));
@@ -774,6 +823,38 @@ function jointPlayer(answers, { src, chapters }) {
   el.addEventListener('fullscreenchange', onFullscreen);
   el.addEventListener('webkitfullscreenchange', onFullscreen);
 
+  // The askers' videos, for questions asked on camera, muted: their sound is in the joined video.
+  // Each loads while the answer before it plays, so it's ready when its question comes up.
+  const faces = new Map(); // question id -> <video>
+  function face(q) {
+    if (!faces.has(q.id)) {
+      const f = fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true }));
+      f.muted = true;
+      faces.set(q.id, f);
+    }
+    return faces.get(q.id);
+  }
+  let shownFace = null;
+  const pictured = new WeakSet(); // faces that have had a frame to show
+  function showFace(f, at) {
+    if (f !== shownFace) {
+      shownFace?.pause();
+      setChildren(faceSlot, f);
+      shownFace = f;
+    }
+    if (f) {
+      // Seek only once the browser knows how long it is (see fixDuration), and when it has drifted.
+      if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
+      if (video.paused) f.pause();
+      else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
+      // The orb stands in until the video has a picture of this moment, rather than an empty
+      // black box or a first frame that then jumps. Once shown it stays, even while it seeks
+      // (the last frame stays up meanwhile).
+      if (f.readyState >= 2 && !f.seeking && Math.abs(f.currentTime - at) <= 0.3) pictured.add(f);
+    }
+    asking.classList.toggle('has-face', Boolean(f && pictured.has(f)));
+  }
+
   let askingFor = null;
   function tick() {
     const t = video.currentTime;
@@ -786,9 +867,12 @@ function jointPlayer(answers, { src, chapters }) {
     caption.classList.toggle('is-question', Boolean(q));
     if (q && q !== askingFor) {
       askingFor = q;
-      asker.textContent = q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`;
+      asker.textContent = askerLabel(q);
     }
     asking.classList.toggle('show', Boolean(q));
+    const i = parts.indexOf(part);
+    for (const p of [parts[i], parts[i + 1]]) if (started && p?.q.askerVideo) face(p.q).preload = 'auto';
+    showFace(q?.askerVideo ? face(q) : null, q ? t - part.start : 0);
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
     orb.style.setProperty('--level', level.toFixed(3));
     fill.style.width = `${pct(t)}%`;
@@ -1404,6 +1488,34 @@ async function managePage({ id }) {
       return sounds.get(url);
     }
 
+    // A question asked on camera also plays its video, muted, over the camera preview while its
+    // sound plays. It loads ahead like the sound; one that's slow to load shows up when it can.
+    const clips = new Map(); // video URL -> Promise<HTMLVideoElement | null>
+    function questionClip(qid) {
+      const url = questions.get(qid).askerVideo;
+      if (!url) return Promise.resolve(null);
+      if (!clips.has(url)) {
+        const clip = h('video', { class: 'studio-pip-video', src: url, preload: 'auto', playsinline: true });
+        clip.muted = true; // its sound is the question's audio, played (and recorded) with it
+        clip.addEventListener('playing', () => clip.parentNode === pip && (pip.hidden = false));
+        clips.set(url, new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(clip), 10_000);
+          clip.addEventListener('canplay', () => (clearTimeout(timer), resolve(clip)), { once: true });
+          clip.addEventListener('error', () => (clearTimeout(timer), resolve(null)), { once: true });
+        }));
+      }
+      return clips.get(url);
+    }
+    function showClip(clip) {
+      setChildren(pip, clip, clip ? h('span', { class: 'studio-pip-label' }, askerLabel(questions.get(take.qid))) : null);
+      // Hidden until it has a picture (one slow to load would otherwise be an empty black box).
+      pip.hidden = !clip || clip.readyState < 2;
+    }
+    function hideClip() {
+      pip.querySelector('video')?.pause();
+      showClip(null);
+    }
+
     const dialog = h('dialog', { class: 'studio', 'aria-label': 'Recording answers' });
     // Esc mustn't end a recording by accident: it asks, like Exit (and a second Esc goes back to recording).
     dialog.addEventListener('cancel', (e) => {
@@ -1416,8 +1528,9 @@ async function managePage({ id }) {
     preview.srcObject = camera;
     const clock = h('span', {}, '0:00');
     const badge = h('span', { class: 'rec-badge' }, '● REC ', clock);
+    const pip = h('div', { class: 'studio-pip', hidden: true }); // the asker, while a question asked on camera plays
     const panel = h('div', { class: 'studio-panel' });
-    dialog.append(h('div', { class: 'live-wrap' }, preview, badge), panel);
+    dialog.append(h('div', { class: 'live-wrap' }, preview, badge, pip), panel);
     document.body.append(dialog);
     dialog.showModal();
 
@@ -1439,9 +1552,12 @@ async function managePage({ id }) {
       const current = { qid, loading: true, recorder: null, source: null, started: 0, answering: false, answerStart: null, exiting: false, keep: false };
       take = current;
       draw();
-      const buffer = await questionSound(qid);
+      const [buffer, clip] = await Promise.all([questionSound(qid), questionClip(qid)]);
       if (take !== current) return; // skipped or exited while it loaded
-      if (index + 1 < order.length) questionSound(order[index + 1]);
+      if (index + 1 < order.length) {
+        questionSound(order[index + 1]);
+        questionClip(order[index + 1]);
+      }
       const chunks = [];
       const recorder = (current.recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2_500_000 }));
       recorder.ondataavailable = (e) => e.data.size && chunks.push(e.data);
@@ -1454,6 +1570,7 @@ async function managePage({ id }) {
       const answering = (played) => {
         if (take !== current || current.answering) return;
         current.answering = true;
+        hideClip();
         if (played) current.answerStart = (performance.now() - current.started) / 1000;
         draw();
       };
@@ -1469,6 +1586,11 @@ async function managePage({ id }) {
         source.connect(ctx.destination);
         source.onended = () => answering(true);
         source.start();
+        if (clip) {
+          clip.currentTime = 0;
+          showClip(clip);
+          clip.play().catch(() => {});
+        }
       } else {
         answering(false); // no audio (yet): the question is on screen to read out
       }
@@ -1477,6 +1599,7 @@ async function managePage({ id }) {
 
     // Ends the current take, keeping it as the question's answer only if `keep` and they've started answering.
     function endTake(keep) {
+      hideClip();
       if (take.source) {
         take.source.onended = null;
         take.source.stop();

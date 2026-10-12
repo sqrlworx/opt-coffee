@@ -1,5 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,9 +9,11 @@ import { openDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { createModerator } from '../src/moderator/index.js';
 import { cuesFromWords, toVtt } from '../src/speech/captions.js';
+import { createSpeech } from '../src/speech/index.js';
 
 // Stands in for Whisper and Kokoro: a "recording" holds the text that was said, and reading
-// text aloud writes a file holding that text. Records which lane each transcription used.
+// text aloud writes a file holding that text. A "video" holds what was said too, which taking its
+// sound out copies, unless it's "[silent]". Records which lane each transcription used.
 // `hold(t)` makes background work wait, like a slow engine, until the returned function is called
 // (or test `t` ends, so a failing assertion can't leave the queue stuck).
 const lanes = [];
@@ -33,6 +36,11 @@ const fakeSpeech = {
     if (said.includes('[garbled]')) throw new Error("couldn't decode the recording");
     lanes.push({ said, interactive });
     return { text: said, words: said.split(' ').filter(Boolean).map((w, i) => [i * 0.5, i * 0.5 + 0.4, ` ${w}`]) };
+  },
+  async extractSound(file, out) {
+    const video = readFileSync(file, 'utf8');
+    if (video.includes('[silent]')) throw new Error('Stream map 0:a:0 matches no streams');
+    writeFileSync(out, video);
   },
   async speak(text, out) {
     await gate;
@@ -185,7 +193,7 @@ test('asking out loud: bad recordings are refused and not kept', async () => {
   const filesBefore = readdirSync(mediaDir).length;
   const ask = (body, opts) => asker('POST', `/api/office-hours/${ohId}/recordings`, body, opts);
 
-  assert.equal((await ask(said('Is this a video?'), { type: 'video/webm' })).status, 415);
+  assert.equal((await ask(said('Is this a video?'), { type: 'video/quicktime' })).status, 415);
   assert.equal((await ask(said('Plain text?'), { type: 'text/plain' })).status, 415);
   assert.equal((await ask(Buffer.alloc(0))).status, 400);
   assert.equal((await ask(said('  '))).status, 400); // nothing was heard
@@ -199,6 +207,100 @@ test('asking out loud: bad recordings are refused and not kept', async () => {
   await expert('POST', `/api/office-hours/${ohId}/close`);
   assert.equal((await ask(said('Too late for this one?'))).status, 409);
   assert.equal(readdirSync(mediaDir).length, filesBefore);
+});
+
+test('asking on camera: the video goes with the question, and its sound is the recording', async () => {
+  const expert = await register('camera_expert');
+  const asker = await register('camera_asker');
+  const stranger = client();
+  const ohId = await officeHour(expert);
+  const filesBefore = readdirSync(mediaDir).length;
+
+  const draft = await asker('POST', `/api/office-hours/${ohId}/recordings`, said('Can you see me? How do I index JSON columns?'), { type: 'video/webm;codecs=vp8,opus' });
+  assert.equal(draft.status, 200, draft.error);
+  // The draft is known by its sound, and holds the transcript to check like any spoken question.
+  assert.match(draft.recording.id, /^[0-9a-f]{32}\.m4a$/);
+  assert.equal(draft.recording.text, 'Can you see me? How do I index JSON columns?');
+  assert.equal(readdirSync(mediaDir).length, filesBefore + 2); // the video and its sound
+
+  // The asker drops the line that wasn't part of the question.
+  const res = await asker('POST', `/api/office-hours/${ohId}/questions`, { recording: draft.recording.id, cues: draft.recording.cues.map((c) => c[2].replace('Can you see me? ', '')) });
+  assert.equal(res.status, 200, res.error);
+  const q = res.question;
+  assert.equal(q.body, 'How do I index JSON columns?');
+  assert.equal(q.askedWith, 'audio');
+  assert.equal(q.audio, `/media/${draft.recording.id}`);
+  assert.match(q.askerVideo, /^\/media\/[0-9a-f]{32}\.webm$/);
+  assert.equal(q.audioTranscript.edited, true);
+
+  // Everyone can watch it, and it's listed and published with the question.
+  const video = await stranger.media(q.askerVideo);
+  assert.equal(video.status, 200);
+  assert.equal(video.headers.get('content-type'), 'video/webm');
+  assert.equal((await stranger.media(q.audio)).headers.get('content-type'), 'audio/mp4');
+  assert.equal((await stranger('GET', `/api/office-hours/${ohId}`)).groups.flatMap((g) => g.questions).find((x) => x.id === q.id).askerVideo, q.askerVideo);
+  await expert('PUT', `/api/office-hours/${ohId}/plan`, { items: [{ questionId: q.id }] });
+  await expert('PUT', `/api/questions/${q.id}/video?answerStart=3`, said('Use a generated column.'), { type: 'video/mp4' });
+  await expert('POST', `/api/office-hours/${ohId}/publish`);
+  await app.idle();
+  const [answer] = (await stranger('GET', `/api/office-hours/${ohId}`)).answers;
+  assert.equal(answer.askerVideo, q.askerVideo);
+  assert.equal(answer.audio, q.audio);
+  assert.notEqual(answer.video, q.askerVideo);
+
+  // MP4 works too.
+  const mp4 = await askOutLoud(asker, await officeHour(expert), said('And from Safari?'), { type: 'video/mp4' });
+  assert.match(mp4.question.askerVideo, /\.mp4$/);
+});
+
+test('asking on camera: a video without sound is refused; discarding one deletes the video too', async () => {
+  const expert = await register('silent_expert');
+  const asker = await register('silent_asker');
+  const ohId = await officeHour(expert);
+  const filesBefore = readdirSync(mediaDir).length;
+  const record = (body) => asker('POST', `/api/office-hours/${ohId}/recordings`, body, { type: 'video/mp4' });
+
+  const silent = await record(said('[silent] waving'));
+  assert.equal(silent.status, 400);
+  assert.match(silent.error, /microphone/);
+  assert.equal(readdirSync(mediaDir).length, filesBefore);
+  assert.equal((await record(said('  '))).status, 400); // nothing was heard
+  assert.equal(readdirSync(mediaDir).length, filesBefore);
+
+  const { recording } = await record(said('A question I will take back.'));
+  assert.equal(readdirSync(mediaDir).length, filesBefore + 2);
+  await asker('DELETE', `/api/recordings/${recording.id}`);
+  assert.equal(readdirSync(mediaDir).length, filesBefore);
+
+  // So is one abandoned for a day.
+  const { recording: abandoned } = await record(said('Another one I forget about.'));
+  db.prepare('UPDATE recordings SET created_at = ? WHERE media = ?').run(inDays(-2), abandoned.id);
+  const { recording: fresh } = await record(said('A fresh question on camera.'));
+  assert.equal(readdirSync(mediaDir).length, filesBefore + 2);
+  await asker('DELETE', `/api/recordings/${fresh.id}`);
+  assert.equal(readdirSync(mediaDir).length, filesBefore);
+});
+
+const hasFfmpeg = !spawnSync('ffmpeg', ['-version']).error;
+
+test('ffmpeg takes the sound out of a question video, and fails on one without sound', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_extract_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const speech = createSpeech({ mode: 'on' }); // the workers only start on a transcribe or speak request
+  try {
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=2', '-f', 'lavfi', '-i', 'sine=f=440:duration=2', '-c:v', 'libvpx', '-c:a', 'libopus', '-shortest', join(dir, 'q.webm'));
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=24:duration=1', '-c:v', 'libvpx', join(dir, 'silent.webm'));
+    await speech.extractSound(join(dir, 'q.webm'), join(dir, 'q.m4a'));
+    const streams = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name:format=duration', '-of', 'json', join(dir, 'q.m4a')], { encoding: 'utf8' });
+    const { streams: [only, ...more], format } = JSON.parse(streams);
+    assert.deepEqual([only.codec_type, only.codec_name, more.length], ['audio', 'aac', 0]);
+    assert.ok(Math.abs(Number(format.duration) - 2) < 0.1);
+    await assert.rejects(speech.extractSound(join(dir, 'silent.webm'), join(dir, 'silent.m4a')));
+    assert.deepEqual(readdirSync(dir).sort(), ['q.m4a', 'q.webm', 'silent.webm']);
+  } finally {
+    speech.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('typed questions and moderator seeds are read aloud in the background', async () => {

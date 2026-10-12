@@ -41,8 +41,9 @@ CREATE TABLE IF NOT EXISTS questions (
   source         TEXT NOT NULL DEFAULT 'asker' CHECK (source IN ('asker', 'moderator')),
   is_anonymous   INTEGER NOT NULL DEFAULT 0,
   body           TEXT NOT NULL,             -- for questions asked out loud, the transcript
-  asked_with     TEXT NOT NULL DEFAULT 'text' CHECK (asked_with IN ('text', 'audio')),
+  asked_with     TEXT NOT NULL DEFAULT 'text' CHECK (asked_with IN ('text', 'audio')),  -- 'audio' also for questions asked on camera
   audio          TEXT,                      -- the question as speech: the asker's recording, or the text read aloud (file in the media dir)
+  asker_video    TEXT,                      -- a question asked on camera: the asker's video (file in the media dir); its sound is also in audio
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
   created_at     TEXT NOT NULL,
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
 -- transcript and ask. Removed when asked, discarded, or after a day.
 CREATE TABLE IF NOT EXISTS recordings (
   media          TEXT PRIMARY KEY,            -- file name in the media dir; its transcript is in transcripts
+  video          TEXT,                        -- recorded on camera: the video, whose sound is media
   user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   office_hour_id INTEGER NOT NULL REFERENCES office_hours(id) ON DELETE CASCADE,
   created_at     TEXT NOT NULL
@@ -135,6 +137,12 @@ function migrate(db) {
       ALTER TABLE questions ADD COLUMN published_answer_start REAL;
     `);
   }
+  if (!columns.has('asker_video')) {
+    // Questions can be asked on camera.
+    db.exec('ALTER TABLE questions ADD COLUMN asker_video TEXT');
+  }
+  const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));
+  if (!recordingColumns.has('video')) db.exec('ALTER TABLE recordings ADD COLUMN video TEXT');
   const officeHourColumns = new Set(db.prepare('PRAGMA table_info(office_hours)').all().map((c) => c.name));
   if (!officeHourColumns.has('video')) {
     // Published answers became one video. Office hours published before that are joined on startup.

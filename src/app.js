@@ -14,6 +14,7 @@ const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
 const MAX_BODY = 100_000;
 const MAX_VIDEO = 300_000_000; // ~10 minutes at the bitrate the browser records with
 const MAX_AUDIO = 20_000_000; // a spoken question is capped at 90 seconds in the browser
+const MAX_QUESTION_VIDEO = 60_000_000; // so is one asked on camera
 const MAX_SPOKEN_QUESTION = 2000; // characters of transcript; people say more than they'd type
 const MAX_ANSWER_START = 600; // seconds; a take is capped at 10 minutes in the browser
 const MIME = {
@@ -158,6 +159,8 @@ function loadQuestions(db, ohId, viewer) {
     askedWith: q.asked_with,
     audio: mediaUrl(q.audio),
     audioStatus: q.audio_status,
+    // Asked on camera: the asker's video. Its sound is `audio`, and the transcript is of that.
+    askerVideo: mediaUrl(q.asker_video),
     audioTranscript: q.asked_with === 'audio' ? transcriptOf(db, q.audio) : null,
     planPosition: q.plan_position,
     answerVideo: mediaUrl(q.answer_video),
@@ -280,9 +283,10 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     };
   }
 
-  /** Deletes a spoken question's recording that was never asked, with its transcript. */
+  /** Deletes a spoken question's recording that was never asked, with its transcript (and video, if it was on camera). */
   function discardRecording(name) {
-    rmSync(join(mediaDir, name), { force: true });
+    const video = db.prepare('SELECT video FROM recordings WHERE media = ?').get(name)?.video;
+    for (const file of [name, video]) if (file) rmSync(join(mediaDir, file), { force: true });
     db.prepare('DELETE FROM transcripts WHERE media = ?').run(name);
     db.prepare('DELETE FROM recordings WHERE media = ?').run(name);
   }
@@ -294,9 +298,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   }
   pruneRecordings();
 
-  /** Who may fetch a media file: question audio and published answers are public; draft answers reach only the expert. */
+  /** Who may fetch a media file: questions' audio and video and published answers are public; draft answers reach only the expert. */
   function canSeeMedia(name, user) {
-    if (db.prepare('SELECT 1 FROM questions WHERE audio = ?').get(name)) return true;
+    if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ?').get(name, name)) return true;
     if (db.prepare('SELECT 1 FROM office_hours WHERE video = ?').get(name)) return true; // only set once published
     const owner = db
       .prepare(
@@ -541,8 +545,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   route(
     'POST',
     '/api/office-hours/:id/questions',
-    // A typed question has a `body`. A spoken one names its `recording` (see below) and sends the
-    // transcript lines as the asker checked them, in `cues`; that transcript is the question text.
+    // A typed question has a `body`. A spoken one, or one asked on camera, names its `recording`
+    // (see below) and sends the transcript lines as the asker checked them, in `cues`; that
+    // transcript is the question text.
     ({ params, user, body }) => {
       const oh = getOfficeHour(params.id);
       if (statusOf(oh) !== 'open') throw new HttpError(409, 'This office hour is no longer taking questions');
@@ -551,10 +556,11 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const recording = body.recording == null ? null : String(body.recording);
       let text;
       let fix = null;
+      let video = null;
       if (recording) {
-        if (!db.prepare('SELECT 1 FROM recordings WHERE media = ? AND user_id = ? AND office_hour_id = ?').get(recording, user.id, oh.id)) {
-          throw new HttpError(404, 'That recording has expired. Please record your question again.');
-        }
+        const draft = db.prepare('SELECT video FROM recordings WHERE media = ? AND user_id = ? AND office_hour_id = ?').get(recording, user.id, oh.id);
+        if (!draft) throw new HttpError(404, 'That recording has expired. Please record your question again.');
+        video = draft.video;
         fix = correctTranscript(recording, body.cues);
         text = fix.text;
         if (text.length < 5) throw new HttpError(400, 'Question must be at least 5 characters');
@@ -565,10 +571,10 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const id = transaction(db, () => {
         const { lastInsertRowid } = db
           .prepare(
-            `INSERT INTO questions (office_hour_id, author_id, source, is_anonymous, body, asked_with, audio, audio_status, created_at)
-             VALUES (?, ?, 'asker', ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO questions (office_hour_id, author_id, source, is_anonymous, body, asked_with, audio, audio_status, asker_video, created_at)
+             VALUES (?, ?, 'asker', ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(oh.id, user.id, anonymous ? 1 : 0, text, recording ? 'audio' : 'text', recording, recording ? 'ready' : null, now());
+          .run(oh.id, user.id, anonymous ? 1 : 0, text, recording ? 'audio' : 'text', recording, recording ? 'ready' : null, video, now());
         if (recording) {
           fix.save();
           db.prepare('DELETE FROM recordings WHERE media = ?').run(recording);
@@ -583,9 +589,11 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     { auth: true },
   );
 
-  // Asking out loud, step 1: the recording is the raw request body. It's transcribed while the
-  // asker waits, and comes back as a draft: nothing is asked until the asker has checked (and,
-  // if needed, corrected) the transcript and sends it to POST /questions with `recording`.
+  // Asking out loud, step 1: the recording is the raw request body, sound only or on camera. It's
+  // transcribed while the asker waits, and comes back as a draft: nothing is asked until the asker
+  // has checked (and, if needed, corrected) the transcript and sends it to POST /questions with
+  // `recording`. A video's sound is taken out into its own file first; that file is the recording
+  // the draft and the question are known by, and the video goes along with it.
   // A recording that can't be transcribed isn't kept.
   route(
     'POST',
@@ -594,14 +602,25 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       if (!speech) throw new HttpError(503, 'Asking out loud is not available on this server');
       const oh = getOfficeHour(params.id);
       if (statusOf(oh) !== 'open') throw new HttpError(409, 'This office hour is no longer taking questions');
-      // Cross-site forms can't send an audio/* content type, so this also blocks CSRF.
-      const ext = AUDIO_TYPES[contentType(req)];
-      if (!ext) throw new HttpError(415, 'Expected a WebM, MP4 or Ogg audio recording');
+      // Cross-site forms can't send an audio/* or video/* content type, so this also blocks CSRF.
+      const videoExt = VIDEO_TYPES[contentType(req)];
+      const ext = videoExt ?? AUDIO_TYPES[contentType(req)];
+      if (!ext) throw new HttpError(415, 'Expected a WebM, MP4 or Ogg recording');
       pruneRecordings();
-      const name = randomName(ext);
+      const upload = randomName(ext);
+      await saveUpload(req, join(mediaDir, upload), { max: videoExt ? MAX_QUESTION_VIDEO : MAX_AUDIO, label: 'Recording' });
+      const video = videoExt ? upload : null;
+      const name = videoExt ? randomName('m4a') : upload;
       const file = join(mediaDir, name);
-      await saveUpload(req, file, { max: MAX_AUDIO, label: 'Recording' });
       try {
+        if (video) {
+          try {
+            await speech.extractSound(join(mediaDir, video), file);
+          } catch (err) {
+            console.error(`[speech] taking the sound out of a question video failed: ${err.message}`);
+            throw new HttpError(400, "Couldn't hear anything in that video. Check that your microphone is on, and try again.");
+          }
+        }
         let heard;
         try {
           heard = await speech.transcribe(file, { interactive: true });
@@ -615,11 +634,11 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         const cues = cuesFromWords(heard.words);
         transaction(db, () => {
           db.prepare("INSERT INTO transcripts (media, status, text, cues, updated_at) VALUES (?, 'ready', ?, ?, ?)").run(name, text, JSON.stringify(cues), now());
-          db.prepare('INSERT INTO recordings (media, user_id, office_hour_id, created_at) VALUES (?, ?, ?, ?)').run(name, user.id, oh.id, now());
+          db.prepare('INSERT INTO recordings (media, video, user_id, office_hour_id, created_at) VALUES (?, ?, ?, ?, ?)').run(name, video, user.id, oh.id, now());
         });
         return { recording: { id: name, text, cues } };
       } catch (err) {
-        rmSync(file, { force: true });
+        for (const f of [upload, name]) rmSync(join(mediaDir, f), { force: true });
         throw err;
       }
     },

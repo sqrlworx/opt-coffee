@@ -1,13 +1,19 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
+import { rename } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const WORKER = fileURLToPath(new URL('./worker.py', import.meta.url));
 const INTERACTIVE_TIMEOUT = 120_000; // an asker is waiting on the response
 const BACKGROUND_TIMEOUT = 30 * 60_000; // includes downloading models on first use
+const EXTRACT_TIMEOUT = 60_000; // a question asked on camera is at most 90 seconds
+const run = promisify(execFile);
 
 /**
  * Speech for the app: speech-to-text for recordings and text-to-speech for typed questions.
+ * Questions asked on camera have their sound taken out with ffmpeg first.
  *
  * Runs src/speech/worker.py (faster-whisper + Kokoro) with uv as two long-lived processes, so
  * models load once: one for askers waiting on their question's transcript, and one for
@@ -38,6 +44,20 @@ export function createSpeech({
     /** @returns {Promise<{text: string, words: [number, number, string][]}>} */
     transcribe(file, { interactive: now = false } = {}) {
       return now ? interactive.request({ op: 'transcribe', file }, INTERACTIVE_TIMEOUT) : background.request({ op: 'transcribe', file }, BACKGROUND_TIMEOUT);
+    },
+
+    /**
+     * The sound of a question asked on camera, as an M4A file at `out`: it's transcribed, and
+     * played to the expert like any spoken question. Fails if the video has no sound.
+     */
+    async extractSound(file, out) {
+      const part = `${out}.part`;
+      try {
+        await run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', file, '-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-f', 'mp4', part], { timeout: EXTRACT_TIMEOUT });
+        await rename(part, out);
+      } finally {
+        rmSync(part, { force: true });
+      }
     },
 
     /** Reads `text` aloud into an M4A file at `out`. */
