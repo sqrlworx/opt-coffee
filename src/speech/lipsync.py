@@ -1,12 +1,12 @@
 """Lip sync: how the mouth moves while a question is said, frame by frame.
 
-In the joined video, a question that wasn't asked on camera is said by the Muse jolly
-(public/app.js), whose mouth follows the question's audio. When Kokoro reads a typed question
-aloud it predicts how long it says every phoneme, so those questions get exact timings. A
-question asked out loud has its words' timings from speech-to-text and their phonemes from
-Kokoro's G2P, spread over each word. Either way each phoneme becomes a mouth shape (a viseme)
-that blends into its neighbours, the audio's loudness closes the mouth in silence and opens it
-wider on loud syllables, and every m, b and p visibly closes the lips.
+In the joined video, a question that wasn't asked on camera is said by a fox (public/app.js),
+whose mouth follows the question's audio. When Kokoro reads a typed question aloud it predicts
+how long it says every phoneme, so those questions get exact timings. A question asked out loud
+has its words' timings from speech-to-text and their phonemes from Kokoro's G2P, spread over
+each word. Either way each phoneme becomes a mouth shape (a viseme) that blends into its
+neighbours, the audio's loudness closes the mouth in silence and opens it wider on loud
+syllables, and every m, b and p visibly closes the lips.
 
 Only needs numpy; worker.py brings the speech engines.
 """

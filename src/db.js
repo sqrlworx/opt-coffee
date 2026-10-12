@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   published_at        TEXT,
   video               TEXT,                 -- the published answers joined into one video (file in the media dir)
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
-  video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture
+  video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late)
 );
 
 CREATE TABLE IF NOT EXISTS questions (
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS questions (
   audio          TEXT,                      -- the question as speech: the asker's recording, or the text read aloud (file in the media dir)
   asker_video    TEXT,                      -- a question asked on camera: the asker's video (file in the media dir); its sound is also in audio
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
-  lip_sync       TEXT,                      -- how the mouth moves saying audio, for the jolly that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
+  lip_sync       TEXT,                      -- how the mouth moves saying audio, for the fox that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
   created_at     TEXT NOT NULL,
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir

@@ -311,7 +311,7 @@ test('asking on camera: the video goes with the question, and its sound is the r
   assert.equal(answer.askerVideo, q.askerVideo);
   assert.equal(answer.audio, q.audio);
   assert.notEqual(answer.video, q.askerVideo);
-  // The jolly says it until the video has a frame to show.
+  // The fox says it until the video has a frame to show.
   assert.equal(answer.lipSync, `/api/questions/${q.id}/lip-sync`);
 
   // MP4 works too.
@@ -323,10 +323,10 @@ test('a spoken question gets the lip sync of its recording, from the words heard
   const expert = await register('lips_expert');
   const asker = await register('lips_asker');
   const ohId = await officeHour(expert);
-  const { question: q } = await askOutLoud(asker, ohId, said('Does the jolly move its lips?'));
+  const { question: q } = await askOutLoud(asker, ohId, said('Does the fox move its lips?'));
   assert.equal(q.lipSync, null); // it's made in the background
   await app.idle();
-  const heard = [[0, 0.4, ' Does'], [0.5, 0.9, ' the'], [1, 1.4, ' jolly'], [1.5, 1.9, ' move'], [2, 2.4, ' its'], [2.5, 2.9, ' lips?']];
+  const heard = [[0, 0.4, ' Does'], [0.5, 0.9, ' the'], [1, 1.4, ' fox'], [1.5, 1.9, ' move'], [2, 2.4, ' its'], [2.5, 2.9, ' lips?']];
   assert.deepEqual(synced.at(-1), { file: join(mediaDir, q.audio.slice('/media/'.length)), words: heard });
   assert.ok(!lanes.some((l) => l.said === q.body && !l.interactive)); // not transcribed again
   const { question } = await client()('GET', `/api/questions/${q.id}`);

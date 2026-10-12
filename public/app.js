@@ -693,32 +693,33 @@ function icon(name) {
   return el;
 }
 
-// The Muse jolly, which says a question nobody asked on camera. jolly.webp is the jolly with its
-// eyes and mouth painted out; they're drawn here instead, so it can blink and talk. Coordinates
-// are in that picture's pixels.
-const JOLLY = {
-  src: '/jolly.webp',
-  view: [70, 73, 660, 495], // the part shown (x, y, width, height); the rest leaves room to sway
-  pivot: [400, 1178], // its feet, below the picture: it sways and bounces on them
-  ink: '#1a1714',
+// The fox, which says a question nobody asked on camera. fox.webp is the fox with its eyes and
+// mouth painted out; they're drawn here instead, so it can blink and talk. Coordinates are in that
+// picture's pixels.
+const FOX = {
+  src: '/fox.webp',
+  view: [84, 80, 900, 675], // the part shown (x, y, width, height); the rest leaves room to sway
+  pivot: [532, 1580], // its feet, below the picture: it sways and bounces on them
+  ink: '#100d0b',
+  shineColor: '228, 228, 225',
   // shine: the highlight's centre, radii and angle
   eyes: [
-    { at: [286.3, 284], r: [22.9, 24.2], shine: [298.8, 272.8, 5.3, 3.2, 0.96] },
-    { at: [514.3, 283.7], r: [22.5, 23.8], shine: [524.1, 272, 6.7, 3.9, 0.84] },
+    { at: [353.3, 477.4], r: [36.6, 37.7], shine: [373.9, 460.1, 8.6, 5.4, 0.82] },
+    { at: [714.7, 477.2], r: [36.8, 37.3], shine: [730.2, 458.6, 10.8, 6.3, 0.78] },
   ],
-  mouth: { at: [402.6, 340.4], halfWidth: 33, sag: 13, jaw: 28, line: 6.5 }, // at: the bottom of its smile
+  mouth: { at: [536.3, 560.7], halfWidth: 51, sag: 20, jaw: 42, line: 10 }, // at: the bottom of its smile
 };
 
-// The jolly on a canvas. `draw(pose, blink, t)` shows it with a pose from a question's lip sync,
+// The fox on a canvas. `draw(pose, blink, t)` shows it with a pose from a question's lip sync,
 // [open, width, energy] (see src/speech/lipsync.py), its eyes `blink` (0-1) shut, `t` seconds
 // into the question, which sets its idle sway.
-function jolly() {
-  const canvas = h('canvas', { class: 'jp-jolly' });
+function fox() {
+  const canvas = h('canvas', { class: 'jp-fox' });
   const ctx = canvas.getContext('2d');
   const image = new Image();
   let last = null;
   image.onload = () => last && draw(...last);
-  image.src = JOLLY.src;
+  image.src = FOX.src;
 
   function eye({ at: [x, y], r: [rx, ry], shine: [sx, sy, srx, sry, angle] }, blink) {
     // It blinks by squashing, as the lid comes down.
@@ -726,7 +727,7 @@ function jolly() {
     ctx.save();
     ctx.translate(x, y + 0.45 * ry * (1 - squash));
     ctx.scale(1, squash);
-    ctx.fillStyle = JOLLY.ink;
+    ctx.fillStyle = FOX.ink;
     ctx.beginPath();
     ctx.ellipse(0, 0, rx, ry, 0, 0, 2 * Math.PI);
     ctx.fill();
@@ -736,9 +737,9 @@ function jolly() {
       ctx.rotate(angle);
       ctx.scale(srx, sry);
       const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-      glow.addColorStop(0, 'rgba(226, 220, 209, 0.95)');
-      glow.addColorStop(0.6, 'rgba(226, 220, 209, 0.9)');
-      glow.addColorStop(1, 'rgba(226, 220, 209, 0)');
+      glow.addColorStop(0, `rgba(${FOX.shineColor}, 0.95)`);
+      glow.addColorStop(0.6, `rgba(${FOX.shineColor}, 0.9)`);
+      glow.addColorStop(1, `rgba(${FOX.shineColor}, 0)`);
       ctx.fillStyle = glow;
       ctx.beginPath();
       ctx.arc(0, 0, 1, 0, 2 * Math.PI);
@@ -748,7 +749,7 @@ function jolly() {
   }
 
   function mouth(open, width) {
-    const { at: [mx, my], halfWidth, sag, jaw, line } = JOLLY.mouth;
+    const { at: [mx, my], halfWidth, sag, jaw, line } = FOX.mouth;
     const hw = halfWidth * width;
     const depth = jaw * open;
     const top = my - 0.12 * depth; // the upper lip lifts a little
@@ -769,7 +770,7 @@ function jolly() {
     lip(path, mx - hw, mx + hw, top, round);
     ctx.lineWidth = line;
     ctx.lineCap = ctx.lineJoin = 'round';
-    ctx.strokeStyle = JOLLY.ink;
+    ctx.strokeStyle = FOX.ink;
     if (depth < 0.5) return ctx.stroke(path);
     lip(path, mx + hw, mx - hw, bottom, 0.35 + 0.65 * round);
     path.closePath();
@@ -782,7 +783,7 @@ function jolly() {
     ctx.fillRect(mx - hw - line, Math.min(corner, top) - line, 2 * (hw + line), bottom - Math.min(corner, top) + 2 * line);
     ctx.fillStyle = '#d9737f'; // the tongue, behind the lower lip
     ctx.beginPath();
-    ctx.ellipse(mx, bottom, 0.55 * hw, Math.min(0.42 * depth, 10), 0, 0, 2 * Math.PI);
+    ctx.ellipse(mx, bottom, 0.55 * hw, Math.min(0.42 * depth, 0.3 * halfWidth), 0, 0, 2 * Math.PI);
     ctx.fill();
     ctx.restore();
     ctx.stroke(path);
@@ -790,7 +791,7 @@ function jolly() {
 
   function draw(pose, blink, t) {
     last = [pose, blink, t];
-    const [vx, vy, vw, vh] = JOLLY.view;
+    const [vx, vy, vw, vh] = FOX.view;
     const w = Math.round(canvas.clientWidth * devicePixelRatio);
     if (!w || !image.naturalWidth) return;
     if (canvas.width !== w) {
@@ -802,21 +803,21 @@ function jolly() {
     ctx.setTransform(scale, 0, 0, scale, -vx * scale, -vy * scale);
     // A slow sway and breathing, and it rises a little on the louder parts.
     const wave = (period, phase = 0) => Math.sin((2 * Math.PI * t) / period + phase);
-    const [px, py] = JOLLY.pivot;
+    const [px, py] = FOX.pivot;
     const breathe = 0.005 * wave(3.4);
-    ctx.translate(px, py - 1.5 * wave(3.7, 0.9) - 7 * energy);
+    ctx.translate(px, py - vh * (0.003 * wave(3.7, 0.9) + 0.014 * energy));
     ctx.rotate(((wave(5.3, 0.4) + 0.4 * wave(2.9, 1.7)) * Math.PI) / 180);
     ctx.scale(1 + breathe - 0.006 * energy, 1 + breathe + 0.012 * energy);
     ctx.translate(-px, -py);
     ctx.drawImage(image, 0, 0);
-    for (const e of JOLLY.eyes) eye(e, blink);
+    for (const e of FOX.eyes) eye(e, blink);
     mouth(open, width);
   }
 
   return { el: canvas, draw };
 }
 
-// How far shut the jolly's eyes are `t` seconds into a question: it blinks every 2-5 seconds,
+// How far shut the fox's eyes are `t` seconds into a question: it blinks every 2-5 seconds,
 // at random but the same each time the question with id `seed` plays.
 function blinkAt(seed, t) {
   let state = seed;
@@ -840,9 +841,10 @@ function blinkAt(seed, t) {
 // at the bottom, except for answers whose captions are burned into the video (`captions` on their
 // chapter, when the server finished it). While a question is being played, a picture at the top
 // left shows who asked: the asker's video for a question asked on camera, kept in step with the
-// question, and otherwise the jolly saying it. `chapters` place each answer in the video; its
-// question's cues and its transcript's are timed from the start of its take. `update(q)` picks up
-// a transcript that's ready or corrected.
+// question, and otherwise the fox saying it. `chapters` place each answer in the video, and where
+// its question's sound starts in it (`questionStart`), which the fox and the asker's video follow;
+// its question's cues and its transcript's are timed from the start of its take. `update(q)` picks
+// up a transcript that's ready or corrected.
 function jointPlayer(answers, { src, chapters }) {
   const byId = new Map(answers.map((q) => [q.id, q]));
   const parts = chapters.filter((c) => byId.has(c.questionId)).map((c) => ({ ...c, q: byId.get(c.questionId) }));
@@ -860,7 +862,7 @@ function jointPlayer(answers, { src, chapters }) {
 
   const video = fixDuration(h('video', { class: 'jp-video', src, preload: 'metadata', playsinline: true }), { firstFrame: true });
   const caption = h('span', { class: 'jp-caption', hidden: true });
-  const stand = jolly(); // stands in for an asker who wasn't on camera
+  const stand = fox(); // stands in for an asker who wasn't on camera
   const faceSlot = h('span', { class: 'jp-face-slot' });
   const pip = h('span', { class: 'jp-pip' }, stand.el, faceSlot);
   const asker = h('span', { class: 'jp-asker' });
@@ -910,7 +912,7 @@ function jointPlayer(answers, { src, chapters }) {
     video.play().catch(() => {});
   };
 
-  // Until a question's lip sync has loaded, or if it has none, the jolly's mouth follows how loud
+  // Until a question's lip sync has loaded, or if it has none, the fox's mouth follows how loud
   // the question is. That means routing the video's sound through Web Audio, which browsers only
   // allow starting from a click or key press, as play() always is. If it can't be set up, the
   // mouth stays shut.
@@ -956,7 +958,7 @@ function jointPlayer(answers, { src, chapters }) {
     el.classList.toggle('is-fullscreen', on);
     setChildren(fullscreenBtn, icon(on ? 'exitFullscreen' : 'fullscreen'));
     fullscreenBtn.setAttribute('aria-label', on ? 'Exit fullscreen (f)' : 'Fullscreen (f)');
-    tick(); // the jolly is redrawn at its new size
+    tick(); // the fox is redrawn at its new size
   };
   el.addEventListener('fullscreenchange', onFullscreen);
   el.addEventListener('webkitfullscreenchange', onFullscreen);
@@ -985,7 +987,7 @@ function jointPlayer(answers, { src, chapters }) {
       if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
       if (video.paused) f.pause();
       else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
-      // The initials stand in until the video has a picture of this moment, rather than an empty
+      // The fox stands in until the video has a picture of this moment, rather than an empty
       // black box or a first frame that then jumps. Once shown it stays, even while it seeks
       // (the last frame stays up meanwhile).
       if (f.readyState >= 2 && !f.seeking && Math.abs(f.currentTime - at) <= 0.3) pictured.add(f);
@@ -993,7 +995,7 @@ function jointPlayer(answers, { src, chapters }) {
     asking.classList.toggle('has-face', Boolean(f && pictured.has(f)));
   }
 
-  // The questions' lip sync, for the jolly. Each loads while the answer before it plays.
+  // The questions' lip sync, for the fox. Each loads while the answer before it plays.
   const lipSyncs = new Map(); // question id -> {fps, frames}; null while it loads, or if it couldn't
   function lipSync(q) {
     if (q.lipSync && !lipSyncs.has(q.id)) {
@@ -1024,7 +1026,8 @@ function jointPlayer(answers, { src, chapters }) {
       if (p.q.askerVideo) face(p.q).preload = 'auto';
       lipSync(p.q);
     }
-    const at = q ? t - part.start : 0;
+    // How far into the question's sound, which starts a little after its take does.
+    const at = q ? t - part.start - (part.questionStart ?? 0) : 0;
     showFace(q?.askerVideo ? face(q) : null, at);
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
     if (q && !asking.classList.contains('has-face')) {

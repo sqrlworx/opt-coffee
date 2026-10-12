@@ -11,8 +11,9 @@ import { createModerator } from '../src/moderator/index.js';
 import { createVideoJoiner } from '../src/video.js';
 
 // Stands in for ffmpeg: a "video" says how long it is ("take: <label> <seconds>s"), and joining
-// writes them one after another. `hold(t)` makes joining wait until released, `failNext` fails it.
-// Takes come as {file, answerStart, cues, words}.
+// writes them one after another. A question with audio is found 0.06 seconds into its part, and
+// `located` records what was looked for. `hold(t)` makes joining wait until released, `failNext`
+// fails it. Takes come as {file, answerStart, cues, words}.
 let gate = null;
 let failNext = false;
 const hold = (t) => {
@@ -26,6 +27,7 @@ const hold = (t) => {
   return release;
 };
 const joins = [];
+const located = [];
 const fakeJoiner = {
   async join(takes, out) {
     await gate;
@@ -38,6 +40,10 @@ const fakeJoiner = {
     joins.push(videos);
     writeFileSync(out, videos.join('\n'));
     return { durations: videos.map((v) => Number(/ ([\d.]+)s$/.exec(v)[1])), captioned: videos.map(() => false) };
+  },
+  async locate(video, questions) {
+    located.push(questions);
+    return questions.map((q) => (q.audio ? 0.06 : 0));
   },
 };
 
@@ -137,13 +143,28 @@ test('publishing joins the answers into one public video, in the published order
   const { video } = await reader('GET', `/api/office-hours/${ohId}`);
   assert.equal(video.status, 'ready');
   assert.match(video.src, /^\/media\/[0-9a-f]{32}\.mp4$/);
-  assert.deepEqual(video.chapters, [{ questionId: ids[2], start: 0, end: 4, captions: false }, { questionId: ids[0], start: 4, end: 11.5, captions: false }]);
+  assert.deepEqual(video.chapters, [{ questionId: ids[2], start: 0, end: 4, captions: false, questionStart: 0 }, { questionId: ids[0], start: 4, end: 11.5, captions: false, questionStart: 0 }]);
   assert.deepEqual((await reader('GET', `/api/office-hours/${ohId}/video`)).video, video);
   // Anyone can watch it, like the published answers.
   const res = await reader.media(video.src);
   assert.equal(res.status, 200);
   assert.equal(await res.text(), 'take: Third question here? 4s\ntake: First question here? 7.5s');
   assert.equal(res.headers.get('content-type'), 'video/mp4');
+});
+
+test("the joined video says how far into each answer its question's sound starts", async () => {
+  const expert = await register('locate_host');
+  const asker = await register('locate_asker');
+  const { ohId, ids } = await recorded(expert, asker, [['A question read aloud?', 6], ['One without sound?', 3]]);
+  // The first was read aloud and played at the start of its take; the second has no audio.
+  const audio = `${'c'.repeat(32)}.m4a`;
+  db.prepare('UPDATE questions SET audio = ? WHERE id = ?').run(audio, ids[0]);
+  await expert('PUT', `/api/questions/${ids[0]}/video?answerStart=2.5`, take('A question read aloud?', 6));
+  await expert('POST', `/api/office-hours/${ohId}/publish`);
+  await app.idle();
+  assert.deepEqual(located.at(-1), [{ audio: join(mediaDir, audio), start: 0, length: 2.5 }, { audio: null, start: 6, length: null }]);
+  const { video } = await client()('GET', `/api/office-hours/${ohId}`);
+  assert.deepEqual(video.chapters.map((c) => [c.start, c.questionStart]), [[0, 0.06], [6, 0]]);
 });
 
 test("a join that fails is marked failed and leaves no file behind; the answers are shown one by one", async () => {
@@ -164,22 +185,28 @@ test('on startup, office hours published before joining existed, or mid-join, ar
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_resume_'));
   try {
     const oldDb = openDb(':memory:');
+    // The third was joined before the questions were found in joined videos.
     oldDb.exec(`
       INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (1, 'old', 'Old', 'x', '2026-01-01');
-      INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at, published_at) VALUES
-        (1, 1, 'Old', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04'),
-        (2, 1, 'Unpublished', '2026-01-02', '2026-01-03', '2026-01-01', NULL);
-      INSERT INTO questions (id, office_hour_id, author_id, body, created_at, published_position, published_answer_video) VALUES
-        (1, 1, 1, 'Old question?', '2026-01-01', 1, '${'a'.repeat(32)}.webm');
+      INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at, published_at, video, video_status, video_chapters) VALUES
+        (1, 1, 'Old', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', NULL, NULL, NULL),
+        (2, 1, 'Unpublished', '2026-01-02', '2026-01-03', '2026-01-01', NULL, NULL, NULL, NULL),
+        (3, 1, 'Joined', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${'d'.repeat(32)}.mp4', 'ready', '[[2, 0, 5, 0]]');
+      INSERT INTO questions (id, office_hour_id, author_id, body, created_at, published_position, published_answer_video, audio, published_answer_start) VALUES
+        (1, 1, 1, 'Old question?', '2026-01-01', 1, '${'a'.repeat(32)}.webm', NULL, NULL),
+        (2, 3, 1, 'Joined question?', '2026-01-01', 1, '${'e'.repeat(32)}.webm', '${'f'.repeat(32)}.m4a', 1.5);
     `);
     writeFileSync(join(dir, `${'a'.repeat(32)}.webm`), take('old', 9));
     const resumed = createApp({ db: oldDb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, joiner: fakeJoiner });
     await resumed.idle();
     const rows = oldDb.prepare('SELECT id, video, video_status, video_chapters FROM office_hours ORDER BY id').all();
     assert.equal(rows[0].video_status, 'ready');
-    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9, 0]]);
+    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9, 0, 0]]);
     assert.ok(existsSync(join(dir, rows[0].video)));
     assert.equal(rows[1].video_status, null);
+    // Not joined again: its question is found in the video it has.
+    assert.deepEqual([rows[2].video, JSON.parse(rows[2].video_chapters)], [`${'d'.repeat(32)}.mp4`, [[2, 0, 5, 0, 0.06]]]);
+    assert.deepEqual(located.at(-1), [{ audio: join(dir, `${'f'.repeat(32)}.m4a`), start: 0, length: 1.5 }]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -231,6 +258,33 @@ test('ffmpeg joins takes of different formats, sizes and frame rates', { skip: !
   }
 });
 
+test("ffmpeg finds where a question's sound starts in a joined video", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_locate_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  try {
+    // A question with an uneven rhythm, and a video whose second part, from 2 seconds in, plays it
+    // 80 ms late, over some noise.
+    const question = "aevalsrc='0.4*sin(2*PI*300*t)*gt(sin(2*PI*2.3*t)+sin(2*PI*3.7*t+1),0.4)':s=16000:d=2.5";
+    ffmpeg('-f', 'lavfi', '-i', question, join(dir, 'q.m4a'));
+    ffmpeg(
+      '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=30:duration=5', '-f', 'lavfi', '-i', 'anoisesrc=a=0.01:d=5', '-f', 'lavfi', '-i', question,
+      '-filter_complex', '[2]adelay=2080:all=1[q];[1][q]amix=inputs=2:duration=first:normalize=0[a]', '-map', '0:v', '-map', '[a]', '-c:v', 'libx264', '-c:a', 'aac', join(dir, 'joined.mp4'),
+    );
+    const logs = [];
+    const found = await createVideoJoiner({ log: (msg) => logs.push(msg) }).locate(join(dir, 'joined.mp4'), [
+      { audio: null, start: 0, length: 2 },
+      { audio: join(dir, 'q.m4a'), start: 2, length: 2.5 },
+      { audio: join(dir, 'missing.m4a'), start: 2, length: 2.5 },
+    ]);
+    assert.equal(found[0], 0);
+    assert.ok(Math.abs(found[1] - 0.08) < 0.011, `found at ${found[1]}s`);
+    assert.equal(found[2], 0); // it can't be found
+    assert.match(logs.join('\n'), /finding a question in .*joined\.mp4 failed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // A joiner that finishes takes, as with src/finish: it records what it's given, and its captions
 // are burned in for every take with a transcript. `gate` holds it until released.
 function finishingJoiner() {
@@ -244,6 +298,7 @@ function finishingJoiner() {
       writeFileSync(out, `finished, version ${joiner.calls.length}`);
       return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)) };
     },
+    locate: async (video, questions) => questions.map(() => 0),
   };
   return joiner;
 }
@@ -303,7 +358,7 @@ test('finished joins wait for transcripts being made, and their chapters say whi
   assert.deepEqual([second.video, second.cues], ['take: And this one? 5s', undefined]);
   const { video } = await asker('GET', `/api/office-hours/${officeHour.id}`);
   assert.equal(video.status, 'ready');
-  assert.deepEqual(video.chapters, [{ questionId: ids[0], start: 0, end: 5, captions: true }, { questionId: ids[1], start: 5, end: 10, captions: false }]);
+  assert.deepEqual(video.chapters, [{ questionId: ids[0], start: 0, end: 5, captions: true, questionStart: 0 }, { questionId: ids[1], start: 5, end: 10, captions: false, questionStart: 0 }]);
 });
 
 test('correcting a published transcript remakes a finished video, and readers keep the old one until then', async (t) => {

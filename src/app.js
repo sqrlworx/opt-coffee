@@ -179,7 +179,7 @@ function questionView(db, q, viewer) {
     // Asked on camera: the asker's video. Its sound is `audio`, and the transcript is of that.
     askerVideo: mediaUrl(q.asker_video),
     audioTranscript,
-    // How the mouth moves saying `audio`, for the jolly that says the question in the joined video.
+    // How the mouth moves saying `audio`, for the fox that says the question in the joined video.
     lipSync: q.lip_sync ? `/api/questions/${q.id}/lip-sync` : null,
     planPosition: q.plan_position,
     answerVideo: mediaUrl(q.answer_video),
@@ -221,11 +221,14 @@ function publishedAnswers(questions) {
 /**
  * The published answers as one video, or null without ffmpeg. `chapters` place each answer in it;
  * `captions` is true where its captions are burned into the picture, so players don't draw them again.
+ * `questionStart` is how far into the answer its question's sound starts, until found 0.
  */
 function joinedVideo(oh) {
   if (!oh.video_status) return null;
   const ready = oh.video_status === 'ready';
-  const chapters = ready ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned]) => ({ questionId, start, end, captions: Boolean(captioned) })) : [];
+  const chapters = ready
+    ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned, questionStart = 0]) => ({ questionId, start, end, captions: Boolean(captioned), questionStart }))
+    : [];
   return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, chapters };
 }
 
