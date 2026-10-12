@@ -616,6 +616,13 @@ function qaList(answers, videos) {
 const askedBy = (q) => (q.source === 'moderator' ? 'suggested by the moderator' : q.anonymous ? 'anonymous' : q.author?.displayName);
 // Who's asking, over the video while a question is played.
 const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`);
+// Their initials, shown in place of their video when there isn't one.
+const askerInitials = (q) =>
+  q.source === 'moderator'
+    ? '✦'
+    : q.anonymous || !q.author
+      ? '?'
+      : q.author.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((word) => [...word][0].toUpperCase()).join('');
 
 // The whole Q&A as text, to read straight through: each question, then the transcript of its answer.
 // `onChange(q)` hears when an answer's transcript becomes ready or is corrected. `collapsed` folds
@@ -694,13 +701,13 @@ function icon(name) {
 }
 
 // The published answers as one video: the takes joined end to end on the server (src/video.js).
-// It has its own controls, so captions and the orb stay on it in fullscreen. Captions are drawn at
-// the bottom, except for answers whose captions are burned into the video (`captions` on their
-// chapter, when the server finished it); while a question is being played, a glowing orb at the
-// top left pulses with the asker's voice and says who asked. A question asked on camera shows the
-// asker's video there instead, kept in step with the question. `chapters` place each answer in the
-// video, and its transcript's cues are timed from the start of its take. `update(q)` picks up a
-// transcript that's ready or corrected.
+// It has its own controls, so captions and the asker stay on it in fullscreen. Captions are drawn
+// at the bottom, except for answers whose captions are burned into the video (`captions` on their
+// chapter, when the server finished it). While a question is being played, a picture at the top
+// left shows who asked: the asker's video for a question asked on camera, kept in step with the
+// question, and otherwise their initials, pulsing with their voice. `chapters` place each answer
+// in the video; its question's cues and its transcript's are timed from the start of its take.
+// `update(q)` picks up a transcript that's ready or corrected.
 function jointPlayer(answers, { src, chapters }) {
   const byId = new Map(answers.map((q) => [q.id, q]));
   const parts = chapters.filter((c) => byId.has(c.questionId)).map((c) => ({ ...c, q: byId.get(c.questionId) }));
@@ -709,17 +716,20 @@ function jointPlayer(answers, { src, chapters }) {
   let cues = []; // [start, end, text] over the whole video
   const recue = () => {
     cues = parts.flatMap(({ start, end, q, captions }) =>
-      !captions && q.transcript?.status === 'ready' ? q.transcript.cues.map(([s, e, text]) => [start + s, Math.min(start + e, end), text]) : [],
+      captions
+        ? []
+        : [...(q.questionCues ?? []), ...(q.transcript?.status === 'ready' ? q.transcript.cues : [])].map(([s, e, text]) => [start + s, Math.min(start + e, end), text]),
     );
   };
   recue();
 
   const video = fixDuration(h('video', { class: 'jp-video', src, preload: 'metadata', playsinline: true }), { firstFrame: true });
   const caption = h('span', { class: 'jp-caption', hidden: true });
-  const orb = h('span', { class: 'orb' });
-  const asker = h('span', { class: 'orb-label' });
+  const initials = h('span', { class: 'jp-initials' });
   const faceSlot = h('span', { class: 'jp-face-slot' });
-  const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, h('span', { class: 'orb-breath' }, orb), faceSlot, asker);
+  const pip = h('span', { class: 'jp-pip' }, h('span', { class: 'jp-voice' }, h('span', { class: 'jp-ring' }), initials), faceSlot);
+  const asker = h('span', { class: 'jp-asker' });
+  const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, pip, asker);
   const btn = (label, text, onclick) => h('button', { type: 'button', class: 'jp-btn', title: label, 'aria-label': label, onclick }, text);
   const playBtn = btn('Play (k)', icon('play'), () => toggle());
   const ccBtn = btn('Captions (c)', 'CC', () => setCaptions(!captionsOn));
@@ -749,7 +759,7 @@ function jointPlayer(answers, { src, chapters }) {
     controls,
   );
 
-  let started = false; // captions and the orb wait until it's played, or the viewer moves through it
+  let started = false; // captions and the asker wait until it's played, or the viewer moves through it
   let captionsOn = true;
   const begin = () => {
     started = true;
@@ -765,9 +775,9 @@ function jointPlayer(answers, { src, chapters }) {
     video.play().catch(() => {});
   };
 
-  // The orb follows how loud the question is. That means routing the video's sound through Web
-  // Audio, which browsers only allow starting from a click or key press, as play() always is. If
-  // it can't be set up, the orb just breathes.
+  // The initials pulse with how loud the question is. That means routing the video's sound through
+  // Web Audio, which browsers only allow starting from a click or key press, as play() always is.
+  // If it can't be set up, they just breathe.
   let analyser = null; // false once it's been tried and failed
   let samples = null;
   let level = 0; // 0-1, smoothed
@@ -838,7 +848,7 @@ function jointPlayer(answers, { src, chapters }) {
       if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
       if (video.paused) f.pause();
       else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
-      // The orb stands in until the video has a picture of this moment, rather than an empty
+      // The initials stand in until the video has a picture of this moment, rather than an empty
       // black box or a first frame that then jumps. Once shown it stays, even while it seeks
       // (the last frame stays up meanwhile).
       if (f.readyState >= 2 && !f.seeking && Math.abs(f.currentTime - at) <= 0.3) pictured.add(f);
@@ -859,13 +869,14 @@ function jointPlayer(answers, { src, chapters }) {
     if (q && q !== askingFor) {
       askingFor = q;
       asker.textContent = askerLabel(q);
+      initials.textContent = askerInitials(q);
     }
     asking.classList.toggle('show', Boolean(q));
     const i = parts.indexOf(part);
     for (const p of [parts[i], parts[i + 1]]) if (started && p?.q.askerVideo) face(p.q).preload = 'auto';
     showFace(q?.askerVideo ? face(q) : null, q ? t - part.start : 0);
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
-    orb.style.setProperty('--level', level.toFixed(3));
+    pip.style.setProperty('--level', level.toFixed(3));
     fill.style.width = `${pct(t)}%`;
     time.textContent = `${fmtDuration(t)} / ${fmtDuration(total)}`;
     bar.setAttribute('aria-valuenow', String(Math.round(t)));

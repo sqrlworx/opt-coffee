@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { openDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { createModerator } from '../src/moderator/index.js';
-import { cuesFromWords, toVtt } from '../src/speech/captions.js';
+import { cuesFromWords, questionCaptions, takeCaptions, toVtt } from '../src/speech/captions.js';
 import { createSpeech } from '../src/speech/index.js';
 
 // Stands in for Whisper and Kokoro: a "recording" holds the text that was said, and reading
@@ -139,6 +139,19 @@ test('captions: WebVTT output with timestamps, line wrapping and escaping', () =
       '1\n00:00:00.000 --> 00:00:01.500\nHello &lt;there&gt; &amp; welcome\n\n' +
       '2\n00:01:01.250 --> 01:02:05.004\nThis cue is long enough that\nit should wrap onto two lines\n',
   );
+});
+
+test('captions: the question at the start of a take is captioned as it was asked', () => {
+  // Typed: spread over the time it's read aloud, by length.
+  assert.deepEqual(questionCaptions({ body: 'Will this be captioned?' }, 1.5).cues, [[0, 1.5, 'Will this be captioned?']]);
+  // Spoken: its own transcript, cut off where the answer starts.
+  const spoken = { body: 'How do I shard Postgres?', cues: [[0, 2.4, 'How do I shard Postgres?'], [2.5, 3, 'Thanks!']], words: [[0, 0.4, ' How'], [2, 2.4, ' Postgres?'], [2.5, 3, ' Thanks!']] };
+  assert.deepEqual(questionCaptions(spoken, 2.2), { cues: [[0, 2.2, 'How do I shard Postgres?']], words: [[0, 0.4, ' How'], [2, 2.2, ' Postgres?']] });
+  // A take: the question's captions, then what its transcript heard after the question.
+  const take = { cues: [[0, 2.4, 'How do I chard Postgres?'], [2.5, 4, 'By tenant.']], words: null };
+  assert.deepEqual(takeCaptions(spoken, take, 2.2).cues, [[0, 2.2, 'How do I shard Postgres?'], [2.5, 4, 'By tenant.']]);
+  // Without an answerStart, the question wasn't played: the take is all answer.
+  assert.deepEqual(takeCaptions(spoken, take, null).cues, take.cues);
 });
 
 // ---------- asking ----------
@@ -561,6 +574,43 @@ test('the expert can correct an answer transcript, before and after publishing',
   assert.match(await (await asker.media(published.captions)).text(), /production!\n/);
 });
 
+test('an answer is captioned with its question as asked; its transcript, and what the expert corrects, is only the answer', async () => {
+  const expert = await register('asked_host');
+  const asker = await register('asked_asker');
+  const reader = client();
+  const ohId = await officeHour(expert);
+  const { question: spoken } = await askOutLoud(asker, ohId, said('How do I shard Postgress?'), { lines: ['How do I shard Postgres?'] });
+  const { question: typed } = await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'Is SQLite enough?' });
+  await expert('PUT', `/api/office-hours/${ohId}/plan`, { items: [{ questionId: spoken.id }, { questionId: typed.id }] });
+  // Each take starts with the question being played, which transcribing the take mishears.
+  await expert('PUT', `/api/questions/${spoken.id}/video?answerStart=2.2`, said('How do I chard Postgres? By tenant id. Pick one that spreads load.'), { type: 'video/webm' });
+  await expert('PUT', `/api/questions/${typed.id}/video?answerStart=2.5`, said('Is SQL light enough today? Yes, for most apps.'), { type: 'video/webm' });
+  await app.idle();
+
+  const draft = (await expert('GET', `/api/questions/${spoken.id}`)).question.answerTranscript;
+  assert.deepEqual(draft.cues, [[2.5, 6.4, 'By tenant id. Pick one that spreads load.']]);
+  assert.equal(draft.text, 'By tenant id. Pick one that spreads load.');
+  // Its subtitles start with the question as the asker corrected it, not as the take was heard.
+  const vtt = await (await expert.media(draft.captions)).text();
+  assert.match(vtt, /^WEBVTT\n\n1\n00:00:00\.000 --> 00:00:02\.200\nHow do I shard Postgres\?\n\n2\n00:00:02\.500 --> 00:00:06\.400\nBy tenant id/);
+  assert.doesNotMatch(vtt, /chard/);
+
+  const path = `/api/questions/${spoken.id}/answer-transcript`;
+  assert.equal((await expert('PUT', path, { cues: ['How do I shard Postgres?', 'By tenant ID.'] })).status, 400);
+  const res = await expert('PUT', path, { cues: ['By tenant ID. Pick one that spreads the load.'] });
+  assert.equal(res.status, 200, res.error);
+  assert.deepEqual(res.transcript.cues, [[2.5, 6.4, 'By tenant ID. Pick one that spreads the load.']]);
+
+  await expert('POST', `/api/office-hours/${ohId}/publish`);
+  const [first, second] = (await reader('GET', `/api/office-hours/${ohId}`)).answers;
+  assert.deepEqual(first.questionCues, [[0, 2.2, 'How do I shard Postgres?']]);
+  assert.deepEqual(first.transcript.cues, res.transcript.cues);
+  // A typed question is spread over the time it's read aloud.
+  assert.deepEqual(second.questionCues, [[0, 2.5, 'Is SQLite enough?']]);
+  assert.deepEqual(second.transcript.cues, [[2.5, 4.4, 'Yes, for most apps.']]);
+  assert.match(await (await reader.media(second.transcript.captions)).text(), /\nIs SQLite enough\?\n/);
+});
+
 test('published answers get a summary once transcribed, of the answer after the question, and again when corrected', async (t) => {
   const expert = await register('summary_host');
   const asker = await register('summary_reader');
@@ -583,7 +633,9 @@ test('published answers get a summary once transcribed, of the answer after the 
   assert.deepEqual((await asker('GET', `/api/office-hours/${ohId}`)).answers[0].summary, summary);
   assert.deepEqual((await asker('GET', `/api/questions/${q.id}`)).question.summary, summary);
 
-  const res = await expert('PUT', `/api/questions/${q.id}/answer-transcript`, { cues: ['How do you test migrations?', 'Run them against a staging copy first.', 'Then check that the row counts match.'] });
+  // Only the answer's lines are the expert's to correct, not the question played before it.
+  assert.equal((await expert('PUT', `/api/questions/${q.id}/answer-transcript`, { cues: ['How do you test migrations?', 'Run them against a staging copy first.', 'Then check that the row counts match.'] })).status, 400);
+  const res = await expert('PUT', `/api/questions/${q.id}/answer-transcript`, { cues: ['Run them against a staging copy first.', 'Then check that the row counts match.'] });
   assert.equal(res.status, 200, res.error);
   assert.equal((await asker('GET', `/api/questions/${q.id}`)).question.summary.points[0], 'Run them against a staging copy first.');
 });

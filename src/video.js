@@ -5,6 +5,7 @@ import { rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { takeCaptions } from './speech/captions.js';
 
 const run = promisify(execFile);
 const sleep = promisify(setTimeout);
@@ -132,13 +133,22 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
   // replaces the current video only once the new one is ready.
   async function render(officeHourId, { remake = false } = {}) {
     const answers = db
-      .prepare('SELECT id, published_answer_video AS video, published_answer_start AS answerStart FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position')
+      .prepare(
+        `SELECT id, body, asked_with AS askedWith, audio, published_answer_video AS video, published_answer_start AS answerStart
+         FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position`,
+      )
       .all(officeHourId);
     const name = `${randomBytes(16).toString('hex')}.mp4`;
     try {
       if (!answers.length) throw new Error('nothing was published');
-      const texts = joiner.finishing ? await transcripts(answers.map((a) => a.video)) : new Map();
-      const takes = answers.map((a) => ({ file: join(mediaDir, a.video), answerStart: a.answerStart, ...texts.get(a.video) }));
+      // The question at the start of each take is captioned as it was asked: a spoken one from its own transcript.
+      const spoken = answers.filter((a) => a.askedWith === 'audio').map((a) => a.audio);
+      const texts = joiner.finishing ? await transcripts([...answers.map((a) => a.video), ...spoken]) : new Map();
+      const takes = answers.map((a) => {
+        const take = texts.get(a.video);
+        const asked = { body: a.body, ...(a.askedWith === 'audio' ? texts.get(a.audio) : null) };
+        return { file: join(mediaDir, a.video), answerStart: a.answerStart, ...(take && takeCaptions(asked, take, a.answerStart)) };
+      });
       const { durations, captioned } = await joiner.join(takes, join(mediaDir, name));
       // Where each answer starts and ends in the joined video: [question id, start, end, captions
       // burned in] in seconds.

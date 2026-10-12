@@ -283,9 +283,10 @@ test('finished joins wait for transcripts being made, and their chapters say whi
     ids.push(question.id);
   }
   await expert('PUT', `/api/office-hours/${officeHour.id}/plan`, { items: ids.map((questionId) => ({ questionId })) });
-  // The first answer's transcript is still being made; the second never got one.
-  const cues = [[0, 1.4, 'Will this be captioned?'], [1.6, 4, 'Yes, it will.']];
-  const words = [[0, 0.3, ' Will'], [0.3, 0.5, ' this'], [0.5, 0.7, ' be'], [0.7, 1.4, ' captioned?'], [1.6, 2, ' Yes,'], [2, 2.4, ' it'], [2.4, 4, ' will.']];
+  // The first answer's transcript is still being made; the second never got one. The question at
+  // the start of the take was misheard.
+  const cues = [[0, 1.4, 'Will this be caption?'], [1.6, 4, 'Yes, it will.']];
+  const words = [[0, 0.3, ' Will'], [0.3, 0.5, ' this'], [0.5, 0.7, ' be'], [0.7, 1.4, ' caption?'], [1.6, 2, ' Yes,'], [2, 2.4, ' it'], [2.4, 4, ' will.']];
   setTranscript(f.db, answerVideo(f.db, ids[0]), 'pending');
   await expert('POST', `/api/office-hours/${officeHour.id}/publish`);
   await new Promise((resolve) => setTimeout(resolve, 300));
@@ -295,7 +296,10 @@ test('finished joins wait for transcripts being made, and their chapters say whi
 
   assert.equal(f.joiner.calls.length, 1);
   const [first, second] = f.joiner.calls[0];
-  assert.deepEqual([first.video, first.answerStart, first.cues, first.words], ['take: Will this be captioned? 5s', 1.5, cues, words]);
+  assert.deepEqual([first.video, first.answerStart], ['take: Will this be captioned? 5s', 1.5]);
+  // The question is captioned as it was typed, spread over the time it's read aloud; then the answer.
+  assert.deepEqual(first.cues, [[0, 1.5, 'Will this be captioned?'], [1.6, 4, 'Yes, it will.']]);
+  assert.deepEqual(first.words, [[0, 0.313, ' Will'], [0.313, 0.625, ' this'], [0.625, 0.813, ' be'], [0.813, 1.5, ' captioned?'], ...words.slice(4)]);
   assert.deepEqual([second.video, second.cues], ['take: And this one? 5s', undefined]);
   const { video } = await asker('GET', `/api/office-hours/${officeHour.id}`);
   assert.equal(video.status, 'ready');

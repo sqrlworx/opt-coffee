@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { createSession, destroySession, hashPassword, parseCookies, userForSession, verifyPassword } from './auth.js';
 import { transaction } from './db.js';
-import { cuesFromWords, toVtt } from './speech/captions.js';
+import { cuesFromWords, questionCaptions, saidInAnswer, takeCaptions, toVtt } from './speech/captions.js';
 import { createSpeechJobs } from './speech/jobs.js';
 import { createVideoJobs } from './video.js';
 
@@ -133,6 +133,18 @@ function transcriptOf(db, name) {
   return { status: t.status, text: ready ? t.text : null, cues: ready ? JSON.parse(t.cues) : [], captions, edited: Boolean(t.edited_at) };
 }
 
+/**
+ * An answer's transcript: only what's said after the question, which plays at the start of the
+ * take (up to `answerStart`) and is captioned from the question itself, so it isn't the expert's
+ * to correct. Its `captions` still cover the whole take (see captionCues).
+ */
+function answerTranscriptOf(db, name, answerStart) {
+  const t = transcriptOf(db, name);
+  if (t?.status !== 'ready' || !answerStart) return t;
+  const cues = t.cues.filter(saidInAnswer(answerStart));
+  return { ...t, cues, text: cues.map(([, , text]) => text).join(' ') };
+}
+
 function loadQuestions(db, ohId, viewer) {
   const rows = db
     .prepare(
@@ -144,7 +156,12 @@ function loadQuestions(db, ohId, viewer) {
        ORDER BY q.id`,
     )
     .all(viewer?.id ?? -1, ohId);
-  return rows.map((q) => ({
+  return rows.map((q) => questionView(db, q, viewer));
+}
+
+function questionView(db, q, viewer) {
+  const audioTranscript = q.asked_with === 'audio' ? transcriptOf(db, q.audio) : null;
+  return {
     id: q.id,
     body: q.body,
     source: q.source,
@@ -161,25 +178,35 @@ function loadQuestions(db, ohId, viewer) {
     audioStatus: q.audio_status,
     // Asked on camera: the asker's video. Its sound is `audio`, and the transcript is of that.
     askerVideo: mediaUrl(q.asker_video),
-    audioTranscript: q.asked_with === 'audio' ? transcriptOf(db, q.audio) : null,
+    audioTranscript,
     planPosition: q.plan_position,
     answerVideo: mediaUrl(q.answer_video),
     answerStart: q.answer_start,
-    answerTranscript: transcriptOf(db, q.answer_video),
+    answerTranscript: answerTranscriptOf(db, q.answer_video, q.answer_start),
     publishedPosition: q.published_position,
     publishedAnswerVideo: mediaUrl(q.published_answer_video),
     publishedAnswerStart: q.published_answer_start,
-    publishedAnswerTranscript: transcriptOf(db, q.published_answer_video),
-  }));
+    publishedAnswerTranscript: answerTranscriptOf(db, q.published_answer_video, q.published_answer_start),
+    publishedQuestionCues: questionCaptions({ body: q.body, cues: audioTranscript?.cues }, q.published_answer_start).cues,
+  };
 }
 
 function stripPrivate(q) {
-  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, ...rest } = q;
+  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, ...rest } = q;
   return rest;
 }
 
-/** A published answer as readers see it. `answerStart` is where the answer begins, after the question. */
-const publishedAnswer = (q) => ({ ...stripPrivate(q), video: q.publishedAnswerVideo, answerStart: q.publishedAnswerStart, transcript: q.publishedAnswerTranscript });
+/**
+ * A published answer as readers see it. `answerStart` is where the answer begins, after the
+ * question; `questionCues` caption the question until then, timed from the start of the take.
+ */
+const publishedAnswer = (q) => ({
+  ...stripPrivate(q),
+  video: q.publishedAnswerVideo,
+  answerStart: q.publishedAnswerStart,
+  questionCues: q.publishedQuestionCues,
+  transcript: q.publishedAnswerTranscript,
+});
 
 /** What readers see: the snapshot taken at the last publish, in the expert's order. */
 function publishedAnswers(questions) {
@@ -264,22 +291,28 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   /**
    * Corrected text for a finished transcript, one line per cue, so every subtitle keeps its
    * timing. An empty line drops that cue. Returns the new text, and `save()` to store it (marked
-   * as edited if anything changed).
+   * as edited if anything changed). For an answer, `answerStart` limits the lines to the answer:
+   * the question before it is kept as it was.
    */
-  function correctTranscript(name, lines) {
+  function correctTranscript(name, lines, { answerStart = null } = {}) {
     const t = name ? db.prepare('SELECT * FROM transcripts WHERE media = ?').get(name) : null;
     if (!t || t.status !== 'ready') throw new HttpError(409, "There's no finished transcript to edit yet");
-    const cues = JSON.parse(t.cues);
+    const all = JSON.parse(t.cues);
+    const inAnswer = saidInAnswer(answerStart);
+    const cues = all.filter(inAnswer);
     if (!Array.isArray(lines) || lines.length !== cues.length) throw new HttpError(400, `cues must be an array of ${cues.length} lines`);
     const edited = cues
       .map(([start, end], i) => [start, end, (str(lines[i], `Line ${i + 1}`, { max: 300 }) ?? '').replace(/\s+/g, ' ')])
       .filter(([, , text]) => text);
     if (edited.length === 0) throw new HttpError(400, "The transcript can't be empty");
+    const stored = [...all.filter((cue) => !inAnswer(cue)), ...edited];
     const text = edited.map(([, , line]) => line).join(' ');
-    const changed = JSON.stringify(edited) !== t.cues;
+    const changed = JSON.stringify(stored) !== t.cues;
     return {
       text,
-      save: () => changed && db.prepare('UPDATE transcripts SET text = ?, cues = ?, edited_at = ?, updated_at = ? WHERE media = ?').run(text, JSON.stringify(edited), now(), now(), name),
+      save: () =>
+        changed &&
+        db.prepare('UPDATE transcripts SET text = ?, cues = ?, edited_at = ?, updated_at = ? WHERE media = ?').run(stored.map(([, , line]) => line).join(' '), JSON.stringify(stored), now(), now(), name),
     };
   }
 
@@ -666,10 +699,10 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       if (!q) throw new HttpError(404, 'Question not found');
       const oh = getOfficeHour(q.office_hour_id);
       requireExpert(oh, user);
-      const name = oh.published_at ? q.published_answer_video : q.answer_video;
+      const [name, answerStart] = oh.published_at ? [q.published_answer_video, q.published_answer_start] : [q.answer_video, q.answer_start];
       // Captions burned into the joined video are remade from the corrected transcript.
-      if (correctTranscript(name, body.cues).save() && oh.published_at) videoJobs?.refresh(oh.id);
-      return { transcript: transcriptOf(db, name) };
+      if (correctTranscript(name, body.cues, { answerStart }).save() && oh.published_at) videoJobs?.refresh(oh.id);
+      return { transcript: answerTranscriptOf(db, name, answerStart) };
     },
     { auth: true },
   );
@@ -791,7 +824,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       db.prepare('UPDATE questions SET answer_video = ?, answer_start = ? WHERE id = ?').run(name, answerStart, q.id);
       pruneVideos([current.answer_video]);
       speechJobs?.transcribe(name);
-      return { video: mediaUrl(name), transcript: transcriptOf(db, name) };
+      return { video: mediaUrl(name), transcript: answerTranscriptOf(db, name, answerStart) };
     },
     { auth: true, raw: true },
   );
@@ -934,6 +967,18 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     }
   }
 
+  // A recording's subtitles, once it's transcribed: its transcript, except that an answer's begin
+  // with the question as it was asked (see takeCaptions).
+  function captionCues(name) {
+    const t = db.prepare("SELECT cues FROM transcripts WHERE media = ? AND status = 'ready'").get(name);
+    if (!t) return null;
+    const cues = JSON.parse(t.cues);
+    const q = db.prepare('SELECT * FROM questions WHERE answer_video = ? OR published_answer_video = ?').get(name, name);
+    if (!q) return cues;
+    const asked = q.asked_with === 'audio' ? db.prepare("SELECT cues FROM transcripts WHERE media = ? AND status = 'ready'").get(q.audio) : null;
+    return takeCaptions({ body: q.body, cues: asked && JSON.parse(asked.cues) }, { cues }, q.answer_video === name ? q.answer_start : q.published_answer_start).cues;
+  }
+
   // Recordings, plus `<name>.vtt` captions for any that are transcribed. See canSeeMedia for
   // who gets what. Supports Range requests, which browsers need to seek (and Safari needs to
   // play at all).
@@ -943,9 +988,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     const name = captions ? path.slice(0, -'.vtt'.length) : path;
     if (!MEDIA_NAME.test(name) || !canSeeMedia(name, user)) return sendJson(res, 404, { error: 'Not found' });
     if (captions) {
-      const t = db.prepare("SELECT cues FROM transcripts WHERE media = ? AND status = 'ready'").get(name);
-      if (!t) return sendJson(res, 404, { error: 'Not found' });
-      const vtt = Buffer.from(toVtt(JSON.parse(t.cues)));
+      const cues = captionCues(name);
+      if (!cues) return sendJson(res, 404, { error: 'Not found' });
+      const vtt = Buffer.from(toVtt(cues));
       res.writeHead(200, { 'Content-Type': MIME['.vtt'], 'Content-Length': vtt.length, 'Cache-Control': 'private, no-cache' });
       return res.end(req.method === 'HEAD' ? undefined : vtt);
     }

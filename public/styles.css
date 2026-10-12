@@ -184,24 +184,23 @@ textarea { resize: vertical; }
 .joint-player.playing.idle .jp-captions { bottom: 4cqw; }
 .jp-caption { padding: 0.15em 0.55em; border-radius: 0.3em; background: rgba(0, 0, 0, 0.62); color: #fff; font-size: clamp(14px, 2.6cqw, 36px); font-weight: 600; line-height: 1.35; text-align: center; text-wrap: balance; }
 .jp-caption.is-question { font-style: italic; }
-/* While a question is played: a glowing orb at the top left that pulses with the voice (--level, 0-1), and who asked. */
-.jp-asking { position: absolute; top: 3cqw; left: 3cqw; display: flex; align-items: center; gap: 0.75em; font-size: clamp(12px, 1.6cqw, 20px); pointer-events: none; opacity: 0; transform: scale(0.85); transform-origin: top left; transition: opacity 0.3s, transform 0.3s; }
+/* While a question is played: who asked, at the top left. Their picture sits above their name: the
+   asker's video for a question asked on camera, once it has a frame to show, and otherwise their
+   initials, breathing, in a ring that pulses with the voice (--level, 0-1). */
+.jp-asking { position: absolute; top: 3cqw; left: 3cqw; display: flex; flex-direction: column; align-items: flex-start; gap: 0.5em; font-size: clamp(12px, 1.6cqw, 20px); pointer-events: none; opacity: 0; transform: scale(0.85); transform-origin: top left; transition: opacity 0.3s, transform 0.3s; }
 .jp-asking.show { opacity: 1; transform: none; }
-.orb-breath { display: block; animation: orb-breathe 3.2s ease-in-out infinite; }
-.orb { --level: 0; position: relative; display: block; width: 3.4em; height: 3.4em; border-radius: 50%; overflow: hidden; background: radial-gradient(circle at 35% 30%, #eaf6ff 0%, #8fd0ff 28%, #3d8bff 62%, #1b4fd6 100%); box-shadow: 0 0 calc(0.8em + 1.6em * var(--level)) calc(0.1em + 0.4em * var(--level)) rgba(90, 170, 255, 0.65); transform: scale(calc(1 + 0.22 * var(--level))); transition: transform 0.08s linear, box-shadow 0.08s linear; }
-/* Soft clouds drifting inside it. */
-.orb::before, .orb::after { content: ''; position: absolute; inset: -35%; border-radius: 50%; mix-blend-mode: screen; filter: blur(0.35em); }
-.orb::before { background: conic-gradient(from 0deg, transparent 0 15%, rgba(255, 255, 255, 0.75) 30%, transparent 45% 60%, rgba(150, 225, 255, 0.7) 75%, transparent 90%); animation: orb-swirl 5s linear infinite; }
-.orb::after { background: radial-gradient(circle at 30% 70%, rgba(255, 255, 255, 0.55), transparent 40%), radial-gradient(circle at 75% 35%, rgba(120, 200, 255, 0.6), transparent 45%); animation: orb-swirl 7s linear infinite reverse; }
-.joint-player:not(.playing) .orb-breath, .joint-player:not(.playing) .orb::before, .joint-player:not(.playing) .orb::after { animation-play-state: paused; }
-@keyframes orb-swirl { to { transform: rotate(360deg); } }
-@keyframes orb-breathe { 0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.04); } }
-/* A question asked on camera shows the asker instead of the orb, with who asked underneath. */
-.jp-asking.has-face { flex-direction: column; align-items: flex-start; gap: 0.5em; }
-.jp-asking.has-face .orb-breath { display: none; }
+.jp-pip { --level: 0; position: relative; display: block; width: 11em; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 0.6em; background: radial-gradient(circle at 50% 45%, #2c3b63 0%, #161c2e 75%); box-shadow: 0 0.3em 1.2em rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(255, 255, 255, 0.85); }
+.jp-voice { position: absolute; inset: 0; display: grid; place-items: center; }
+.jp-voice > * { grid-area: 1 / 1; }
+.jp-ring { width: 3.6em; height: 3.6em; border-radius: 50%; box-shadow: 0 0 0 calc(0.12em + 0.5em * var(--level)) rgba(143, 208, 255, calc(0.3 + 0.6 * var(--level))), 0 0 calc(0.8em + 1.6em * var(--level)) calc(0.1em + 0.4em * var(--level)) rgba(90, 170, 255, 0.55); transition: box-shadow 0.08s linear; }
+.jp-initials { display: grid; place-items: center; width: 2.9em; height: 2.9em; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #8fd0ff 0%, #3d8bff 55%, #1b4fd6 100%); color: #fff; font-size: 1.25em; font-weight: 700; letter-spacing: 0.02em; animation: jp-breathe 3.2s ease-in-out infinite; }
+.joint-player:not(.playing) .jp-initials { animation-play-state: paused; }
+@keyframes jp-breathe { 0%, 100% { transform: scale(0.94); } 50% { transform: scale(1.04); } }
+.jp-face-slot { position: absolute; inset: 0; }
 .jp-asking:not(.has-face) .jp-face-slot { display: none; } /* it keeps loading while hidden */
-.jp-face { display: block; width: 11em; aspect-ratio: 4 / 3; object-fit: cover; background: #111; border-radius: 0.6em; box-shadow: 0 0.3em 1.2em rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(255, 255, 255, 0.85); }
-.orb-label { padding: 0.25em 0.7em; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; font-weight: 600; white-space: nowrap; }
+.jp-asking.has-face .jp-voice { visibility: hidden; }
+.jp-face { display: block; width: 100%; height: 100%; object-fit: cover; background: #111; }
+.jp-asker { padding: 0.25em 0.7em; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; font-weight: 600; white-space: nowrap; }
 .icon { display: inline-flex; }
 .jp-big-play { position: absolute; inset: 0; margin: auto; width: 72px; height: 72px; display: grid; place-items: center; border: none; border-radius: 50%; background: rgba(0, 0, 0, 0.55); color: #fff; cursor: pointer; }
 .jp-big-play svg { width: 36px; height: 36px; }
