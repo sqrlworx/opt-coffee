@@ -154,7 +154,7 @@ function subscribeButton({ type, id, subscribed, label }) {
 function questionMeta(q) {
   const parts = [];
   if (q.askedWith === 'audio') {
-    const how = q.askerVideo ? '🎥 Asked on camera' : '🎙 Asked out loud';
+    const how = q.askerVideo ? 'Asked on camera' : 'Asked out loud';
     parts.push(h('span', { class: 'tag' }, q.audioTranscript?.edited ? `${how} · transcript edited` : how));
   }
   if (q.source === 'moderator') parts.push(h('span', { class: 'tag tag-mod' }, '✦ Suggested by moderator'));
@@ -198,7 +198,7 @@ function askForm(oh, onAsked) {
   const anonNote = h('p', { class: 'hint', hidden: true });
   let mode = 'text';
   const modeButton = (value, label) => h('button', { type: 'button', class: 'ask-mode', 'data-mode': value, 'aria-pressed': String(value === mode), onclick: () => setMode(value) }, label);
-  const modes = speech ? h('div', { class: 'ask-modes', role: 'group', 'aria-label': 'How to ask' }, modeButton('text', '✎ Type'), modeButton('audio', '🎙 Speak'), modeButton('video', '🎥 Video')) : null;
+  const modes = speech ? h('div', { class: 'ask-modes', role: 'group', 'aria-label': 'How to ask' }, modeButton('text', 'Type'), modeButton('audio', 'Speak'), modeButton('video', 'Video')) : null;
 
   function showAnonNote() {
     anonNote.hidden = !(mode !== 'text' && anon?.checked);
@@ -787,16 +787,16 @@ const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.a
 // people's replies to the answer. `onChange(q)` hears when an answer's transcript becomes ready or
 // is corrected.
 function discussion(oh, answers, onChange) {
-  const items = answers.map((q, i) =>
+  const items = answers.map((q) =>
     h(
       'div',
       { class: 'ft-item' },
-      h('p', { class: 'ft-q' }, `${i + 1}. ${q.body}`, askedBy(q) ? h('span', { class: 'muted small' }, ` — ${askedBy(q)}`) : null),
+      h('p', { class: 'ft-q' }, q.body, askedBy(q) ? h('span', { class: 'muted small' }, ` — ${askedBy(q)}`) : null),
       answerBlock(oh, q, onChange),
       replyThread(oh, q),
     ),
   );
-  return h('section', { class: 'card full-transcript' }, h('h2', {}, 'Discussion'), items);
+  return h('section', { class: 'full-transcript' }, h('h2', {}, 'Discussion'), items);
 }
 
 // The replies to one answer. Anyone can reply to the answer; only the expert can respond to a reply,
@@ -1622,7 +1622,7 @@ async function officeHourPage({ id }) {
     { class: 'card oh-header' },
     h('div', { class: 'row gap-sm wrap' }, topicChip(oh), statusBadge(oh), oh.allowAnonymous ? h('span', { class: 'chip chip-muted' }, 'Anonymous OK') : null),
     h('h1', {}, oh.title),
-    h('p', { class: 'muted' }, 'with ', userLink(oh.expert)),
+    h('p', { class: 'byline' }, 'with ', userLink(oh.expert)),
     oh.followUpOf ? h('p', { class: 'muted small' }, 'Follows up on ', h('a', { href: `#/oh/${oh.followUpOf.id}` }, oh.followUpOf.title)) : null,
     oh.description ? h('p', { class: 'desc' }, oh.description) : null,
     data.followUps.length ? h('p', { class: 'muted small' }, 'Followed up in ', data.followUps.map((f, i) => [i ? ', ' : null, h('a', { href: `#/oh/${f.id}` }, f.title)])) : null,
@@ -1672,7 +1672,7 @@ async function officeHourPage({ id }) {
   }
 
   const groups = data.groups.length
-    ? data.groups.map((g) => h('section', { class: 'card group' }, h('div', { class: 'group-head' }, h('h3', {}, g.label), h('span', { class: 'muted small' }, `${g.questions.length} question${g.questions.length === 1 ? '' : 's'}`)), h('ul', { class: 'q-list' }, g.questions.map((q) => questionRow(q, { canVote })))))
+    ? data.groups.map((g) => h('section', { class: 'group' }, h('div', { class: 'group-head' }, h('h3', {}, g.label), h('span', { class: 'muted small' }, `${g.questions.length} question${g.questions.length === 1 ? '' : 's'}`)), h('ul', { class: 'q-list' }, g.questions.map((q) => questionRow(q, { canVote })))))
     : [empty(oh.status === 'open' ? 'No questions yet — be the first to ask.' : 'No questions were asked.')];
 
   return h(
@@ -1680,9 +1680,13 @@ async function officeHourPage({ id }) {
     { class: 'stack' },
     header,
     oh.processing ? processingNote(oh) : null,
-    oh.status === 'open' && !oh.isExpert ? h('div', { class: 'card' }, askForm(oh, () => render())) : null,
-    h('div', { class: 'row space-between' }, h('h2', { class: 'section-title' }, 'Questions'), h('span', { class: 'muted small', title: 'Similar questions are grouped by the moderator' }, '✦ grouped by the moderator')),
-    groups,
+    oh.status === 'open' && !oh.isExpert ? h('div', { class: 'card ask-card' }, askForm(oh, () => render())) : null,
+    h(
+      'section',
+      { class: 'questions' },
+      h('div', { class: 'row space-between section-head' }, h('h2', { class: 'section-title' }, 'Questions'), h('span', { class: 'muted small', title: 'Similar questions are grouped by the moderator' }, '✦ grouped by the moderator')),
+      groups,
+    ),
   );
 }
 
@@ -2205,7 +2209,7 @@ async function managePage({ id }) {
         h('p', { class: 'studio-q' }, q.body),
         questionMeta(q),
         hasAnswer(take.qid) ? warning(`This question already has an answer. Answering it again replaces it; ${last ? 'exiting without saving' : 'Skip'} keeps it.`) : null,
-        h('p', { class: `studio-status${take.answering ? ' is-answering' : ''}` }, take.loading ? 'Loading the question…' : take.answering ? '🎙 Your answer' : '🔊 Playing the question…'),
+        h('p', { class: `studio-status${take.answering ? ' is-answering' : ''}` }, take.loading ? 'Loading the question…' : take.answering ? '● Your answer' : 'Playing the question…'),
         take.exiting
           ? h(
               'div',
@@ -2699,7 +2703,7 @@ function userSwitcher() {
 function renderNav() {
   const link = (href, label) => h('a', { href, class: location.hash.split('?')[0] === href || (href === '#/' && !location.hash) ? 'active' : '' }, label);
   setChildren($nav,
-    h('a', { href: '#/', class: 'brand' }, '💬 forum'),
+    h('a', { href: '#/', class: 'brand' }, 'forum'),
     h('div', { class: 'nav-links' }, me ? link('#/', 'Feed') : null, link('#/explore', 'Explore')),
     h(
       'div',
