@@ -264,6 +264,43 @@ export function suggestQuestions(expert, officeHour, { existing = [], count = 6,
   return out;
 }
 
+// ---------- follow-ups ----------
+
+const MAX_FOLLOW_UP = 500; // characters, like a typed question
+
+/**
+ * Questions for a follow-up office hour, taken from the discussion under the published answers:
+ * the questions people asked in their replies. Ones the expert didn't respond to come first, then
+ * the most liked. The expert's own replies are left out.
+ * @param {{question: string, replies: {body: string, likes: number, byExpert: boolean, responded: boolean}[]}[]} discussion
+ *   one entry per answered question
+ * @param {{count?: number}} opts
+ * @returns {string[]}
+ */
+export function followUpQuestions(discussion, { count = 8 } = {}) {
+  const candidates = [];
+  for (const { replies } of discussion) {
+    for (const r of replies) {
+      if (r.byExpert) continue;
+      for (const s of sentences(r.body).filter((x) => x.endsWith('?') && x.length >= 5)) {
+        candidates.push({ text: s.length > MAX_FOLLOW_UP ? shorten(s, MAX_FOLLOW_UP - 1) : s, likes: r.likes, responded: r.responded, order: candidates.length });
+      }
+    }
+  }
+  candidates.sort((a, b) => a.responded - b.responded || b.likes - a.likes || a.order - b.order);
+  const out = [];
+  const picked = [];
+  for (const { text } of candidates) {
+    if (out.length >= count) break;
+    const stems = new Set(tokenize(text).map((t) => t.stem));
+    // Skip near-repeats of a question already picked.
+    if (picked.some((p) => [...stems].filter((st) => p.has(st)).length / Math.max(1, Math.min(stems.size, p.size)) > 0.7)) continue;
+    picked.push(stems);
+    out.push(text);
+  }
+  return out;
+}
+
 // ---------- summaries ----------
 
 const QUESTION_CHARS = 90;

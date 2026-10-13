@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   published_at        TEXT,
   video               TEXT,                 -- the published answers joined into one video (file in the media dir)
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
+  follow_up_of        INTEGER REFERENCES office_hours(id) ON DELETE SET NULL,  -- picks up the discussion of this (published) office hour
   video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late)
 );
 
@@ -83,6 +84,25 @@ CREATE TABLE IF NOT EXISTS votes (
   user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at  TEXT NOT NULL,
   PRIMARY KEY (question_id, user_id)
+);
+
+-- The discussion under a published answer. Text only, and two levels at most: a reply to the
+-- answer, and the expert responding to one of those replies.
+CREATE TABLE IF NOT EXISTS replies (
+  id          INTEGER PRIMARY KEY,
+  question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,  -- the answered question
+  parent_id   INTEGER REFERENCES replies(id) ON DELETE CASCADE,             -- NULL: a reply to the answer; else the expert responding to that reply
+  author_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS replies_by_question ON replies(question_id);
+
+CREATE TABLE IF NOT EXISTS reply_likes (
+  reply_id   INTEGER NOT NULL REFERENCES replies(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (reply_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -155,6 +175,8 @@ function migrate(db) {
       ALTER TABLE office_hours ADD COLUMN video_chapters TEXT;
     `);
   }
+  // Office hours can follow up on an earlier one's discussion.
+  if (!officeHourColumns.has('follow_up_of')) db.exec('ALTER TABLE office_hours ADD COLUMN follow_up_of INTEGER REFERENCES office_hours(id) ON DELETE SET NULL');
   const transcriptColumns = new Set(db.prepare('PRAGMA table_info(transcripts)').all().map((c) => c.name));
   if (!transcriptColumns.has('edited_at')) db.exec('ALTER TABLE transcripts ADD COLUMN edited_at TEXT');
   if (!transcriptColumns.has('words')) db.exec('ALTER TABLE transcripts ADD COLUMN words TEXT');

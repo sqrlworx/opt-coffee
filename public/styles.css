@@ -164,6 +164,32 @@ textarea { resize: vertical; }
 .ft-a { display: grid; gap: 8px; padding-left: 12px; border-left: 3px solid var(--violet-soft); }
 .ft-speaker { font-size: 0.78rem; font-weight: 600; color: var(--violet); text-transform: uppercase; letter-spacing: 0.04em; }
 
+/* ---------- discussion ---------- */
+.thread { display: grid; gap: 10px; margin-top: 6px; }
+.replies { display: grid; gap: 10px; }
+.replies:empty { display: none; }
+.reply { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; line-height: 1.5; }
+.reply-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-size: 0.9rem; }
+.reply-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.reply-actions { display: flex; align-items: center; gap: 12px; }
+.responses { display: grid; gap: 8px; }
+.responses:empty { display: none; }
+/* What the expert adds to their answer belongs to it, so it's indented under it like a response. */
+.answer-additions { margin-left: 16px; }
+.reply-addition { border-color: var(--violet-soft); border-left: 3px solid var(--violet); background: #fcfbff; }
+.reply-response { margin-left: 16px; border-color: var(--violet-soft); border-left: 3px solid var(--violet); background: #fcfbff; }
+.tag-expert { color: var(--violet); background: var(--violet-soft); padding: 0 6px; border-radius: 4px; font-weight: 600; }
+.like { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--muted); font: inherit; font-size: 0.8rem; cursor: pointer; }
+.like:hover:not(:disabled) { border-color: #e03131; color: #e03131; }
+.like.liked { background: #fff0f0; border-color: #e03131; color: #e03131; }
+.like:disabled { cursor: default; opacity: 0.7; }
+.like-count:empty { display: none; }
+.reply-form { display: grid; gap: 6px; }
+.follow-up-questions { display: grid; gap: 6px; margin: 0; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: 8px; }
+.follow-up-questions legend { padding: 0 4px; font-weight: 500; font-size: 0.9rem; }
+.follow-up-questions .suggestion { cursor: default; }
+.follow-up-questions .suggestion textarea { padding: 5px 8px; }
+
 /* ---------- Q&A ---------- */
 .qa-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; counter-reset: qa; }
 .qa { display: grid; gap: 8px; counter-increment: qa; }

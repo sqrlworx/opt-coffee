@@ -17,6 +17,8 @@ const MAX_AUDIO = 20_000_000; // a spoken question is capped at 90 seconds in th
 const MAX_QUESTION_VIDEO = 60_000_000; // so is one asked on camera
 const MAX_SPOKEN_QUESTION = 2000; // characters of transcript; people say more than they'd type
 const MAX_ANSWER_START = 600; // seconds; a take is capped at 10 minutes in the browser
+const MAX_REPLY = 2000; // characters of a reply in a discussion
+const MAX_SEEDS = 20; // seed questions added at once
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp',
   '.webm': 'video/webm', '.mp4': 'video/mp4', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.vtt': 'text/vtt; charset=utf-8',
@@ -115,6 +117,8 @@ function serializeOfficeHour(db, oh, viewer) {
     processing: processing(oh) && isExpert,
     questionCount: n,
     expert: publicUser(expert),
+    // A follow-up picks up an earlier office hour's discussion.
+    followUpOf: oh.follow_up_of ? db.prepare('SELECT id, title FROM office_hours WHERE id = ?').get(oh.follow_up_of) ?? null : null,
     isExpert,
     subscribed: isSubscribed(db, viewer, 'office_hour', oh.id),
     subscribedToExpert: isSubscribed(db, viewer, 'expert', oh.expert_id),
@@ -230,6 +234,37 @@ function joinedVideo(oh) {
     ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned, questionStart = 0]) => ({ questionId, start, end, captions: Boolean(captioned), questionStart }))
     : [];
   return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, chapters };
+}
+
+/**
+ * The discussion under a published answer: replies to it, oldest first, each with the expert's
+ * responses to it. `byExpert` marks what the expert wrote.
+ */
+function discussionOf(db, questionId, expertId, viewer) {
+  const rows = db
+    .prepare(
+      `SELECT r.*, u.username, u.display_name,
+              (SELECT COUNT(*) FROM reply_likes l WHERE l.reply_id = r.id) AS likes,
+              EXISTS (SELECT 1 FROM reply_likes l WHERE l.reply_id = r.id AND l.user_id = ?) AS liked
+       FROM replies r JOIN users u ON u.id = r.author_id
+       WHERE r.question_id = ?
+       ORDER BY r.id`,
+    )
+    .all(viewer?.id ?? -1, questionId);
+  const view = (r) => ({
+    id: r.id,
+    body: r.body,
+    author: { username: r.username, displayName: r.display_name },
+    byExpert: r.author_id === expertId,
+    mine: viewer != null && r.author_id === viewer.id,
+    likes: r.likes,
+    liked: Boolean(r.liked),
+    createdAt: r.created_at,
+  });
+  const replies = rows.filter((r) => r.parent_id == null).map((r) => ({ ...view(r), responses: [] }));
+  const byId = new Map(replies.map((r) => [r.id, r]));
+  for (const r of rows) if (r.parent_id != null) byId.get(r.parent_id)?.responses.push(view(r));
+  return replies;
 }
 
 /** The expert's working plan: queued questions that have a recorded answer, as [id, video] pairs. */
@@ -353,6 +388,36 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     db.prepare(
       'INSERT OR IGNORE INTO subscriptions (user_id, target_type, target_id, created_at) VALUES (?, ?, ?, ?)',
     ).run(userId, type, id, now());
+  }
+
+  /**
+   * A published answer people can discuss: its office hour is published and its video is ready
+   * (until then readers see it as closed).
+   */
+  function discussedQuestion(id) {
+    const q = db.prepare('SELECT * FROM questions WHERE id = ?').get(Number(id));
+    if (!q) throw new HttpError(404, 'Question not found');
+    const oh = getOfficeHour(q.office_hour_id);
+    if (!oh.published_at || processing(oh) || q.published_position == null) throw new HttpError(409, 'Only published answers can be discussed');
+    return { q, oh };
+  }
+
+  function getReply(id) {
+    const r = db.prepare('SELECT * FROM replies WHERE id = ?').get(Number(id));
+    if (!r) throw new HttpError(404, 'Reply not found');
+    return r;
+  }
+
+  /** Adds seed questions (from the moderator, or a discussion) to an office hour, and reads them aloud. */
+  function addSeeds(ohId, texts) {
+    const insert = db.prepare("INSERT INTO questions (office_hour_id, author_id, source, body, created_at) VALUES (?, NULL, 'moderator', ?, ?)");
+    const ids = texts.map((t) => Number(insert.run(ohId, t, now()).lastInsertRowid));
+    return () => ids.forEach((id) => speechJobs?.speak(id));
+  }
+
+  function seedTexts(value) {
+    if (!Array.isArray(value)) throw new HttpError(400, 'questions must be an array');
+    return value.slice(0, MAX_SEEDS).map((q) => str(q, 'Question', { min: 5, max: 500 }));
   }
 
   /**
@@ -539,14 +604,28 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const answersAt = isoDate(body.answersExpectedAt, 'Answer date');
       if (deadline <= now()) throw new HttpError(400, 'Question deadline must be in the future');
       if (answersAt < deadline) throw new HttpError(400, 'Answer date must be on or after the question deadline');
-      const { lastInsertRowid } = db
-        .prepare(
-          `INSERT INTO office_hours
-             (expert_id, title, topic, description, questions_deadline, answers_expected_at, allow_anonymous, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(user.id, title, topic, description, deadline, answersAt, body.allowAnonymous ? 1 : 0, now());
-      return { officeHour: serializeOfficeHour(db, getOfficeHour(lastInsertRowid), user) };
+      // A follow-up picks up the discussion of one of the expert's own published office hours,
+      // usually with seed questions taken from it.
+      let followUpOf = null;
+      if (body.followUpOf != null) {
+        const earlier = getOfficeHour(body.followUpOf);
+        requireExpert(earlier, user);
+        if (!earlier.published_at) throw new HttpError(409, 'Only a published office hour can be followed up');
+        followUpOf = earlier.id;
+      }
+      const seeds = body.questions == null ? [] : seedTexts(body.questions);
+      const [id, speak] = transaction(db, () => {
+        const { lastInsertRowid } = db
+          .prepare(
+            `INSERT INTO office_hours
+               (expert_id, title, topic, description, questions_deadline, answers_expected_at, allow_anonymous, created_at, follow_up_of)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(user.id, title, topic, description, deadline, answersAt, body.allowAnonymous ? 1 : 0, now(), followUpOf);
+        return [Number(lastInsertRowid), addSeeds(Number(lastInsertRowid), seeds)];
+      });
+      speak();
+      return { officeHour: serializeOfficeHour(db, getOfficeHour(id), user) };
     },
     { auth: true },
   );
@@ -561,7 +640,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     const result = {
       officeHour,
       groups: order.groups.map((g) => ({ label: g.label, popularity: g.popularity, questions: g.questionIds.map((id) => byId.get(id)) })),
-      answers: officeHour.status === 'published' ? publishedAnswers(questions).map(withSummary) : [],
+      answers: officeHour.status === 'published' ? publishedAnswers(questions).map((q) => ({ ...withSummary(q), discussion: discussionOf(db, q.id, oh.expert_id, user) })) : [],
+      followUps: db.prepare('SELECT id, title FROM office_hours WHERE follow_up_of = ? ORDER BY created_at').all(oh.id),
       video: officeHour.status === 'published' ? joinedVideo(oh) : null,
       moderator: moderator.name,
     };
@@ -579,6 +659,41 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     const oh = getOfficeHour(params.id);
     return { video: oh.published_at ? joinedVideo(oh) : null };
   });
+
+  // What the create form starts from for a follow-up: the office hour's details, and questions
+  // the moderator took from its discussion.
+  route(
+    'GET',
+    '/api/office-hours/:id/follow-up',
+    async ({ params, user }) => {
+      const oh = getOfficeHour(params.id);
+      requireExpert(oh, user);
+      if (!oh.published_at) throw new HttpError(409, 'Only a published office hour can be followed up');
+      const discussion = publishedAnswers(loadQuestions(db, oh.id, user)).map((q) => ({
+        question: q.body,
+        replies: discussionOf(db, q.id, oh.expert_id, user).map((r) => ({
+          body: r.body,
+          likes: r.likes,
+          byExpert: r.byExpert,
+          responded: r.responses.some((x) => x.byExpert),
+        })),
+      }));
+      const questions = await moderator.followUpQuestions({ title: oh.title, topic: oh.topic, description: oh.description }, discussion);
+      const intro = `A follow-up to "${oh.title}", picking up where its discussion left off.`;
+      return {
+        followUp: {
+          followUpOf: { id: oh.id, title: oh.title },
+          title: `Follow-up: ${oh.title}`.slice(0, 120),
+          topic: oh.topic,
+          description: (oh.description ? `${intro}\n\n${oh.description}` : intro).slice(0, 2000),
+          allowAnonymous: Boolean(oh.allow_anonymous),
+          questions,
+        },
+        moderator: moderator.name,
+      };
+    },
+    { auth: true },
+  );
 
   route(
     'POST',
@@ -747,6 +862,46 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   route('POST', '/api/questions/:id/vote', ({ params, user }) => setVote(params, user, true), { auth: true });
   route('DELETE', '/api/questions/:id/vote', ({ params, user }) => setVote(params, user, false), { auth: true });
 
+  // A reply to a published answer. With `parentId`, the expert responding to one of those replies:
+  // that's as deep as a discussion goes.
+  route(
+    'POST',
+    '/api/questions/:id/replies',
+    ({ params, user, body }) => {
+      const { q, oh } = discussedQuestion(params.id);
+      const text = str(body.body, 'Reply', { min: 1, max: MAX_REPLY });
+      let parentId = null;
+      if (body.parentId != null) {
+        const parent = getReply(body.parentId);
+        if (parent.question_id !== q.id) throw new HttpError(400, 'That reply is about a different answer');
+        if (parent.parent_id != null) throw new HttpError(400, 'Responses can only be to a reply to the answer');
+        if (oh.expert_id !== user.id) throw new HttpError(403, 'Only the expert can respond to a reply');
+        parentId = parent.id;
+      }
+      const { lastInsertRowid } = db
+        .prepare('INSERT INTO replies (question_id, parent_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(q.id, parentId, user.id, text, now());
+      const id = Number(lastInsertRowid);
+      const all = discussionOf(db, q.id, oh.expert_id, user);
+      const reply = parentId ? all.find((r) => r.id === parentId).responses.find((r) => r.id === id) : all.find((r) => r.id === id);
+      return { reply };
+    },
+    { auth: true },
+  );
+
+  function setLike(params, user, on) {
+    const r = getReply(params.id);
+    discussedQuestion(r.question_id);
+    if (r.author_id === user.id) throw new HttpError(400, "You can't like your own reply");
+    if (on) db.prepare('INSERT OR IGNORE INTO reply_likes (reply_id, user_id, created_at) VALUES (?, ?, ?)').run(r.id, user.id, now());
+    else db.prepare('DELETE FROM reply_likes WHERE reply_id = ? AND user_id = ?').run(r.id, user.id);
+    const { n } = db.prepare('SELECT COUNT(*) AS n FROM reply_likes WHERE reply_id = ?').get(r.id);
+    return { likes: n, liked: on };
+  }
+
+  route('POST', '/api/replies/:id/like', ({ params, user }) => setLike(params, user, true), { auth: true });
+  route('DELETE', '/api/replies/:id/like', ({ params, user }) => setLike(params, user, false), { auth: true });
+
   route(
     'POST',
     '/api/office-hours/:id/suggestions',
@@ -772,13 +927,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const oh = getOfficeHour(params.id);
       requireExpert(oh, user);
       if (statusOf(oh) !== 'open') throw new HttpError(409, 'Seed questions can only be added while questions are open');
-      if (!Array.isArray(body.questions) || body.questions.length === 0) throw new HttpError(400, 'questions must be a non-empty array');
-      const texts = body.questions.slice(0, 20).map((q) => str(q, 'Question', { min: 5, max: 500 }));
-      const insert = db.prepare(
-        "INSERT INTO questions (office_hour_id, author_id, source, body, created_at) VALUES (?, NULL, 'moderator', ?, ?)",
-      );
-      const ids = transaction(db, () => texts.map((t) => Number(insert.run(oh.id, t, now()).lastInsertRowid)));
-      ids.forEach((id) => speechJobs?.speak(id));
+      const texts = seedTexts(body.questions);
+      if (texts.length === 0) throw new HttpError(400, 'questions must be a non-empty array');
+      transaction(db, () => addSeeds(oh.id, texts))();
       return { added: texts.length };
     },
     { auth: true },

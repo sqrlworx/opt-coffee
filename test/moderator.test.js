@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupQuestions, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
+import { followUpQuestions, groupQuestions, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
 import { createModerator } from '../src/moderator/index.js';
 
 const Q = (id, body, votes = 0, source = 'asker') => ({ id, body, votes, source, createdAt: `2026-01-01T00:00:0${id % 10}Z` });
@@ -173,4 +173,36 @@ test('Claude summaries are served once ready, with heuristic ones (marked pendin
   // Nothing to summarize: no need to ask.
   assert.deepEqual(moderator.summarizeAnswer({ question: 'Silent?', answer: '' }), { question: 'Silent?', points: [], pending: false });
   assert.equal(calls.length, 2);
+});
+
+test('follow-up questions come from people\'s replies: unanswered first, then most liked, no repeats', async () => {
+  const discussion = [
+    {
+      question: 'How do I get promoted?',
+      replies: [
+        { body: 'Thanks! How long did your promotion take?', likes: 0, byExpert: false, responded: true },
+        { body: 'Loved this.', likes: 9, byExpert: false, responded: false },
+        { body: 'Do promotion committees read peer feedback?', likes: 1, byExpert: false, responded: false },
+        { body: 'Want me to cover packets next?', likes: 3, byExpert: true, responded: false },
+      ],
+    },
+    {
+      question: 'Do you still code?',
+      replies: [
+        { body: 'How much time do you spend coding each week? Is it enough?', likes: 4, byExpert: false, responded: false },
+        { body: 'Do promotion committees read the peer feedback?', likes: 0, byExpert: false, responded: false },
+      ],
+    },
+  ];
+  assert.deepEqual(followUpQuestions(discussion), [
+    'How much time do you spend coding each week?',
+    'Is it enough?',
+    'Do promotion committees read peer feedback?',
+    'How long did your promotion take?',
+  ]);
+  assert.deepEqual(followUpQuestions(discussion, { count: 1 }), ['How much time do you spend coding each week?']);
+  assert.deepEqual(followUpQuestions([]), []);
+  // The facade falls back to the heuristic without Claude.
+  const moderator = await createModerator({ mode: 'heuristic' });
+  assert.deepEqual(await moderator.followUpQuestions({ title: 't' }, discussion, { count: 1 }), ['How much time do you spend coding each week?']);
 });

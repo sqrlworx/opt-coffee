@@ -7,6 +7,7 @@ const CACHE_LIMIT = 500;
  * The moderator facade the app talks to.
  *
  * - suggestQuestions: async; uses Claude when available, heuristics otherwise.
+ * - followUpQuestions: async, the same way; questions for a follow-up, from a discussion.
  * - groupQuestions: sync, so page loads never wait on an LLM. With Claude enabled it
  *   serves cached LLM groupings and refreshes them in the background
  *   (stale-while-revalidate); until a grouping is ready it returns the heuristic one.
@@ -73,6 +74,23 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
         }
       }
       return heuristic.suggestQuestions(expert, officeHour, opts);
+    },
+
+    /**
+     * @param {{title: string, topic?: string|null, description?: string}} officeHour  the one being followed up
+     * @param {{question: string, replies: {body: string, likes: number, byExpert: boolean, responded: boolean}[]}[]} discussion
+     * @returns {Promise<string[]>}
+     */
+    async followUpQuestions(officeHour, discussion, opts = {}) {
+      const people = discussion.some((d) => d.replies.some((r) => !r.byExpert));
+      if (llm && people) {
+        try {
+          return (await llm.followUpQuestions(officeHour, discussion, opts)).map((q) => q.slice(0, 500));
+        } catch (err) {
+          log(`[moderator] Claude follow-up questions failed: ${err.message}`);
+        }
+      }
+      return heuristic.followUpQuestions(discussion, opts);
     },
 
     groupQuestions(questions) {

@@ -84,6 +84,26 @@ export async function createClaudeModerator() {
       return questions.map((q) => q.trim()).filter(Boolean).slice(0, count);
     },
 
+    async followUpQuestions(officeHour, discussion, { count = 8 } = {}) {
+      const prompt = [
+        `Suggest up to ${count} questions for a follow-up to this office hour, drawn from the discussion people had under its answers.`,
+        '',
+        `<office_hour>\nTitle: ${officeHour.title}\nTopic: ${officeHour.topic || '(open topic)'}\nDescription: ${officeHour.description || '(none)'}\n</office_hour>`,
+        '<discussion>',
+        ...discussion.map(({ question, replies }) =>
+          [
+            `<answered_question>${question}</answered_question>`,
+            ...replies.map((r) => `- ${r.byExpert ? '[expert] ' : ''}${r.body} (${r.likes} like${r.likes === 1 ? '' : 's'}${r.responded ? ', the expert responded' : ''})`),
+          ].join('\n'),
+        ),
+        '</discussion>',
+        '',
+        'Each question should pick up something the discussion left open: a point people pushed back on, asked more about, or that the expert did not get to. Prefer what more people liked. Do not invent subjects the discussion never raised, and do not re-ask the answered questions. If the discussion raises nothing worth following up, return no questions.',
+      ].join('\n');
+      const { questions } = await ask(prompt, SUGGEST_SCHEMA);
+      return questions.map((q) => q.trim()).filter(Boolean).slice(0, count);
+    },
+
     async groupQuestions(questions) {
       const prompt = [
         'Group these office-hour questions so that questions about the same underlying subject are together.',

@@ -457,3 +457,94 @@ test('answers recorded in a session say where the answer starts, after the quest
   assert.deepEqual(answers.map((a) => [a.id, a.answerStart]), [[q1.id, 5.5], [q2.id, null]]);
   assert.equal((await asker.call('GET', `/api/questions/${q1.id}`)).question.answerStart, 5.5);
 });
+
+test('discussion: replies to published answers, expert responses one level down, and likes', async () => {
+  const expert = await register('discusser');
+  const asker = await register('disc_asker');
+  const reader = await register('disc_reader');
+  let res = await expert.call('POST', '/api/office-hours', { title: 'Discussion test', questionsDeadline: inDays(1), answersExpectedAt: inDays(2) });
+  const ohId = res.officeHour.id;
+  const { question: q } = await asker.call('POST', `/api/office-hours/${ohId}/questions`, { body: 'How do indexes work?' });
+  const { question: unanswered } = await asker.call('POST', `/api/office-hours/${ohId}/questions`, { body: 'Nobody answers this one?' });
+  await expert.call('PUT', `/api/office-hours/${ohId}/plan`, { items: [{ questionId: q.id }] });
+  await expert.call('PUT', `/api/questions/${q.id}/video`, fakeVideo('indexes'));
+
+  // Nothing to discuss until it's published.
+  assert.equal((await reader.call('POST', `/api/questions/${q.id}/replies`, { body: 'Too early' })).status, 409);
+  await expert.call('POST', `/api/office-hours/${ohId}/publish`);
+  assert.equal((await reader.call('POST', `/api/questions/${unanswered.id}/replies`, { body: 'Not answered' })).status, 409);
+
+  // Anyone logged in replies to the answer; text only, and not empty.
+  assert.equal((await client()('POST', `/api/questions/${q.id}/replies`, { body: 'Anonymous' })).status, 401);
+  assert.equal((await reader.call('POST', `/api/questions/${q.id}/replies`, { body: '   ' })).status, 400);
+  const { reply: r1 } = await reader.call('POST', `/api/questions/${q.id}/replies`, { body: 'What about composite indexes?' });
+  assert.deepEqual([r1.body, r1.byExpert, r1.mine, r1.likes, r1.author.username], ['What about composite indexes?', false, true, 0, 'disc_reader']);
+  const { reply: r2 } = await asker.call('POST', `/api/questions/${q.id}/replies`, { body: 'Thanks, that helped.' });
+
+  // Only the expert responds to a reply, and only to a reply to the answer.
+  assert.equal((await asker.call('POST', `/api/questions/${q.id}/replies`, { body: 'Me too', parentId: r1.id })).status, 403);
+  res = await expert.call('POST', `/api/questions/${q.id}/replies`, { body: 'Column order matters.', parentId: r1.id });
+  assert.equal(res.status, 200, res.error);
+  assert.equal(res.reply.byExpert, true);
+  const response = res.reply;
+  assert.equal((await expert.call('POST', `/api/questions/${q.id}/replies`, { body: 'Deeper', parentId: response.id })).status, 400);
+
+  // Likes: once per person, not on your own.
+  assert.deepEqual(await asker.call('POST', `/api/replies/${r1.id}/like`), { status: 200, likes: 1, liked: true });
+  assert.deepEqual(await asker.call('POST', `/api/replies/${r1.id}/like`), { status: 200, likes: 1, liked: true });
+  await reader.call('POST', `/api/replies/${response.id}/like`);
+  assert.equal((await reader.call('POST', `/api/replies/${r1.id}/like`)).status, 400);
+  assert.deepEqual(await asker.call('DELETE', `/api/replies/${r2.id}/like`), { status: 400, error: "You can't like your own reply" });
+
+  const { answers } = await asker.call('GET', `/api/office-hours/${ohId}`);
+  const thread = answers.find((a) => a.id === q.id).discussion;
+  assert.deepEqual(thread.map((r) => [r.body, r.likes, r.liked, r.mine, r.responses.map((x) => [x.body, x.byExpert, x.likes])]), [
+    ['What about composite indexes?', 1, true, false, [['Column order matters.', true, 1]]],
+    ['Thanks, that helped.', 0, false, true, []],
+  ]);
+});
+
+test('follow-up Q&A: prefilled from a published office hour, with questions from its discussion', async () => {
+  const expert = await register('follower');
+  const reader = await register('fu_reader');
+  const fan = await register('fu_fan');
+  let res = await expert.call('POST', '/api/office-hours', { title: 'Caching basics', topic: 'Caching', description: 'All about caches.', questionsDeadline: inDays(1), answersExpectedAt: inDays(2), allowAnonymous: true });
+  const ohId = res.officeHour.id;
+  const { question: q } = await reader.call('POST', `/api/office-hours/${ohId}/questions`, { body: 'When should I cache?' });
+
+  // Only the expert, and only once it's published.
+  assert.equal((await expert.call('GET', `/api/office-hours/${ohId}/follow-up`)).status, 409);
+  await expert.call('PUT', `/api/office-hours/${ohId}/plan`, { items: [{ questionId: q.id }] });
+  await expert.call('PUT', `/api/questions/${q.id}/video`, fakeVideo('caching'));
+  await expert.call('POST', `/api/office-hours/${ohId}/publish`);
+  assert.equal((await reader.call('GET', `/api/office-hours/${ohId}/follow-up`)).status, 403);
+
+  const { reply: answered } = await reader.call('POST', `/api/questions/${q.id}/replies`, { body: 'Great answer. How do you invalidate a cache safely?' });
+  await expert.call('POST', `/api/questions/${q.id}/replies`, { body: 'Version your keys.', parentId: answered.id });
+  const { reply: liked } = await reader.call('POST', `/api/questions/${q.id}/replies`, { body: 'What about caching at the CDN edge?' });
+  await fan.call('POST', `/api/replies/${liked.id}/like`);
+  await fan.call('POST', `/api/questions/${q.id}/replies`, { body: 'No question here, just thanks.' });
+  await expert.call('POST', `/api/questions/${q.id}/replies`, { body: 'Should I cover Redis next?' });
+
+  res = await expert.call('GET', `/api/office-hours/${ohId}/follow-up`);
+  assert.equal(res.status, 200, res.error);
+  const draft = res.followUp;
+  assert.deepEqual([draft.title, draft.topic, draft.allowAnonymous, draft.followUpOf], ['Follow-up: Caching basics', 'Caching', true, { id: ohId, title: 'Caching basics' }]);
+  assert.match(draft.description, /^A follow-up to "Caching basics".*\n\nAll about caches\.$/s);
+  // People's questions, the ones the expert didn't respond to first; not the expert's own.
+  assert.deepEqual(draft.questions, ['What about caching at the CDN edge?', 'How do you invalidate a cache safely?']);
+
+  // Following up someone else's office hour, or an unpublished one, is refused.
+  const base = { title: 'Follow-up', questionsDeadline: inDays(1), answersExpectedAt: inDays(2) };
+  assert.equal((await reader.call('POST', '/api/office-hours', { ...base, followUpOf: ohId })).status, 403);
+  const { officeHour: draftOh } = await expert.call('POST', '/api/office-hours', base);
+  assert.equal((await expert.call('POST', '/api/office-hours', { ...base, followUpOf: draftOh.id })).status, 409);
+  assert.equal((await expert.call('POST', '/api/office-hours', { ...base, followUpOf: ohId, questions: ['hi'] })).status, 400);
+
+  res = await expert.call('POST', '/api/office-hours', { ...base, title: draft.title, description: draft.description, followUpOf: ohId, questions: draft.questions.slice(0, 1) });
+  assert.equal(res.status, 200, res.error);
+  assert.deepEqual(res.officeHour.followUpOf, { id: ohId, title: 'Caching basics' });
+  const followUpView = await reader.call('GET', `/api/office-hours/${res.officeHour.id}`);
+  assert.deepEqual(followUpView.groups.flatMap((g) => g.questions).map((x) => [x.body, x.source]), [['What about caching at the CDN edge?', 'moderator']]);
+  assert.deepEqual((await reader.call('GET', `/api/office-hours/${ohId}`)).followUps, [{ id: res.officeHour.id, title: 'Follow-up: Caching basics' }]);
+});

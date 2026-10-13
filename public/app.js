@@ -595,7 +595,7 @@ function questionText(q) {
 }
 
 // Published answers: each question as text, then the video answer (with subtitles once its
-// transcript is ready). Fills `videos` (question id -> video) for fullTranscript.
+// transcript is ready). Fills `videos` (question id -> video) for the discussion.
 function qaList(answers, videos) {
   return h(
     'ol',
@@ -617,24 +617,143 @@ const askedBy = (q) => (q.source === 'moderator' ? 'suggested by the moderator' 
 // Who's asking, over the video while a question is played.
 const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`);
 
-// The whole Q&A as text, to read straight through: each question, then the transcript of its answer.
-// `onChange(q)` hears when an answer's transcript becomes ready or is corrected. `collapsed` folds
-// it away under a summary line.
-function fullTranscript(oh, answers, onChange, { collapsed = false } = {}) {
+// The Q&A as text, with the discussion after it: each question, the transcript of its answer, then
+// people's replies to the answer. `onChange(q)` hears when an answer's transcript becomes ready or
+// is corrected.
+function discussion(oh, answers, onChange) {
   const items = answers.map((q, i) =>
     h(
       'div',
       { class: 'ft-item' },
       h('p', { class: 'ft-q' }, `${i + 1}. ${q.body}`, askedBy(q) ? h('span', { class: 'muted small' }, ` — ${askedBy(q)}`) : null),
       answerBlock(oh, q, onChange),
+      replyThread(oh, q),
     ),
   );
-  return collapsed
-    ? h('details', { class: 'card full-transcript' }, h('summary', {}, 'Full transcript'), items)
-    : h('section', { class: 'card full-transcript' }, h('h2', {}, 'Transcript'), items);
+  return h('section', { class: 'card full-transcript' }, h('h2', {}, 'Discussion'), items);
 }
 
-// One answer in the full transcript. The expert can correct it here too.
+// The replies to one answer. Anyone can reply to the answer; only the expert can respond to a reply,
+// and that's as deep as it goes. What the expert writes is marked as theirs. The expert's own
+// replies to the answer add to it, so they go right under it, before everyone else's, with the box
+// to write them.
+function replyThread(oh, q) {
+  const all = q.discussion ?? [];
+  const additions = all.filter((r) => r.byExpert);
+  const replies = all.filter((r) => !r.byExpert);
+  const additionList = h('div', { class: 'replies answer-additions' });
+  const list = h('div', { class: 'replies' });
+  const count = h('p', { class: 'replies-count muted small' });
+  const draw = () => {
+    setChildren(additionList, additions.map((r) => replyItem(oh, q, r)));
+    setChildren(list, replies.map((r) => replyItem(oh, q, r)));
+    count.textContent = replies.length ? `${replies.length} repl${replies.length === 1 ? 'y' : 'ies'}` : '';
+  };
+  draw();
+  const post = (to) => async (body) => {
+    const { reply } = await api('POST', `/api/questions/${q.id}/replies`, { body });
+    to.push({ ...reply, responses: [] });
+    draw();
+  };
+  if (oh.isExpert) return h('div', { class: 'thread' }, additionList, h('div', { class: 'answer-additions' }, replyOpener('Add to your answer', 'Add to your answer…', 'Add', post(additions))), count, list);
+  return h('div', { class: 'thread' }, additionList, count, list, replyOpener('Reply', `Reply to ${oh.expert.displayName}’s answer…`, 'Reply', post(replies)));
+}
+
+// A button that opens a reply box; it closes again once the reply is sent, or on Cancel.
+function replyOpener(label, placeholder, submitLabel, send) {
+  const box = h('div', { class: 'reply-opener' });
+  const closed = () =>
+    setChildren(box, h('button', {
+      type: 'button',
+      class: 'btn btn-outline btn-small',
+      onclick: () => {
+        if (!me) return requireLogin();
+        setChildren(box, replyForm(placeholder, submitLabel, async (body) => (await send(body), closed()), { cancel: closed }));
+        box.querySelector('textarea').focus();
+      },
+    }, label));
+  closed();
+  return box;
+}
+
+function replyItem(oh, q, r) {
+  const responses = h('div', { class: 'responses' });
+  const drawResponses = () => setChildren(responses, r.responses.map((x) => h('div', { class: 'reply reply-response' }, replyHead(x), replyBody(x))));
+  drawResponses();
+  const respondBox = h('div', { hidden: true });
+  const respond = oh.isExpert && !r.byExpert
+    ? h('button', {
+        type: 'button',
+        class: 'link-btn small',
+        onclick: () => {
+          if (!respondBox.hidden) return respondBox.querySelector('textarea').focus();
+          setChildren(respondBox, replyForm(`Respond to ${r.author.displayName}…`, 'Respond', async (body) => {
+            const { reply } = await api('POST', `/api/questions/${q.id}/replies`, { body, parentId: r.id });
+            r.responses.push(reply);
+            drawResponses();
+            respondBox.hidden = true;
+          }, { cancel: () => (respondBox.hidden = true) }));
+          respondBox.hidden = false;
+          respondBox.querySelector('textarea').focus();
+        },
+      }, 'Respond')
+    : null;
+  return h('div', { class: r.byExpert ? 'reply reply-addition' : 'reply' }, replyHead(r), replyBody(r, respond), responses, respondBox);
+}
+
+function replyHead(r) {
+  return h(
+    'div',
+    { class: 'reply-head' },
+    userLink(r.author),
+    r.byExpert ? h('span', { class: 'tag tag-expert' }, 'Expert') : null,
+    r.mine ? h('span', { class: 'tag tag-you' }, 'you') : null,
+    h('span', { class: 'muted small', title: fmtDate(r.createdAt) }, relative(r.createdAt)),
+  );
+}
+
+function replyBody(r, ...extra) {
+  return [h('p', { class: 'reply-body' }, r.body), h('div', { class: 'reply-actions' }, likeButton(r), extra)];
+}
+
+function likeButton(r) {
+  const label = () => (r.mine ? 'Your reply' : r.liked ? 'Unlike' : 'Like');
+  const btn = h('button', { type: 'button', class: `like${r.liked ? ' liked' : ''}`, title: label(), 'aria-pressed': String(r.liked), disabled: r.mine }, h('span', { class: 'like-heart' }, '♥'), h('span', { class: 'like-count' }, r.likes || ''));
+  btn.addEventListener(
+    'click',
+    action(async () => {
+      if (!me) return requireLogin();
+      Object.assign(r, await api(r.liked ? 'DELETE' : 'POST', `/api/replies/${r.id}/like`));
+      btn.classList.toggle('liked', r.liked);
+      btn.setAttribute('aria-pressed', String(r.liked));
+      btn.title = label();
+      btn.querySelector('.like-count').textContent = r.likes || '';
+    }),
+  );
+  return btn;
+}
+
+// A text box for a reply. `send(body)` posts it; the box clears once it's sent.
+function replyForm(placeholder, label, send, { cancel = null } = {}) {
+  const textarea = h('textarea', { rows: 2, maxlength: 2000, placeholder, required: true });
+  const submit = h('button', { class: 'btn btn-primary btn-small', type: 'submit' }, label);
+  const form = h(
+    'form',
+    { class: 'reply-form' },
+    textarea,
+    h('div', { class: 'row gap-sm' }, submit, cancel ? h('button', { type: 'button', class: 'link-btn small', onclick: cancel }, 'Cancel') : null),
+  );
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    action(async () => {
+      await send(textarea.value);
+      textarea.value = '';
+    })({ currentTarget: submit });
+  });
+  return form;
+}
+
+// One answer in the discussion, as its transcript. The expert can correct it here too.
 function answerBlock(oh, q, onChange) {
   const box = h('div', { class: 'ft-a' });
   const speaker = h('span', { class: 'ft-speaker' }, oh.expert.displayName);
@@ -1338,7 +1457,9 @@ async function officeHourPage({ id }) {
     h('div', { class: 'row gap-sm wrap' }, topicChip(oh), statusBadge(oh), oh.allowAnonymous ? h('span', { class: 'chip chip-muted' }, 'Anonymous OK') : null),
     h('h1', {}, oh.title),
     h('p', { class: 'muted' }, 'with ', userLink(oh.expert)),
+    oh.followUpOf ? h('p', { class: 'muted small' }, 'Follows up on ', h('a', { href: `#/oh/${oh.followUpOf.id}` }, oh.followUpOf.title)) : null,
     oh.description ? h('p', { class: 'desc' }, oh.description) : null,
+    data.followUps.length ? h('p', { class: 'muted small' }, 'Followed up in ', data.followUps.map((f, i) => [i ? ', ' : null, h('a', { href: `#/oh/${f.id}` }, f.title)])) : null,
     h(
       'dl',
       { class: 'facts' },
@@ -1350,6 +1471,7 @@ async function officeHourPage({ id }) {
       'div',
       { class: 'row gap-sm wrap' },
       oh.isExpert && oh.status !== 'published' ? h('a', { class: 'btn btn-primary', href: `#/oh/${oh.id}/manage` }, 'Plan & answer') : null,
+      oh.isExpert && oh.status === 'published' && !oh.processing ? h('a', { class: 'btn btn-outline', href: `#/oh/new?followUp=${oh.id}` }, 'Create follow-up Q&A') : null,
       !oh.isExpert ? subscribeButton({ type: 'office_hour', id: oh.id, subscribed: oh.subscribed, label: 'this office hour' }) : null,
       !oh.isExpert ? subscribeButton({ type: 'expert', id: oh.expert.id, subscribed: oh.subscribedToExpert, label: oh.expert.displayName }) : null,
     ),
@@ -1369,7 +1491,7 @@ async function officeHourPage({ id }) {
       const player = jointPlayer(data.answers, data.video);
       const summary = summaryTranscript(player);
       const onChange = (q) => (player.update(q), summary.refresh(q));
-      return h('div', { class: 'stack' }, header, h('section', {}, title, player.el, summary.el), fullTranscript(oh, data.answers, onChange, { collapsed: true }), unanswered);
+      return h('div', { class: 'stack' }, header, h('section', {}, title, player.el, summary.el), discussion(oh, data.answers, onChange), unanswered);
     }
     // Without ffmpeg, or if joining failed, each answer has its own video.
     const videos = new Map();
@@ -1378,7 +1500,7 @@ async function officeHourPage({ id }) {
       { class: 'stack' },
       header,
       h('section', {}, title, qaList(data.answers, videos)),
-      fullTranscript(oh, data.answers, (q) => addCaptions(videos.get(q.id), q.transcript)),
+      discussion(oh, data.answers, (q) => addCaptions(videos.get(q.id), q.transcript)),
       unanswered,
     );
   }
@@ -2153,27 +2275,47 @@ const MAX_RECORDING_SECS = 600;
 const AUDIO_RECORDING_TYPES = ['audio/mp4;codecs=mp4a.40.2', 'audio/mp4', 'audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/ogg'];
 const MAX_QUESTION_SECS = 90;
 
-async function newOfficeHourPage() {
+// Announcing office hours. With `?followUp=<id>`, a follow-up to one of the expert's published
+// office hours: its details are filled in, and questions the moderator took from its discussion
+// can be picked (and reworded) to start the new one with, as seed questions.
+async function newOfficeHourPage(_, query) {
+  const followUp = query.get('followUp') ? (await api('GET', `/api/office-hours/${encodeURIComponent(query.get('followUp'))}/follow-up`)).followUp : null;
   const deadline = new Date(Date.now() + 3 * 86400_000);
   deadline.setHours(17, 0, 0, 0);
   const answers = new Date(deadline.getTime() + 2 * 86400_000);
 
   const f = {
-    title: h('input', { required: true, maxlength: 120, placeholder: 'e.g. Ask me anything about breaking into product design' }),
-    topic: h('input', { maxlength: 60, placeholder: 'Optional — e.g. Career growth' }),
-    description: h('textarea', { rows: 3, maxlength: 2000, placeholder: 'What should people ask about? Anything off-limits?' }),
+    title: h('input', { required: true, maxlength: 120, placeholder: 'e.g. Ask me anything about breaking into product design', value: followUp?.title }),
+    topic: h('input', { maxlength: 60, placeholder: 'Optional — e.g. Career growth', value: followUp?.topic }),
+    description: h('textarea', { rows: followUp ? 5 : 3, maxlength: 2000, placeholder: 'What should people ask about? Anything off-limits?', value: followUp?.description }),
     deadline: h('input', { type: 'datetime-local', required: true, value: toLocalInput(deadline) }),
     answers: h('input', { type: 'datetime-local', required: true, value: toLocalInput(answers) }),
-    anon: h('input', { type: 'checkbox' }),
+    anon: h('input', { type: 'checkbox', checked: followUp?.allowAnonymous }),
   };
+  const picks = (followUp?.questions ?? []).map((q) => ({ box: h('input', { type: 'checkbox', checked: true, 'aria-label': 'Include this question' }), text: h('textarea', { rows: 2, value: q, maxlength: 500, 'aria-label': 'Question' }) }));
+  const fromDiscussion = followUp
+    ? h(
+        'fieldset',
+        { class: 'follow-up-questions' },
+        h('legend', {}, 'Questions from the discussion'),
+        picks.length
+          ? [
+              h('p', { class: 'hint' }, 'Ticked questions start the follow-up as suggested questions, which people can +1. Reword them as you like.'),
+              picks.map(({ box, text }) => h('div', { class: 'suggestion' }, box, text)),
+            ]
+          : h('p', { class: 'hint' }, 'The discussion didn’t raise any questions to pick up. You can still ask the moderator for seed questions once it’s announced.'),
+      )
+    : null;
   const form = h(
     'form',
     { class: 'card form' },
+    followUp ? h('p', { class: 'muted small' }, 'Follows up on ', h('a', { href: `#/oh/${followUp.followUpOf.id}` }, followUp.followUpOf.title)) : null,
     h('label', {}, 'Title', f.title),
     h('label', {}, 'Topic', f.topic),
     h('label', {}, 'Description', f.description),
     h('div', { class: 'row gap wrap' }, h('label', { class: 'grow' }, 'Questions due by', f.deadline, h('span', { class: 'hint' }, 'Askers can submit and +1 until then.')), h('label', { class: 'grow' }, 'Answers expected', f.answers, h('span', { class: 'hint' }, "Lets people know when to check back. Not enforced."))),
     h('label', { class: 'check' }, f.anon, ' Allow anonymous questions'),
+    fromDiscussion,
     me.expertise.length === 0 ? h('p', { class: 'notice' }, 'Tip: ', h('a', { href: `#/u/${me.username}` }, 'add your expertise and bio'), ' so the moderator can suggest better seed questions.') : null,
     h('div', { class: 'row gap-sm' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Announce office hours')),
   );
@@ -2187,12 +2329,14 @@ async function newOfficeHourPage() {
         questionsDeadline: new Date(f.deadline.value).toISOString(),
         answersExpectedAt: new Date(f.answers.value).toISOString(),
         allowAnonymous: f.anon.checked,
+        followUpOf: followUp?.followUpOf.id,
+        questions: followUp ? picks.filter(({ box, text }) => box.checked && text.value.trim()).map(({ text }) => text.value) : undefined,
       });
       toast('Announced! Your subscribers will see it in their feed.', 'success');
       go(`#/oh/${officeHour.id}/manage`);
     })({ currentTarget: form.querySelector('button[type=submit]') });
   });
-  return h('div', { class: 'narrow' }, h('h1', {}, 'Host office hours'), form);
+  return h('div', { class: 'narrow' }, h('h1', {}, followUp ? 'Follow-up Q&A' : 'Host office hours'), form);
 }
 
 async function profilePage({ username }) {
