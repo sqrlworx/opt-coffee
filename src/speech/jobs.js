@@ -38,15 +38,15 @@ export function createSpeechJobs({ db, speech, mediaDir, log = console.error }) 
     });
   }
 
-  /** Queues reading a typed question aloud into an audio file, with its lip sync. */
+  /** Queues reading a typed question aloud into an audio file, in its voice, with its lip sync. */
   function speak(questionId) {
     db.prepare("UPDATE questions SET audio_status = 'pending' WHERE id = ?").run(questionId);
     enqueue(async () => {
-      const q = db.prepare('SELECT body FROM questions WHERE id = ?').get(questionId);
+      const q = db.prepare('SELECT body, voice FROM questions WHERE id = ?').get(questionId);
       if (!q) return;
       const name = `${randomBytes(16).toString('hex')}.m4a`;
       try {
-        const { mouth } = await speech.speak(q.body, join(mediaDir, name));
+        const { mouth } = await speech.speak(q.body, join(mediaDir, name), { voice: q.voice });
         db.prepare("UPDATE questions SET audio = ?, audio_status = 'ready', lip_sync = ? WHERE id = ?").run(name, mouth ? JSON.stringify(mouth) : null, questionId);
       } catch (err) {
         log(`[speech] reading question ${questionId} aloud failed: ${err.message}`);

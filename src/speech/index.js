@@ -4,6 +4,7 @@ import { rename } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { voicesFor } from './voices.js';
 
 const WORKER = fileURLToPath(new URL('./worker.py', import.meta.url));
 const INTERACTIVE_TIMEOUT = 120_000; // an asker is waiting on the response
@@ -19,6 +20,8 @@ const run = promisify(execFile);
  * models load once: one for askers waiting on their question's transcript, and one for
  * background work (answer transcripts, reading questions aloud). A long answer video never
  * holds up an asker.
+ *
+ * `voice` reads questions aloud unless the asker picks another of `voices` (see voices.js).
  *
  * Returns null when speech is off: `off`, or `auto` without uv on the PATH.
  * @param {{mode?: 'auto'|'on'|'off', whisperModel?: string, voice?: string, log?: (msg:string)=>void}} opts
@@ -40,6 +43,8 @@ export function createSpeech({
 
   return {
     name: `whisper ${whisperModel} + kokoro ${voice}`,
+    voice,
+    voices: voicesFor(voice),
 
     /** @returns {Promise<{text: string, words: [number, number, string][]}>} */
     transcribe(file, { interactive: now = false } = {}) {
@@ -61,11 +66,13 @@ export function createSpeech({
     },
 
     /**
-     * Reads `text` aloud into an M4A file at `out`.
+     * Reads `text` aloud into an M4A file at `out`, in `voice` (the default without one).
+     * `interactive` when someone is waiting on it, like an asker previewing a voice.
      * @returns {Promise<{mouth: {fps: number, frames: [number, number, number][]}}>} its lip sync (see lipsync.py)
      */
-    speak(text, out) {
-      return background.request({ op: 'speak', text, out }, BACKGROUND_TIMEOUT);
+    speak(text, out, { voice: chosen = null, interactive: now = false } = {}) {
+      const message = { op: 'speak', text, out, voice: chosen };
+      return now ? interactive.request(message, INTERACTIVE_TIMEOUT) : background.request(message, BACKGROUND_TIMEOUT);
     },
 
     /**

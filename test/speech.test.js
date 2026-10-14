@@ -11,16 +11,19 @@ import { createApp } from '../src/app.js';
 import { createModerator } from '../src/moderator/index.js';
 import { cuesFromWords, questionCaptions, takeCaptions, toVtt } from '../src/speech/captions.js';
 import { createSpeech } from '../src/speech/index.js';
+import { SAMPLE_TEXT, VOICES, voicesFor } from '../src/speech/voices.js';
 
 // Stands in for Whisper and Kokoro: a "recording" holds the text that was said, and reading
 // text aloud writes a file holding that text. A "video" holds what was said too, which taking its
 // sound out copies, unless it's "[silent]". Records which lane each transcription used. Lip sync
 // has a frame per word: of the text read aloud, or of the words a recording's is made from
-// (recorded in `synced`; without them the recording is transcribed again).
+// (recorded in `synced`; without them the recording is transcribed again). Records the voice
+// each text was read aloud in, and whether someone was waiting on it, in `spoken`.
 // `hold(t)` makes background work wait, like a slow engine, until the returned function is called
 // (or test `t` ends, so a failing assertion can't leave the queue stuck).
 const lanes = [];
 const synced = [];
+const spoken = [];
 let gate = null;
 const hold = (t) => {
   let resolve;
@@ -34,6 +37,8 @@ const hold = (t) => {
 };
 const fakeSpeech = {
   name: 'fake',
+  voice: 'af_heart',
+  voices: VOICES,
   async transcribe(file, { interactive = false } = {}) {
     if (!interactive) await gate;
     const said = readFileSync(file, 'utf8').replace(/^said:/, '').trim();
@@ -46,9 +51,10 @@ const fakeSpeech = {
     if (video.includes('[silent]')) throw new Error('Stream map 0:a:0 matches no streams');
     writeFileSync(out, video);
   },
-  async speak(text, out) {
-    await gate;
-    if (text.includes('[mute]')) throw new Error('the text produced no speech');
+  async speak(text, out, { voice = null, interactive = false } = {}) {
+    await (interactive ? new Promise((r) => setTimeout(r, 20)) : gate); // someone waiting still waits a moment
+    spoken.push({ text, voice, interactive });
+    if (text.includes('[mute]') || voice === 'bm_george') throw new Error('the text produced no speech');
     writeFileSync(out, `spoken: ${text}`);
     return { duration: 1, mouth: { fps: 30, frames: text.split(' ').map(() => [0.5, 1, 0.5]) } };
   },
@@ -94,7 +100,7 @@ function client(baseUrl = () => base) {
     if (setCookie) cookie = setCookie.split(';')[0];
     return { status: res.status, ...(await res.json()) };
   };
-  call.media = (url) => fetch(baseUrl() + url, { headers: cookie ? { Cookie: cookie } : {} });
+  call.media = (url, headers = {}) => fetch(baseUrl() + url, { headers: { ...(cookie ? { Cookie: cookie } : {}), ...headers } });
   return call;
 }
 
@@ -530,7 +536,7 @@ test('with speech off, questions are typed only and nothing is read aloud or tra
   try {
     const expert = await register('quiet_expert', offBase);
     const asker = await register('quiet_asker', offBase);
-    assert.equal((await asker('GET', '/api/me')).speech, false);
+    assert.deepEqual(((({ speech: on, voices, voice }) => ({ on, voices, voice }))(await asker('GET', '/api/me'))), { on: false, voices: [], voice: null });
     const ohId = await officeHour(expert);
     assert.equal((await asker('POST', `/api/office-hours/${ohId}/recordings`, said('Can you hear me?'))).status, 503);
     const { question } = await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'Typed question here?' });
@@ -543,6 +549,66 @@ test('with speech off, questions are typed only and nothing is read aloud or tra
     rmSync(dir, { recursive: true, force: true });
   }
   assert.equal((await client()('GET', '/api/me')).speech, true);
+});
+
+test('askers pick the voice their typed question is read aloud in, and it stays their voice', async () => {
+  const expert = await register('voice_expert');
+  const asker = await register('voice_asker');
+  const ohId = await officeHour(expert);
+  const readIn = (q) => spoken.findLast((s) => s.text === q.body)?.voice;
+
+  // Everyone starts with the server's default voice.
+  const me = await asker('GET', '/api/me');
+  assert.equal(me.voice, 'af_heart');
+  assert.deepEqual(me.voices.map((v) => [v.id, v.sample]), VOICES.map((v) => [v.id, `/media/voices/${v.id}.m4a`]));
+
+  const { question: first } = await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'Which voice reads this one?', voice: 'bf_emma' });
+  assert.equal((await asker('GET', '/api/me')).voice, 'bf_emma');
+  assert.equal((await expert('GET', '/api/me')).voice, 'af_heart'); // only the asker's changed
+  // A question asked without picking one is read in their voice; an unknown voice is refused.
+  const { question: second } = await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'And which voice reads this one?' });
+  assert.equal((await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'In a voice that does not exist?', voice: 'xx_nobody' })).status, 400);
+  // Moderator seeds are read in the default voice.
+  await expert('POST', `/api/office-hours/${ohId}/seed`, { questions: ['What voice does a seed get?'] });
+  await app.idle();
+  assert.equal(readIn(first), 'bf_emma');
+  assert.equal(readIn(second), 'bf_emma');
+  assert.equal(readIn({ body: 'What voice does a seed get?' }), null);
+  // Asking out loud uses the asker's own voice: a voice sent with it is ignored, and not kept.
+  const { recording } = await asker('POST', `/api/office-hours/${ohId}/recordings`, said('Spoken in my own voice, thanks.'));
+  const res = await asker('POST', `/api/office-hours/${ohId}/questions`, { recording: recording.id, cues: recording.cues.map((c) => c[2]), voice: 'am_michael' });
+  assert.equal(res.status, 200, res.error);
+  assert.equal(db.prepare('SELECT voice FROM questions WHERE id = ?').get(res.question.id).voice, null);
+  assert.equal((await asker('GET', '/api/me')).voice, 'bf_emma');
+});
+
+test('each voice can be previewed: its sample is made once, at startup or while the asker waits, and is public', async (t) => {
+  hold(t); // background work is stuck; previews don't wait for it
+  const stranger = client();
+  const made = (voice) => spoken.filter((s) => s.text === SAMPLE_TEXT && s.voice === voice).length;
+  const before = { michael: made('am_michael'), george: made('bm_george') }; // at startup
+  rmSync(join(mediaDir, 'voices', 'am_michael.m4a')); // as if it hadn't been made at startup
+  const [a, b] = await Promise.all([stranger.media('/media/voices/am_michael.m4a'), stranger.media('/media/voices/am_michael.m4a')]);
+  assert.equal(a.status, 200);
+  assert.equal(a.headers.get('content-type'), 'audio/mp4');
+  assert.equal(await a.text(), `spoken: ${SAMPLE_TEXT}`);
+  assert.equal(await b.text(), `spoken: ${SAMPLE_TEXT}`);
+  assert.equal((await stranger.media('/media/voices/am_michael.m4a')).status, 200);
+  assert.equal(made('am_michael'), before.michael + 1); // both waited on the same one, and the next was served from disk
+  assert.ok(spoken.filter((s) => s.text === SAMPLE_TEXT).every((s) => s.interactive));
+  const range = await stranger.media('/media/voices/am_michael.m4a', { range: 'bytes=0-6' });
+  assert.equal(await range.text(), 'spoken:');
+  // Only the voices on offer, and a failed one can be tried again.
+  assert.equal((await stranger.media('/media/voices/xx_nobody.m4a')).status, 404);
+  assert.equal((await stranger.media('/media/voices/../forum.db')).status, 404);
+  assert.equal((await stranger.media('/media/voices/bm_george.m4a')).status, 503);
+  assert.equal((await stranger.media('/media/voices/bm_george.m4a')).status, 503);
+  assert.equal(made('bm_george'), before.george + 2);
+});
+
+test('a default voice that is not one of the voices on offer is offered first', () => {
+  assert.equal(voicesFor('af_heart'), VOICES);
+  assert.deepEqual(voicesFor('af_sky').map((v) => v.id), ['af_sky', ...VOICES.map((v) => v.id)]);
 });
 
 // ---------- correcting transcripts ----------

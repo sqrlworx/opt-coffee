@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   bio           TEXT NOT NULL DEFAULT '',
   expertise     TEXT NOT NULL DEFAULT '',   -- comma-separated tags
+  voice         TEXT,                       -- the voice they last picked to read their typed questions aloud; NULL = the server's default
   created_at    TEXT NOT NULL
 );
 
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS questions (
   audio          TEXT,                      -- the question as speech: the asker's recording, or the text read aloud (file in the media dir)
   asker_video    TEXT,                      -- a question asked on camera: the asker's video (file in the media dir); its sound is also in audio
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
+  voice          TEXT,                      -- the Kokoro voice a typed question is read aloud in; NULL = the server's default
   lip_sync       TEXT,                      -- how the mouth moves saying audio, for the fox that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
   created_at     TEXT NOT NULL,
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
@@ -164,6 +166,10 @@ function migrate(db) {
   }
   // Questions' speech gained lip sync; questions with audio get theirs on startup.
   if (!columns.has('lip_sync')) db.exec('ALTER TABLE questions ADD COLUMN lip_sync TEXT');
+  // Askers pick the voice their typed question is read aloud in.
+  if (!columns.has('voice')) db.exec('ALTER TABLE questions ADD COLUMN voice TEXT');
+  const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));
   if (!recordingColumns.has('video')) db.exec('ALTER TABLE recordings ADD COLUMN video TEXT');
   const officeHourColumns = new Set(db.prepare('PRAGMA table_info(office_hours)').all().map((c) => c.name));

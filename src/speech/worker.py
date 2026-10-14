@@ -26,7 +26,7 @@ stdin/stdout, one JSON object per line:
 
     {"id": 1, "op": "transcribe", "file": "media/a.weba"}
         -> {"id": 1, "ok": true, "text": "...", "words": [[start, end, " word"], ...]}
-    {"id": 2, "op": "speak", "text": "...", "out": "media/b.m4a"}
+    {"id": 2, "op": "speak", "text": "...", "out": "media/b.m4a", "voice": "bf_emma" or null}
         -> {"id": 2, "ok": true, "duration": 3.2, "mouth": {"fps": 30, "frames": [[open, width, energy], ...]}}
     {"id": 3, "op": "lipsync", "file": "media/a.weba", "words": [[start, end, " word"], ...] or null}
         -> {"id": 3, "ok": true, "mouth": {...}}
@@ -34,8 +34,8 @@ stdin/stdout, one JSON object per line:
         -> {"id": 4, "ok": true}
     any failure -> {"id": n, "ok": false, "error": "..."}
 
-Speech-to-text is faster-whisper; text-to-speech is Kokoro-82M. `mouth` is the speech's lip
-sync (see lipsync.py). Models load on first use and stay loaded. Requests are handled one at a
+Speech-to-text is faster-whisper; text-to-speech is Kokoro-82M, in the given Kokoro voice or
+the default (--voice). `mouth` is the speech's lip sync (see lipsync.py). Models load on first use and stay loaded. Requests are handled one at a
 time. Logs go to stderr.
 """
 
@@ -57,7 +57,7 @@ class Engines:
         self.whisper_model = whisper_model
         self.voice = voice
         self._whisper = None
-        self._kokoro = None
+        self._kokoro = {}  # a pipeline per language, sharing one model
 
     def whisper(self):
         if self._whisper is None:
@@ -69,18 +69,27 @@ class Engines:
             )
         return self._whisper
 
-    def kokoro(self):
-        if self._kokoro is None:
+    def kokoro(self, voice: str | None = None):
+        """The pipeline that speaks `voice` (the default voice's without one).
+
+        A voice id starts with its language (a: American, b: British English), and each language
+        has its own pipeline for its pronunciation. The first one loads the model; the others share it.
+        """
+        lang = (voice or self.voice)[0]
+        if lang not in self._kokoro:
             os.environ.setdefault("HF_HUB_VERBOSITY", "error")
             from kokoro import KPipeline
             from loguru import logger
 
             logger.disable("kokoro")
-            log(f"loading kokoro ({self.voice})")
-            self._kokoro = KPipeline(
-                lang_code=self.voice[0], repo_id="hexgrad/Kokoro-82M"
+            loaded = next(iter(self._kokoro.values()), None)
+            log(f"loading kokoro ({lang})")
+            self._kokoro[lang] = KPipeline(
+                lang_code=lang,
+                repo_id="hexgrad/Kokoro-82M",
+                model=loaded.model if loaded else True,
             )
-        return self._kokoro
+        return self._kokoro[lang]
 
     def transcribe(self, file: str) -> dict:
         segments, _ = self.whisper().transcribe(
@@ -106,13 +115,14 @@ class Engines:
         )
         return {"mouth": lipsync.track(phones, decode(file), WHISPER_RATE)}
 
-    def speak(self, text: str, out: str) -> dict:
+    def speak(self, text: str, out: str, voice: str | None = None) -> dict:
         import lipsync
         import numpy as np
 
-        pipeline = self.kokoro()
+        voice = voice or self.voice
+        pipeline = self.kokoro(voice)
         chunks, phones, offset = [], [], 0.0
-        for r in pipeline(text, voice=self.voice):
+        for r in pipeline(text, voice=voice):
             if r.audio is None:
                 continue
             phones += lipsync.kokoro_phones(
@@ -189,7 +199,7 @@ def main():
             if op == "transcribe":
                 reply = engines.transcribe(req["file"])
             elif op == "speak":
-                reply = engines.speak(req["text"], req["out"])
+                reply = engines.speak(req["text"], req["out"], req.get("voice"))
             elif op == "lipsync":
                 reply = engines.lip_sync(req["file"], req.get("words"))
             elif op == "load":

@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import { createReadStream, createWriteStream, mkdirSync, rmSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { readFile, rename, rm, stat } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { dirname, extname, join, normalize } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { createSession, destroySession, hashPassword, parseCookies, userForSession, verifyPassword } from './auth.js';
 import { transaction } from './db.js';
 import { cuesFromWords, questionCaptions, saidInAnswer, takeCaptions, toVtt } from './speech/captions.js';
 import { createSpeechJobs } from './speech/jobs.js';
+import { SAMPLE_TEXT } from './speech/voices.js';
 import { createVideoJobs } from './video.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
@@ -408,6 +409,27 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     return r;
   }
 
+  /** The voice the user's typed questions are read aloud in: the one they last picked, or the default. */
+  function voiceOf(user) {
+    return speech.voices.some((v) => v.id === user?.voice) ? user.voice : speech.voice;
+  }
+
+  // Each voice's preview, kept in the media dir. One wanted before it's made is made (once) while they wait.
+  const samples = new Map(); // voice id -> the promise of its file, while it's being made
+  async function voiceSample(voice) {
+    const file = join(mediaDir, 'voices', `${voice.id}.m4a`);
+    if (existsSync(file)) return file;
+    if (!samples.has(voice.id)) {
+      mkdirSync(dirname(file), { recursive: true });
+      const made = speech.speak(SAMPLE_TEXT, file, { voice: voice.id, interactive: true });
+      samples.set(voice.id, made.finally(() => samples.delete(voice.id)));
+    }
+    await samples.get(voice.id);
+    return file;
+  }
+  // Made now, so the first asker to try a voice doesn't wait for it.
+  speech?.voices.forEach((v) => voiceSample(v).catch((err) => console.error(`[speech] previewing the voice ${v.id} failed: ${err.message}`)));
+
   /** Adds seed questions (from the moderator, or a discussion) to an office hour, and reads them aloud. */
   function addSeeds(ohId, texts) {
     const insert = db.prepare("INSERT INTO questions (office_hour_id, author_id, source, body, created_at) VALUES (?, NULL, 'moderator', ?, ?)");
@@ -469,7 +491,14 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     return { ok: true };
   });
 
-  route('GET', '/api/me', ({ user }) => ({ user: user ? publicUser(user) : null, devLogin, speech: Boolean(speech) }));
+  // `voices` read typed questions aloud, each with a `sample` to preview it; `voice` is the viewer's.
+  route('GET', '/api/me', ({ user }) => ({
+    user: user ? publicUser(user) : null,
+    devLogin,
+    speech: Boolean(speech),
+    voices: speech ? speech.voices.map((v) => ({ ...v, sample: `/media/voices/${v.id}.m4a` })) : [],
+    voice: speech ? voiceOf(user) : null,
+  }));
 
   // Dev-only user switcher: log in as anyone without a password. Off unless explicitly enabled.
   if (devLogin) {
@@ -698,7 +727,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   route(
     'POST',
     '/api/office-hours/:id/questions',
-    // A typed question has a `body`. A spoken one, or one asked on camera, names its `recording`
+    // A typed question has a `body`, and may pick the `voice` it's read aloud in, which becomes the
+    // asker's voice for next time. A spoken one, or one asked on camera, names its `recording`
     // (see below) and sends the transcript lines as the asker checked them, in `cues`; that
     // transcript is the question text.
     ({ params, user, body }) => {
@@ -721,13 +751,17 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       } else {
         text = str(body.body, 'Question', { min: 5, max: 500 });
       }
+      const picked = body.voice == null || !speech || recording ? null : String(body.voice);
+      if (picked && !speech.voices.some((v) => v.id === picked)) throw new HttpError(400, 'Unknown voice');
+      const voice = speech && !recording ? picked ?? voiceOf(user) : null;
       const id = transaction(db, () => {
         const { lastInsertRowid } = db
           .prepare(
-            `INSERT INTO questions (office_hour_id, author_id, source, is_anonymous, body, asked_with, audio, audio_status, asker_video, created_at)
-             VALUES (?, ?, 'asker', ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO questions (office_hour_id, author_id, source, is_anonymous, body, asked_with, audio, audio_status, asker_video, voice, created_at)
+             VALUES (?, ?, 'asker', ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(oh.id, user.id, anonymous ? 1 : 0, text, recording ? 'audio' : 'text', recording, recording ? 'ready' : null, video, now());
+          .run(oh.id, user.id, anonymous ? 1 : 0, text, recording ? 'audio' : 'text', recording, recording ? 'ready' : null, video, voice, now());
+        if (picked) db.prepare('UPDATE users SET voice = ? WHERE id = ?').run(picked, user.id);
         if (recording) {
           fix.save();
           db.prepare('DELETE FROM recordings WHERE media = ?').run(recording);
@@ -1145,21 +1179,32 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   }
 
   // Recordings, plus `<name>.vtt` captions for any that are transcribed. See canSeeMedia for
-  // who gets what. Supports Range requests, which browsers need to seek (and Safari needs to
-  // play at all).
+  // who gets what. Also `voices/<id>.m4a`, each voice's public preview. Supports Range requests,
+  // which browsers need to seek (and Safari needs to play at all).
   async function serveMedia(req, res, pathname, user) {
     const path = pathname.slice('/media/'.length);
-    const captions = path.endsWith('.vtt');
-    const name = captions ? path.slice(0, -'.vtt'.length) : path;
-    if (!MEDIA_NAME.test(name) || !canSeeMedia(name, user)) return sendJson(res, 404, { error: 'Not found' });
-    if (captions) {
-      const cues = captionCues(name);
-      if (!cues) return sendJson(res, 404, { error: 'Not found' });
-      const vtt = Buffer.from(toVtt(cues));
-      res.writeHead(200, { 'Content-Type': MIME['.vtt'], 'Content-Length': vtt.length, 'Cache-Control': 'private, no-cache' });
-      return res.end(req.method === 'HEAD' ? undefined : vtt);
+    const voice = speech?.voices.find((v) => path === `voices/${v.id}.m4a`);
+    let file;
+    if (voice) {
+      try {
+        file = await voiceSample(voice);
+      } catch (err) {
+        console.error(`[speech] previewing the voice ${voice.id} failed: ${err.message}`);
+        return sendJson(res, 503, { error: "Couldn't prepare that voice right now" });
+      }
+    } else {
+      const captions = path.endsWith('.vtt');
+      const name = captions ? path.slice(0, -'.vtt'.length) : path;
+      if (!MEDIA_NAME.test(name) || !canSeeMedia(name, user)) return sendJson(res, 404, { error: 'Not found' });
+      if (captions) {
+        const cues = captionCues(name);
+        if (!cues) return sendJson(res, 404, { error: 'Not found' });
+        const vtt = Buffer.from(toVtt(cues));
+        res.writeHead(200, { 'Content-Type': MIME['.vtt'], 'Content-Length': vtt.length, 'Cache-Control': 'private, no-cache' });
+        return res.end(req.method === 'HEAD' ? undefined : vtt);
+      }
+      file = join(mediaDir, name);
     }
-    const file = join(mediaDir, name);
     const { size } = await stat(file);
     let start = 0;
     let end = size - 1;
@@ -1178,7 +1223,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     }
     const partial = start !== 0 || end !== size - 1;
     res.writeHead(partial ? 206 : 200, {
-      'Content-Type': MIME[extname(name)],
+      'Content-Type': MIME[extname(file)],
       'Content-Length': end - start + 1,
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'private, no-cache',

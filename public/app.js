@@ -5,6 +5,8 @@ const $nav = document.getElementById('nav');
 let me = null;
 let devLogin = false; // server has the dev user switcher enabled
 let speech = false; // server can transcribe recordings and read text aloud
+let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
+let myVoice = null; // the one the user last picked (or the default)
 let devUsers = null;
 let pageCleanup = null; // set by a page that holds resources (like the camera) to release on navigation
 
@@ -191,6 +193,7 @@ function askForm(oh, onAsked) {
   const anonymous = () => anon?.checked ?? false;
   const recorders = speech ? { audio: spokenQuestion(oh, anonymous, onAsked), video: spokenQuestion(oh, anonymous, onAsked, { camera: true }) } : {};
   const recorderList = Object.values(recorders);
+  const voice = voices.length > 1 ? voicePicker() : null;
   const anonNote = h('p', { class: 'hint', hidden: true });
   let mode = 'text';
   const modeButton = (value, label) => h('button', { type: 'button', class: 'ask-mode', 'data-mode': value, 'aria-pressed': String(value === mode), onclick: () => setMode(value) }, label);
@@ -211,13 +214,21 @@ function askForm(oh, onAsked) {
     modes.querySelectorAll('.ask-mode').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
     textarea.hidden = submit.hidden = mode !== 'text';
     textarea.required = mode === 'text';
+    if (voice) {
+      voice.el.hidden = mode !== 'text';
+      voice.stop();
+    }
     for (const [kind, recorder] of Object.entries(recorders)) recorder.el.hidden = kind !== mode;
     showAnonNote();
   }
   anon?.addEventListener('change', showAnonNote);
   if (speech) {
     recorderList.forEach((r) => (r.el.hidden = true));
-    pageCleanup = () => recorderList.forEach((r) => r.close()); // let go of the microphone and camera on navigation
+    // Let go of the microphone and camera on navigation, and stop a voice being previewed.
+    pageCleanup = () => {
+      recorderList.forEach((r) => r.close());
+      voice?.stop();
+    };
     window.onbeforeunload = () => (recorderList.some((r) => r.busy()) ? true : undefined);
   }
 
@@ -226,6 +237,7 @@ function askForm(oh, onAsked) {
     { class: 'ask' },
     modes,
     textarea,
+    voice?.el,
     recorderList.map((r) => r.el),
     h('div', { class: 'ask-actions' }, anon ? h('label', { class: 'check' }, anon, ' Ask anonymously') : h('span', { class: 'muted small' }, 'Your name will be shown with your question.'), submit),
     anonNote,
@@ -234,13 +246,58 @@ function askForm(oh, onAsked) {
     e.preventDefault();
     if (mode !== 'text') return;
     action(async () => {
-      const { question } = await api('POST', `/api/office-hours/${oh.id}/questions`, { body: textarea.value, anonymous: anon?.checked ?? false });
+      const { question } = await api('POST', `/api/office-hours/${oh.id}/questions`, { body: textarea.value, anonymous: anon?.checked ?? false, voice: voice?.value() });
       textarea.value = '';
+      voice?.stop();
+      if (voice) myVoice = voice.value(); // the server keeps it as their voice for next time
       toast("Question submitted — you'll be notified when it's answered", 'success');
       onAsked?.(question);
     })({ currentTarget: submit });
   });
   return form;
+}
+
+// Picks the voice a typed question is read aloud in, starting from the one the asker picked last
+// time. Each voice has a button to hear a short sample of it.
+function voicePicker() {
+  let chosen = voices.some((v) => v.id === myVoice) ? myVoice : voices[0].id;
+  let playing = null; // { audio, button } of the sample being played
+  const PLAY = '▶';
+
+  function stop() {
+    if (!playing) return;
+    playing.audio.pause();
+    playing.button.textContent = PLAY;
+    playing.button.setAttribute('aria-pressed', 'false');
+    playing = null;
+  }
+
+  function preview(v, button) {
+    const again = playing?.button === button;
+    stop();
+    if (again) return; // a second click stops it
+    const audio = new Audio(v.sample);
+    playing = { audio, button };
+    button.textContent = '…'; // the first preview of a voice takes a moment to make
+    button.setAttribute('aria-pressed', 'true');
+    audio.addEventListener('playing', () => playing?.audio === audio && (button.textContent = '■'));
+    audio.addEventListener('ended', () => playing?.audio === audio && stop());
+    audio.addEventListener('error', () => {
+      if (playing?.audio !== audio) return;
+      stop();
+      toast(`Couldn't play ${v.name}'s voice right now`, 'error');
+    });
+    audio.play().catch(() => {}); // a failed load is reported by the error event
+  }
+
+  const options = voices.map((v) => {
+    const radio = h('input', { type: 'radio', name: 'ask-voice', value: v.id, checked: v.id === chosen, onchange: () => (chosen = v.id) });
+    const play = h('button', { type: 'button', class: 'voice-play', 'aria-pressed': 'false', 'aria-label': `Hear ${v.name}`, title: `Hear ${v.name}` }, PLAY);
+    play.addEventListener('click', () => preview(v, play));
+    return h('div', { class: 'voice' }, h('label', {}, radio, h('span', { class: 'voice-name' }, v.name), v.accent ? h('span', { class: 'voice-accent' }, v.accent) : null), play);
+  });
+  const el = h('fieldset', { class: 'voices' }, h('legend', {}, 'Read aloud to the expert in'), h('div', { class: 'voice-list' }, options));
+  return { el, value: () => chosen, stop };
 }
 
 // Records a question out loud, or on camera with `camera`. When the asker stops, the recording is
@@ -2404,7 +2461,8 @@ function loginPage(_, query) {
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     action(async () => {
-      ({ user: me } = await api('POST', `/api/auth/${mode}`, { username: f.username.value, password: f.password.value, displayName: f.displayName.value }));
+      await api('POST', `/api/auth/${mode}`, { username: f.username.value, password: f.password.value, displayName: f.displayName.value });
+      await loadMe();
       go(next);
     })({ currentTarget: submit });
   });
@@ -2412,6 +2470,11 @@ function loginPage(_, query) {
 }
 
 // ---------- shell & routing ----------
+
+// Who's logged in, their voice, and what the server can do.
+async function loadMe() {
+  ({ user: me, devLogin, speech, voices, voice: myVoice } = await api('GET', '/api/me'));
+}
 
 // Dev-only: switch between users without logging in. Shown when the server runs with --dev.
 function userSwitcher() {
@@ -2426,8 +2489,10 @@ function userSwitcher() {
   select.addEventListener(
     'change',
     action(async () => {
-      if (select.value) ({ user: me } = await api('POST', '/api/dev/login', { username: select.value }));
-      else {
+      if (select.value) {
+        await api('POST', '/api/dev/login', { username: select.value });
+        await loadMe();
+      } else {
         await api('POST', '/api/auth/logout');
         me = null;
       }
@@ -2513,5 +2578,5 @@ async function render() {
 }
 
 window.addEventListener('hashchange', render);
-({ user: me, devLogin, speech } = await api('GET', '/api/me'));
+await loadMe();
 render();
