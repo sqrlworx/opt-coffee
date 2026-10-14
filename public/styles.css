@@ -152,6 +152,21 @@ textarea { resize: vertical; }
 .facts > div + div { padding-left: 40px; border-left: 1px solid var(--line); }
 .facts dt { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
 .facts dd { margin: 4px 0 0; font-family: var(--serif); font-size: 1.25rem; font-variant-numeric: lining-nums; }
+.countdown { font-variant-numeric: lining-nums tabular-nums; }
+.cd-unit { margin-left: 1px; font-family: var(--sans); font-size: 0.68em; color: var(--muted); }
+/* The expert's card, under their name in the byline. It waits a moment before showing, so passing
+   over the name doesn't flash it, and the pointer can cross the gap onto it. */
+.person-card { position: relative; display: inline-block; }
+.person-card > .user-link { text-decoration: underline 1px var(--line-strong); text-underline-offset: 0.2em; }
+.person-card > .user-link:hover { text-decoration-color: currentColor; }
+.person-pop { position: absolute; z-index: 20; top: 100%; left: -20px; width: 300px; margin-top: 12px; padding: 18px 20px; display: grid; gap: 8px; justify-items: start; background: var(--raised); border-radius: 16px; box-shadow: 0 18px 48px -18px rgba(40, 28, 16, 0.4), 0 0 0 1px rgba(40, 28, 16, 0.06); font: 400 0.9rem/1.5 var(--sans); color: var(--ink-2); visibility: hidden; opacity: 0; transform: translateY(4px); transition: opacity 0.15s, transform 0.15s var(--ease), visibility 0s linear 0.15s; }
+.person-pop::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 14px; }
+.person-card:hover .person-pop, .person-card:focus-within .person-pop { visibility: visible; opacity: 1; transform: none; transition-delay: 0.12s; }
+.person-pop-name { font-family: var(--serif); font-size: 1.3rem; line-height: 1.2; color: var(--ink); }
+.person-pop-bio { display: -webkit-box; -webkit-line-clamp: 4; line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.person-pop .btn { margin-top: 6px; }
+.person-pop .btn-outline { background: var(--ink); color: var(--paper); }
+.person-pop .btn-outline:hover { background: #38332d; }
 
 /* ---------- ask ---------- */
 .ask-card { padding: clamp(22px, 4vw, 36px); gap: 0; }
@@ -273,6 +288,8 @@ textarea { resize: vertical; }
 .reply-response { margin: 4px 0 4px 22px; }
 .tag-expert { color: var(--accent); font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; }
 .replies-count { font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; }
+.replies-count:empty, .reply-composer:empty { display: none; }
+.replies-head { display: flex; align-items: center; gap: 14px; }
 .like { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border: none; border-radius: 999px; background: var(--surface); color: var(--muted); font: inherit; font-size: 0.8rem; cursor: pointer; transition: background-color 0.15s, color 0.15s, transform 0.1s var(--ease); }
 .like:hover:not(:disabled) { color: var(--accent); }
 .like:active:not(:disabled) { transform: translateY(1px); }

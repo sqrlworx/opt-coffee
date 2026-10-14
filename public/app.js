@@ -88,6 +88,23 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+// The time left until `deadline`, as 2d 05h 09m 30s, ticking down each second while it's on the page.
+function countdown(deadline) {
+  const end = new Date(deadline).getTime();
+  const el = h('dd', { class: 'countdown', role: 'timer', title: `Closes ${fmtDate(deadline)}` });
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((end - Date.now()) / 1000));
+    if (!left) return setChildren(el, 'Closed');
+    const units = [[Math.floor(left / 86400), 'd'], [Math.floor(left / 3600) % 24, 'h'], [Math.floor(left / 60) % 60, 'm'], [left % 60, 's']];
+    // From the first unit that isn't zero; the ones after it keep two digits, so it doesn't jump about.
+    const shown = units.slice(units.findIndex(([n]) => n > 0));
+    setChildren(el, shown.map(([n, unit], i) => [i ? ' ' : null, i ? String(n).padStart(2, '0') : n, h('span', { class: 'cd-unit' }, unit)]));
+    setTimeout(() => el.isConnected && tick(), (end - Date.now()) % 1000 || 1000); // when the seconds change
+  };
+  tick();
+  return el;
+}
+
 function toLocalInput(date) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -149,6 +166,36 @@ function subscribeButton({ type, id, subscribed, label }) {
     }),
   );
   return btn;
+}
+
+// The expert's name in an office hour's byline. Hovering it, or focusing it from the keyboard, shows
+// a card about them with a button to subscribe to them. Without a mouse the name still goes to their
+// profile, which has the button too.
+function expertCard(oh) {
+  const { expert } = oh;
+  return h(
+    'span',
+    { class: 'person-card' },
+    userLink(expert),
+    h(
+      'span',
+      { class: 'person-pop' },
+      h('span', { class: 'person-pop-name' }, expert.displayName),
+      expert.bio ? h('span', { class: 'person-pop-bio' }, expert.bio) : null,
+      subscribeButton({ type: 'expert', id: expert.id, subscribed: oh.subscribedToExpert }),
+    ),
+  );
+}
+
+// When questions close: a countdown in the last week, the date before that, and once they've
+// closed, when that was (publishing closes them too).
+function questionsFact(oh) {
+  if (oh.status !== 'open') {
+    const closed = [oh.closedAt, oh.questionsDeadline].filter(Boolean).sort()[0];
+    return h('div', {}, h('dt', {}, 'Questions closed'), h('dd', {}, fmtDate(closed)));
+  }
+  const soon = new Date(oh.questionsDeadline) - Date.now() <= 7 * 86400_000;
+  return h('div', {}, h('dt', {}, 'Questions open'), soon ? countdown(oh.questionsDeadline) : h('dd', {}, `until ${fmtDate(oh.questionsDeadline)}`));
 }
 
 function questionMeta(q) {
@@ -822,7 +869,19 @@ function replyThread(oh, q) {
     draw();
   };
   if (oh.isExpert) return h('div', { class: 'thread' }, additionList, h('div', { class: 'answer-additions' }, replyOpener('Add to your answer', 'Add to your answer…', 'Add', post(additions))), count, list);
-  return h('div', { class: 'thread' }, additionList, count, list, replyOpener('Reply', `Reply to ${oh.expert.displayName}’s answer…`, 'Reply', post(replies)));
+  // Everyone else replies from beside the count; the box opens under it, above the replies.
+  const composer = h('div', { class: 'reply-composer' });
+  const closeComposer = () => setChildren(composer);
+  const addReply = h('button', {
+    type: 'button',
+    class: 'btn btn-outline btn-small',
+    onclick: () => {
+      if (!me) return requireLogin();
+      if (!composer.firstChild) setChildren(composer, replyForm(`Reply to ${oh.expert.displayName}’s answer…`, 'Reply', async (body) => (await post(replies)(body), closeComposer()), { cancel: closeComposer }));
+      composer.querySelector('textarea').focus();
+    },
+  }, 'Add Reply');
+  return h('div', { class: 'thread' }, additionList, h('div', { class: 'replies-head' }, count, addReply), composer, list);
 }
 
 // A button that opens a reply box; it closes again once the reply is sent, or on Cancel.
@@ -871,6 +930,7 @@ function replyHead(r) {
   return h(
     'div',
     { class: 'reply-head' },
+    likeButton(r),
     userLink(r.author),
     r.byExpert ? h('span', { class: 'tag tag-expert' }, 'Expert') : null,
     r.mine ? h('span', { class: 'tag tag-you' }, 'you') : null,
@@ -879,7 +939,7 @@ function replyHead(r) {
 }
 
 function replyBody(r, ...extra) {
-  return [h('p', { class: 'reply-body' }, r.body), h('div', { class: 'reply-actions' }, likeButton(r), extra)];
+  return [h('p', { class: 'reply-body' }, r.body), extra.some(Boolean) ? h('div', { class: 'reply-actions' }, extra) : null];
 }
 
 function likeButton(r) {
@@ -1622,14 +1682,14 @@ async function officeHourPage({ id }) {
     { class: 'card oh-header' },
     h('div', { class: 'row gap-sm wrap' }, topicChip(oh), statusBadge(oh), oh.allowAnonymous ? h('span', { class: 'chip chip-muted' }, 'Anonymous OK') : null),
     h('h1', {}, oh.title),
-    h('p', { class: 'byline' }, 'with ', userLink(oh.expert)),
+    h('p', { class: 'byline' }, 'with ', oh.isExpert ? userLink(oh.expert) : expertCard(oh)),
     oh.followUpOf ? h('p', { class: 'muted small' }, 'Follows up on ', h('a', { href: `#/oh/${oh.followUpOf.id}` }, oh.followUpOf.title)) : null,
     oh.description ? h('p', { class: 'desc' }, oh.description) : null,
     data.followUps.length ? h('p', { class: 'muted small' }, 'Followed up in ', data.followUps.map((f, i) => [i ? ', ' : null, h('a', { href: `#/oh/${f.id}` }, f.title)])) : null,
     h(
       'dl',
       { class: 'facts' },
-      h('div', {}, h('dt', {}, 'Questions until'), h('dd', {}, fmtDate(oh.questionsDeadline))),
+      questionsFact(oh),
       h('div', {}, h('dt', {}, 'Answers expected'), h('dd', {}, fmtDate(oh.answersExpectedAt))),
       h('div', {}, h('dt', {}, 'Questions'), h('dd', {}, oh.questionCount)),
     ),
@@ -1639,7 +1699,6 @@ async function officeHourPage({ id }) {
       oh.isExpert && oh.status !== 'published' ? h('a', { class: 'btn btn-primary', href: `#/oh/${oh.id}/manage` }, 'Plan & answer') : null,
       oh.isExpert && oh.status === 'published' && !oh.processing ? h('a', { class: 'btn btn-outline', href: `#/oh/new?followUp=${oh.id}` }, 'Create follow-up Q&A') : null,
       !oh.isExpert ? subscribeButton({ type: 'office_hour', id: oh.id, subscribed: oh.subscribed, label: 'this office hour' }) : null,
-      !oh.isExpert ? subscribeButton({ type: 'expert', id: oh.expert.id, subscribed: oh.subscribedToExpert, label: oh.expert.displayName }) : null,
     ),
   );
 
