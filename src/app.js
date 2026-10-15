@@ -104,9 +104,11 @@ function isSubscribed(db, viewer, type, id) {
 
 function serializeOfficeHour(db, oh, viewer) {
   const expert = db.prepare('SELECT * FROM users WHERE id = ?').get(oh.expert_id);
-  const { n } = db.prepare('SELECT COUNT(*) AS n FROM questions WHERE office_hour_id = ?').get(oh.id);
   const isExpert = viewer?.id === oh.expert_id;
   const hidden = processing(oh) && !isExpert;
+  // Once readers can see it's published, they're only told about the questions that were answered.
+  const answeredOnly = !isExpert && !hidden && statusOf(oh) === 'published';
+  const { n } = db.prepare(`SELECT COUNT(*) AS n FROM questions WHERE office_hour_id = ?${answeredOnly ? ' AND published_position IS NOT NULL' : ''}`).get(oh.id);
   return {
     id: oh.id,
     title: oh.title,
@@ -707,11 +709,15 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     const officeHour = serializeOfficeHour(db, oh, user);
     const { questions, order } = moderatedView(oh, user);
     const isExpert = officeHour.isExpert;
-    const visible = isExpert ? questions : questions.map(stripPrivate);
+    // Once readers can see it's published, the questions that weren't answered are the expert's alone.
+    const shown = !isExpert && officeHour.status === 'published' ? questions.filter((q) => q.publishedPosition != null) : questions;
+    const visible = isExpert ? shown : shown.map(stripPrivate);
     const byId = new Map(visible.map((q) => [q.id, q]));
     const result = {
       officeHour,
-      groups: order.groups.map((g) => ({ label: g.label, popularity: g.popularity, questions: g.questionIds.map((id) => byId.get(id)) })),
+      groups: order.groups
+        .map((g) => ({ label: g.label, popularity: g.popularity, questions: g.questionIds.map((id) => byId.get(id)).filter(Boolean) }))
+        .filter((g) => g.questions.length),
       answers: officeHour.status === 'published' ? publishedAnswers(questions).map((q) => ({ ...withSummary(q), discussion: discussionOf(db, q.id, oh.expert_id, user) })) : [],
       followUps: db.prepare('SELECT id, title FROM office_hours WHERE follow_up_of = ? ORDER BY created_at').all(oh.id),
       video: officeHour.status === 'published' ? joinedVideo(oh) : null,

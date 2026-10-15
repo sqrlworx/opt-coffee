@@ -1644,13 +1644,15 @@ function feedItem(item) {
     else if (oh.isExpert) action = cta('View office hour →', false);
     else if (oh.status === 'open') action = cta('Ask a question →');
     else action = cta('View questions →', false);
+    // Once it's published, readers are only told about the questions that were answered.
+    const counted = oh.status === 'open' ? 'so far' : oh.status === 'published' && !oh.isExpert ? 'answered' : 'asked';
     return h(
       'article',
       { class: 'card feed-item' },
       head,
       title,
       oh.description ? h('p', { class: 'desc clamp' }, oh.description) : null,
-      h('p', { class: 'muted small' }, `${plural(oh.questionCount, 'question')} ${oh.status === 'open' ? 'so far' : 'asked'} · questions until ${fmtDate(oh.questionsDeadline)} · answers expected ${fmtDate(oh.answersExpectedAt)}`),
+      h('p', { class: 'muted small' }, `${plural(oh.questionCount, 'question')} ${counted} · questions until ${fmtDate(oh.questionsDeadline)} · answers expected ${fmtDate(oh.answersExpectedAt)}`),
       action,
     );
   }
@@ -1732,8 +1734,9 @@ async function officeHourPage({ id }) {
     const answeredIds = new Set(data.answers.map((q) => q.id));
     const rest = data.groups.flatMap((g) => g.questions).filter((q) => !answeredIds.has(q.id));
     const title = h('h2', { class: 'section-title' }, `${data.answers.length} answered question${data.answers.length === 1 ? '' : 's'}`);
-    const unanswered = rest.length
-      ? h('details', { class: 'card' }, h('summary', {}, `${rest.length} question${rest.length === 1 ? ' was' : 's were'} not answered`), h('ul', { class: 'q-list' }, rest.map((q) => questionRow(q, { canVote: false }))))
+    // Questions that weren't answered are the expert's alone; readers aren't sent them.
+    const unanswered = oh.isExpert && rest.length
+      ? h('details', { class: 'card' }, h('summary', {}, `${rest.length} question${rest.length === 1 ? ' was' : 's were'} not answered`, h('span', { class: 'muted small' }, ' · only you see these')), h('ul', { class: 'q-list' }, rest.map((q) => questionRow(q, { canVote: false }))))
       : null;
     if (data.video?.status === 'ready') {
       // One video, with a short transcript to find your way around it. The full one is folded away.

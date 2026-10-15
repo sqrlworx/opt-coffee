@@ -123,6 +123,8 @@ test('publishing joins the answers into one public video, in the published order
   assert.equal(page.officeHour.publishedAt, null);
   assert.equal(page.officeHour.processing, false);
   assert.deepEqual([page.answers, page.video], [[], null]);
+  // Every question, and all of them counted, so which were answered isn't given away.
+  assert.deepEqual([page.groups.flatMap((g) => g.questions).length, page.officeHour.questionCount], [3, 3]);
   assert.ok(!('publishedAnswerVideo' in (await reader('GET', `/api/questions/${ids[0]}`)).question));
   assert.ok(!(await asker('GET', '/api/feed')).items.some((i) => i.type === 'published' && i.officeHour.id === ohId));
   assert.ok(!(await reader('GET', '/api/explore')).published.some((oh) => oh.id === ohId));
@@ -136,6 +138,12 @@ test('publishing joins the answers into one public video, in the published order
 
   page = await reader('GET', `/api/office-hours/${ohId}`);
   assert.deepEqual([page.officeHour.status, page.officeHour.processing, page.answers.length], ['published', false, 2]);
+  // Now only the questions that were answered, here and in counts elsewhere; the one left out is the expert's alone.
+  assert.deepEqual(page.groups.flatMap((g) => g.questions).map((q) => q.id).sort((a, b) => a - b), [ids[0], ids[2]].sort((a, b) => a - b));
+  assert.equal(page.officeHour.questionCount, 2);
+  assert.equal((await reader('GET', '/api/explore')).published.find((oh) => oh.id === ohId).questionCount, 2);
+  const mine = await expert('GET', `/api/office-hours/${ohId}`);
+  assert.deepEqual([mine.groups.flatMap((g) => g.questions).length, mine.officeHour.questionCount], [3, 3]);
   assert.ok((await asker('GET', '/api/feed')).items.some((i) => i.type === 'published' && i.officeHour.id === ohId));
   assert.ok((await reader('GET', '/api/explore')).published.some((oh) => oh.id === ohId));
 
