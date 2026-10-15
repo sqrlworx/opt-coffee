@@ -10,18 +10,19 @@ const TRANSCRIPT_POLL = 1000;
 export const MAX_CLIP = 5;
 
 /**
- * Background work for answers' b-roll, one job at a time: making a clip from the expert's
- * description (`broll`, src/broll/index.js), with what they say in the answer to pick the shot,
- * then placing it in the answer's take (the moderator picks where). Both wait for the take's
- * transcript. A new take moves the b-roll to
- * where it fits in that one. Progress lives in the database (questions.broll_status), so
- * `resume()` at startup picks up anything pending.
+ * Background work for answers' b-roll: making a clip from the expert's description (`broll`,
+ * src/broll/index.js), one at a time, with what they say in the answer to pick the shot, then
+ * placing it in the answer's take (the moderator picks where). Both wait for the take's
+ * transcript. A clip the expert uploaded is placed the same way, right away rather than after the
+ * clips being made, as is b-roll moved to where it fits in a new take. Progress lives in the
+ * database (questions.broll_status), so `resume()` at startup picks up anything pending.
  */
 export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.error, transcriptWait = TRANSCRIPT_WAIT }) {
   let tail = Promise.resolve();
   const enqueue = (job) => {
     tail = tail.then(job).catch((err) => log(err));
   };
+  const placing = new Set(); // placements under way outside the queue
   const question = (id) => db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
   // Still the b-roll this job is for: the expert may have asked for another, or removed it, meanwhile.
   const wanted = (id, clip) => question(id)?.broll_video === clip;
@@ -47,6 +48,11 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
       const q = question(id);
       if (q?.broll_status !== 'pending' || !q.broll_video) return;
       const file = join(mediaDir, q.broll_video);
+      // An uploaded clip that's gone can't be made again, nor can anything without a way to make it.
+      if (!existsSync(file) && (q.broll_upload || !broll.generate)) {
+        db.prepare("UPDATE questions SET broll_status = 'failed' WHERE id = ? AND broll_video = ?").run(id, q.broll_video);
+        return log(`[broll] the b-roll for question ${id} is missing, and can't be made`);
+      }
       if (!existsSync(file)) {
         making = { id, clip: q.broll_video, stop: new AbortController() };
         try {
@@ -75,10 +81,16 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
     });
   }
 
-  /** Queues placing a question's b-roll in its current take, after a new one was recorded. */
+  /**
+   * Places a question's b-roll, already there, in its current take: after a new take was recorded,
+   * or a clip uploaded. Right away, not after clips being made, which can take minutes each.
+   */
   function place(id) {
     db.prepare("UPDATE questions SET broll_status = 'pending', broll_start = NULL, broll_length = NULL WHERE id = ?").run(id);
-    enqueue(() => placeNow(id));
+    const job = placeNow(id)
+      .catch((err) => log(err))
+      .finally(() => placing.delete(job));
+    placing.add(job);
   }
 
   // Places the b-roll in the take the question has now; if it's re-recorded meanwhile, in the new
@@ -95,7 +107,7 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
         const t = await transcript(take);
         const [end, seconds] = await Promise.all([broll.duration(join(mediaDir, take)), broll.duration(join(mediaDir, clip))]);
         const placed = await moderator.placeBroll({
-          description: q.broll_prompt,
+          description: shows(q),
           question: q.body,
           clip: seconds,
           answerStart: q.answer_start,
@@ -128,13 +140,22 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
     place,
     cancel,
     resume,
-    /** Resolves once every queued job, including ones queued meanwhile, has finished. */
+    /** Resolves once every job, including ones started meanwhile, has finished. */
     async idle() {
       let seen;
       do {
         seen = tail;
-        await seen;
-      } while (seen !== tail);
+        await Promise.all([seen, ...placing]);
+      } while (seen !== tail || placing.size);
     },
   };
+}
+
+/**
+ * What a question's b-roll shows, to place it by: the expert's description, or for a clip they
+ * uploaded without one, its file's name ("chopping-onions.mov"), which often says.
+ */
+function shows(q) {
+  if (q.broll_prompt || !q.broll_upload) return q.broll_prompt ?? '';
+  return q.broll_upload.replace(/\.[^.]*$/, '').replace(/[._-]+/g, ' ').trim();
 }

@@ -1,19 +1,21 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
-import { createBroll, mediaDuration } from '../src/broll/index.js';
+import { createBroll, mediaDuration, prepareUpload } from '../src/broll/index.js';
 import { createModerator } from '../src/moderator/index.js';
 
-// Stands in for LTX-Video and ffprobe: a "video" says how long it is ("take: <label> <seconds>s"),
+// Stands in for LTX-Video, ffmpeg and ffprobe: a "video" says how long it is ("take: <label> <seconds>s"),
 // and making b-roll writes one of those, as long as it was asked for, recording what was asked in
 // `made`. The shot it films is the description, written up. A description with "[fail]" fails.
-// `hold(t)` makes it wait until released, or stopped (recorded in `stopped`).
+// `hold(t)` makes it wait until released, or stopped (recorded in `stopped`). An uploaded video is
+// one too, and getting it ready keeps as much of it as was asked for, recording what was asked in
+// `prepared`; one saying "[unreadable]" can't be read.
 let gate = null;
 const hold = (t) => {
   let resolve;
@@ -27,6 +29,7 @@ const hold = (t) => {
 };
 const made = [];
 const stopped = [];
+const prepared = [];
 const fakeBroll = {
   name: 'fake',
   async generate(prompt, out, { seconds, question, answer, signal }) {
@@ -35,6 +38,14 @@ const fakeBroll = {
     made.push({ prompt, seconds, question, answer });
     writeFileSync(out, `broll: ${prompt} ${seconds}s`);
     return { seconds, shot: `A scene showing: ${prompt}` };
+  },
+  async prepare(src, out, { seconds }) {
+    const upload = readFileSync(src, 'utf8');
+    if (upload.includes('[unreadable]')) throw new Error('Invalid data found when processing input');
+    prepared.push({ upload, seconds });
+    const original = Number(/ ([\d.]+)s$/.exec(upload)[1]);
+    writeFileSync(out, `broll: ${upload} ${Math.min(original, seconds)}s`);
+    return { seconds: Math.min(original, seconds), original };
   },
   async duration(file) {
     return Number(/ ([\d.]+)s$/.exec(readFileSync(file, 'utf8'))[1]);
@@ -73,11 +84,11 @@ after(() => {
 
 function client(baseUrl = () => base) {
   let cookie = '';
-  const call = async function call(method, path, body) {
+  const call = async function call(method, path, body, type = 'video/webm') {
     const raw = Buffer.isBuffer(body);
     const res = await fetch(baseUrl() + path, {
       method,
-      headers: { ...(raw ? { 'Content-Type': 'video/webm' } : body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) },
+      headers: { ...(raw ? { 'Content-Type': type } : body ? { 'Content-Type': 'application/json' } : {}), ...(cookie ? { Cookie: cookie } : {}) },
       body: raw ? body : body ? JSON.stringify(body) : undefined,
     });
     const setCookie = res.headers.get('set-cookie');
@@ -138,7 +149,7 @@ test('the expert describes b-roll for an answer; it is made to fit, and placed w
 
   const res = await expert('POST', `/api/questions/${qid}/broll`, { prompt: `  ${prompt}\n` });
   assert.equal(res.status, 200);
-  assert.deepEqual(res.broll, { prompt, status: 'pending', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(res.broll, { prompt, upload: null, status: 'pending', shot: null, video: null, start: null, length: null });
   await app.idle();
 
   // As long as the answer has room for: 5 seconds, the most made, out of an 18-second answer. The
@@ -226,7 +237,7 @@ test('asking again replaces the b-roll, removing it deletes it, and failures are
   assert.equal(res.status, 200);
   await app.idle();
   const { broll } = (await expert('GET', `/api/questions/${qid}`)).question;
-  assert.deepEqual(broll, { prompt: 'A pan on fire [fail]', status: 'failed', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(broll, { prompt: 'A pan on fire [fail]', upload: null, status: 'failed', shot: null, video: null, start: null, length: null });
   assert.ok(!existsSync(join(mediaDir, row(qid).broll_video)));
 });
 
@@ -285,6 +296,123 @@ test('on startup, b-roll that was being made is made and placed', async () => {
   }
 });
 
+test('the expert uploads a video of their own as b-roll; as much of its start as fits is placed where they talk about it', async () => {
+  const expert = await register('upload_host');
+  const asker = await register('upload_asker');
+  assert.equal((await expert('GET', '/api/me')).makesBroll, true);
+  const { ohId, qid } = await answered(expert, asker, 20, 2);
+  const words = transcribed(row(qid).answer_video, 'First, plan the week. Then chop the onions and peppers for the sauce. Cook it slowly, and taste it as you go.', 3);
+  const upload = (query, body, type) => expert('PUT', `/api/questions/${qid}/broll/video?${new URLSearchParams(query)}`, body, type);
+
+  // Only the expert, only for a recorded answer, and only a video.
+  assert.equal((await asker('PUT', `/api/questions/${qid}/broll/video?name=a.mov`, take('clip', 4))).status, 403);
+  assert.deepEqual(await upload({ name: 'notes.txt' }, Buffer.from('hello'), 'text/plain'), { status: 415, error: 'Expected a video' });
+  const { question: unanswered } = await asker('POST', `/api/office-hours/${ohId}/questions`, { body: 'Not answered yet?' });
+  assert.equal((await expert('PUT', `/api/questions/${unanswered.id}/broll/video?name=a.mov`, take('clip', 4))).status, 409);
+  // Nothing is kept of what can't be read as a video, or is too short to cut away to.
+  const files = readdirSync(mediaDir).length;
+  assert.deepEqual(await upload({ name: 'broken.mov' }, take('[unreadable]', 4), 'video/quicktime'), { status: 415, error: "That file couldn't be read as a video. Try an MP4, MOV or WebM." });
+  assert.deepEqual(await upload({ name: 'blink.mov' }, take('blink', 1)), { status: 400, error: 'This clip is too short for b-roll' });
+  assert.equal(readdirSync(mediaDir).length, files);
+
+  // 30 seconds of video for an 18-second answer, which has room for 10.8 seconds of b-roll: its
+  // first 10.8 seconds are used, which the expert is told.
+  const res = await upload({ name: 'Kitchen\tprep.mov\n', description: '  Chopping onions\n on a board ' }, take('kitchen', 30), 'video/quicktime');
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.broll, { prompt: 'Chopping onions on a board', upload: 'Kitchen prep.mov', status: 'pending', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(res.trimmed, { from: 30, to: 10.8 });
+  assert.deepEqual(prepared.at(-1), { upload: 'take: kitchen 30s', seconds: 10.8 });
+  assert.equal(readdirSync(mediaDir).length, files + 1); // the clip; not the upload itself
+  await app.idle();
+  const { question } = await expert('GET', `/api/questions/${qid}`);
+  assert.deepEqual([question.broll.status, question.broll.shot], ['ready', null]);
+  // Cut in as they start talking about chopping the onions.
+  assert.deepEqual([question.broll.start, question.broll.length], [words.find(([, , w]) => w === ' Then')[0], 10.8]);
+  assert.equal(readFileSync(join(mediaDir, question.broll.video.split('/').pop()), 'utf8'), 'broll: take: kitchen 30s 10.8s');
+  assert.equal((await expert.media(question.broll.video)).status, 200);
+  assert.equal((await asker.media(question.broll.video)).status, 404); // the expert's alone until published
+
+  // Making b-roll instead replaces it, and the clip is deleted.
+  const uploaded = row(qid).broll_video;
+  await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'Onions sizzling in a pan' });
+  assert.ok(!existsSync(join(mediaDir, uploaded)));
+  assert.equal(row(qid).broll_upload, null);
+  await app.idle();
+});
+
+test('an uploaded video is placed right away, even while other b-roll is being made, and by its name without a description', async (t) => {
+  const expert = await register('upload_queue_host');
+  const asker = await register('upload_queue_asker');
+  const first = await answered(expert, asker, 20, 2);
+  const second = await answered(expert, asker, 20, 2);
+  const words = transcribed(row(second.qid).answer_video, 'Start with the basics. Taste the sauce as it simmers, then season it.', 3);
+  // B-roll being made for the first answer, which takes minutes.
+  const release = hold(t);
+  await expert('POST', `/api/questions/${first.qid}/broll`, { prompt: 'Steam over a pot of soup' });
+  await new Promise((resolve) => setTimeout(resolve, 20)); // it's started
+
+  const res = await expert('PUT', `/api/questions/${second.qid}/broll/video?name=simmering_sauce-closeup.MOV`, take('sauce', 4), 'application/octet-stream');
+  assert.deepEqual([res.status, res.broll.prompt, res.broll.upload, res.trimmed], [200, null, 'simmering_sauce-closeup.MOV', null]);
+  for (let i = 0; row(second.qid).broll_status === 'pending' && i < 200; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(row(first.qid).broll_status, 'pending');
+  // Cut in as they talk about the sauce simmering, which its name says it shows.
+  assert.deepEqual([row(second.qid).broll_status, row(second.qid).broll_start, row(second.qid).broll_length], ['ready', words.find(([, , w]) => w === ' Taste')[0], 4]);
+
+  // Uploading one for the first answer stops the b-roll being made for it.
+  assert.equal((await expert('PUT', `/api/questions/${first.qid}/broll/video?name=soup.mp4`, take('soup', 6), 'video/mp4')).status, 200);
+  await app.idle();
+  release();
+  assert.ok(stopped.includes('Steam over a pot of soup'));
+  assert.ok(!made.some((m) => m.prompt === 'Steam over a pot of soup'));
+  assert.deepEqual([row(first.qid).broll_status, row(first.qid).broll_upload, row(first.qid).broll_prompt], ['ready', 'soup.mp4', null]);
+});
+
+test('on startup, an uploaded video being placed is placed, and one that has gone is marked failed, not made', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_broll_resume_upload_'));
+  try {
+    const oldDb = openDb(':memory:');
+    const [answer, clip, gone] = [`${'a'.repeat(32)}.webm`, `${'c'.repeat(32)}.mp4`, `${'d'.repeat(32)}.mp4`];
+    oldDb.exec(`
+      INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (1, 'old', 'Old', 'x', '2026-01-01');
+      INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at) VALUES (1, 1, 'Old', '2026-01-02', '2026-01-03', '2026-01-01');
+      INSERT INTO questions (id, office_hour_id, author_id, body, created_at, plan_position, answer_video, answer_start, broll_prompt, broll_upload, broll_status, broll_video) VALUES
+        (1, 1, 1, 'Old question?', '2026-01-01', 1, '${answer}', 1, NULL, 'waves.mov', 'pending', '${clip}'),
+        (2, 1, 1, 'Another one?', '2026-01-01', 2, '${answer}', 1, 'Gulls over the sea', 'gulls.mov', 'pending', '${gone}');
+    `);
+    writeFileSync(join(dir, answer), take('old', 6));
+    writeFileSync(join(dir, clip), 'broll: waves 3s');
+    const resumed = createApp({ db: oldDb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, broll: fakeBroll });
+    await resumed.idle();
+    const q = (id) => ({ ...oldDb.prepare('SELECT broll_status, broll_start, broll_length FROM questions WHERE id = ?').get(id) });
+    assert.deepEqual(q(1), { broll_status: 'ready', broll_start: 2, broll_length: 3 });
+    assert.deepEqual(q(2), { broll_status: 'failed', broll_start: null, broll_length: null });
+    assert.ok(!made.some((m) => m.prompt === 'Gulls over the sea'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("with nothing to make b-roll with, it can still be uploaded", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_broll_uploads_only_'));
+  const onlyApp = createApp({ db: openDb(':memory:'), moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, broll: { ...fakeBroll, generate: null } });
+  const onlyServer = createServer(onlyApp);
+  await new Promise((resolve) => onlyServer.listen(0, resolve));
+  t.after(() => {
+    onlyServer.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const onlyBase = () => `http://localhost:${onlyServer.address().port}`;
+  const expert = await register('uploads_only_host', onlyBase);
+  const asker = await register('uploads_only_asker', onlyBase);
+  const me = await expert('GET', '/api/me');
+  assert.deepEqual([me.broll, me.makesBroll], [true, false]);
+  const { qid } = await answered(expert, asker);
+  assert.deepEqual(await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'Waves on a beach' }), { status: 503, error: "B-roll can't be made on this server, only uploaded" });
+  assert.equal((await expert('PUT', `/api/questions/${qid}/broll/video?name=waves.mp4`, take('waves', 4), 'video/mp4')).status, 200);
+  await onlyApp.idle();
+  assert.equal((await expert('GET', `/api/questions/${qid}`)).question.broll.status, 'ready');
+});
+
 test('without b-roll, experts are told it is not available', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_broll_off_'));
   const offServer = createServer(createApp({ db: openDb(':memory:'), moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir }));
@@ -296,6 +424,7 @@ test('without b-roll, experts are told it is not available', async () => {
     assert.equal((await expert('GET', '/api/me')).broll, false);
     const { qid } = await answered(expert, asker);
     assert.deepEqual(await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'Waves on a beach' }), { status: 503, error: 'B-roll is not available on this server' });
+    assert.deepEqual(await expert('PUT', `/api/questions/${qid}/broll/video?name=waves.mp4`, take('waves', 4)), { status: 503, error: 'B-roll is not available on this server' });
   } finally {
     offServer.close();
     rmSync(dir, { recursive: true, force: true });
@@ -331,6 +460,55 @@ test("a recording's duration, even when its header doesn't say", { skip: !hasFfm
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('with ffmpeg but neither a Gemini key nor uv, b-roll can only be uploaded', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, (t) => {
+  // A PATH with ffmpeg and ffprobe on it, and nothing else.
+  const bin = mkdtempSync(join(tmpdir(), 'forum_broll_bin_'));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  for (const tool of ['ffmpeg', 'ffprobe']) symlinkSync(process.env.PATH.split(':').map((dir) => join(dir, tool)).find((path) => existsSync(path)), join(bin, tool));
+  const oldPath = process.env.PATH;
+  process.env.PATH = bin;
+  try {
+    const logs = [];
+    const broll = createBroll({ mode: 'auto', planner: null, gemini: null, log: (msg) => logs.push(msg) });
+    assert.deepEqual([broll.name, broll.generate, broll.prepare], ['uploaded only', null, prepareUpload]);
+    assert.match(logs[0], /experts can upload b-roll but it can't be made for them/);
+  } finally {
+    process.env.PATH = oldPath;
+  }
+});
+
+test('an uploaded video is made into a clip like those that are made: H.264, at most 1080p and 30 fps, without its sound or metadata', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_broll_prepare_'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', ...args]);
+  const probe = (file) => JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,codec_name,width,height,avg_frame_rate,color_transfer:format_tags', '-of', 'json', file]));
+
+  // As a camera films it: bigger than 1080p, at 60 fps, with sound and where it was filmed.
+  ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=2560x1440:rate=60:duration=3', '-f', 'lavfi', '-i', 'sine=duration=3', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-metadata', 'location=+37.4848-122.1484/', join(dir, 'camera.mov'));
+  const { seconds, original } = await prepareUpload(join(dir, 'camera.mov'), join(dir, 'clip.mp4'), { seconds: 2 });
+  assert.equal(seconds, 2);
+  assert.ok(Math.abs(original - 3) < 0.05, `${original}s`);
+  const { streams, format } = probe(join(dir, 'clip.mp4'));
+  assert.deepEqual(streams.map((s) => [s.codec_type, s.codec_name, s.width, s.height, s.avg_frame_rate]), [['video', 'h264', 1920, 1080, '30/1']]);
+  assert.ok(!('location' in (format.tags ?? {})));
+  assert.deepEqual(readdirSync(dir).sort(), ['camera.mov', 'clip.mp4']); // nothing left half made
+
+  // HDR, as phones film by default, is brought into ordinary range (with zscale, which ffmpeg usually has).
+  ffmpeg('-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=30:duration=2', '-vf', 'setparams=range=tv:color_primaries=bt2020:color_trc=arib-std-b67:colorspace=bt2020nc', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'hdr.mp4'));
+  assert.equal(probe(join(dir, 'hdr.mp4')).streams[0].color_transfer, 'arib-std-b67');
+  await prepareUpload(join(dir, 'hdr.mp4'), join(dir, 'sdr.mp4'), { seconds: 5 });
+  const zscale = execFileSync('ffmpeg', ['-hide_banner', '-filters']).toString().includes(' zscale ');
+  assert.equal(probe(join(dir, 'sdr.mp4')).streams[0].color_transfer, zscale ? 'bt709' : 'arib-std-b67');
+
+  // Sound with a cover picture, or something that isn't a video at all, can't be made into one.
+  ffmpeg('-f', 'lavfi', '-i', 'color=red:size=64x64', '-frames:v', '1', join(dir, 'cover.jpg'));
+  ffmpeg('-f', 'lavfi', '-i', 'sine=duration=2', '-i', join(dir, 'cover.jpg'), '-map', '0', '-map', '1', '-c:a', 'aac', '-c:v', 'copy', '-disposition:v:0', 'attached_pic', join(dir, 'song.m4a'));
+  await assert.rejects(prepareUpload(join(dir, 'song.m4a'), join(dir, 'song.mp4'), { seconds: 2 }), /has no video/);
+  writeFileSync(join(dir, 'notes.mov'), 'not a video');
+  await assert.rejects(prepareUpload(join(dir, 'notes.mov'), join(dir, 'notes.mp4'), { seconds: 2 }));
+  assert.ok(!existsSync(join(dir, 'song.mp4')) && !existsSync(join(dir, 'notes.mp4')));
 });
 
 // OpenAI, stood in for by a fake fetch: records each request, and answers from `reply(path, body)`.

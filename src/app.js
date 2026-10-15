@@ -21,6 +21,8 @@ const MAX_SPOKEN_QUESTION = 2000; // characters of transcript; people say more t
 const MAX_ANSWER_START = 600; // seconds; a take is capped at 10 minutes in the browser
 const MAX_REPLY = 2000; // characters of a reply in a discussion
 const MAX_BROLL_PROMPT = 500; // characters describing b-roll
+const MAX_BROLL_VIDEO = 500_000_000; // an uploaded b-roll clip: a minute or two of 4K from a phone
+const MAX_FILE_NAME = 200; // characters kept of an uploaded file's name
 const MAX_SEEDS = 20; // seed questions added at once
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp',
@@ -169,13 +171,15 @@ function loadQuestions(db, ohId, viewer) {
 /**
  * The b-roll the expert asked for in an answer, as only they see it before publishing. `video` once
  * it's made, with `shot`, what was filmed for their description; `start` and `length` place it in
- * the take once it's placed, and stay null if the take is too short for it.
+ * the take once it's placed, and stay null if the take is too short for it. A clip they uploaded
+ * has `upload`, its file's name, and `prompt` only if they said what it shows.
  */
 function brollOf(q) {
   if (!q.broll_status) return null;
   const ready = q.broll_status === 'ready';
   return {
     prompt: q.broll_prompt,
+    upload: q.broll_upload,
     status: q.broll_status,
     shot: ready ? q.broll_shot : null,
     video: ready ? mediaUrl(q.broll_video) : null,
@@ -528,11 +532,13 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   });
 
   // `voices` read typed questions aloud, each with a `sample` to preview it; `voice` is the viewer's.
+  // `broll`: experts can add b-roll to their answers, uploading it, and `makesBroll`: have it made.
   route('GET', '/api/me', ({ user }) => ({
     user: user ? publicUser(user) : null,
     devLogin,
     speech: Boolean(speech),
     broll: Boolean(broll),
+    makesBroll: Boolean(broll?.generate),
     voices: speech ? speech.voices.map((v) => ({ ...v, sample: `/media/voices/${v.id}.m4a` })) : [],
     voice: speech ? voiceOf(user) : null,
   }));
@@ -1081,6 +1087,20 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     { auth: true },
   );
 
+  /** How much b-roll a question's answer has room for (see brollJobs.room), for a clip `clip` seconds long; refused if none. */
+  async function brollRoom(q, clip) {
+    if (!q.answer_video) throw new HttpError(409, 'Record an answer before adding b-roll to it');
+    let room;
+    try {
+      room = await brollJobs.room(q.answer_video, q.answer_start, clip);
+    } catch (err) {
+      console.error(`[broll] measuring the answer to question ${q.id} failed: ${err.message}`);
+      throw new HttpError(500, "Couldn't read this answer's video");
+    }
+    if (!room) throw new HttpError(400, 'This answer is too short for b-roll');
+    return room;
+  }
+
   // B-roll for an answer: the expert describes a shot to cut away to while they talk. A clip of it
   // is made in the background, as long as the answer has room for, and placed in the take where
   // it fits what's being said (src/broll/jobs.js). Asking again replaces it.
@@ -1089,20 +1109,13 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     '/api/questions/:id/broll',
     async ({ params, user, body }) => {
       if (!brollJobs) throw new HttpError(503, 'B-roll is not available on this server');
+      if (!broll.generate) throw new HttpError(503, "B-roll can't be made on this server, only uploaded");
       const q = editableQuestion(params.id, user);
       const prompt = str(body.prompt, 'Description', { min: 3, max: MAX_BROLL_PROMPT }).replace(/\s+/g, ' ');
-      if (!q.answer_video) throw new HttpError(409, 'Record an answer before adding b-roll to it');
-      let room;
-      try {
-        room = await brollJobs.room(q.answer_video, q.answer_start);
-      } catch (err) {
-        console.error(`[broll] measuring the answer to question ${q.id} failed: ${err.message}`);
-        throw new HttpError(500, "Couldn't read this answer's video");
-      }
-      if (!room) throw new HttpError(400, 'This answer is too short for b-roll');
+      await brollRoom(q);
       // The office hour may have been published meanwhile.
       const current = editableQuestion(params.id, user);
-      db.prepare("UPDATE questions SET broll_prompt = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(prompt, randomName('mp4'), q.id);
+      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = NULL, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(prompt, randomName('mp4'), q.id);
       pruneBroll([current.broll_video]);
       brollJobs.cancel(q.id);
       brollJobs.generate(q.id);
@@ -1111,12 +1124,61 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     { auth: true },
   );
 
+  // Or the expert uploads a clip of their own, as the raw body: any video ffmpeg reads (a phone's
+  // MOV, say), with `?name=`, its file's name, and `?description=`, what it shows, if they say. It's
+  // made into a clip like the ones that are made, of as much of its start as the answer has room
+  // for (src/broll/index.js), then placed the same way, right away. It replaces any b-roll before it.
+  route(
+    'PUT',
+    '/api/questions/:id/broll/video',
+    async ({ params, user, req, url }) => {
+      if (!brollJobs) throw new HttpError(503, 'B-roll is not available on this server');
+      const q = editableQuestion(params.id, user);
+      const description = str(url.searchParams.get('description'), 'Description', { max: MAX_BROLL_PROMPT, optional: true })?.replace(/\s+/g, ' ') || null;
+      const name = Array.from(String(url.searchParams.get('name') ?? '').replace(/[\p{C}\s]+/gu, ' ').trim()).slice(0, MAX_FILE_NAME).join('') || 'video';
+      // Cross-site forms can't send these content types, so this also blocks CSRF. What the file
+      // really is, ffmpeg finds out.
+      const type = contentType(req);
+      if (!type.startsWith('video/') && type !== 'application/octet-stream') throw new HttpError(415, 'Expected a video');
+      const room = await brollRoom(q, Infinity);
+      const upload = join(mediaDir, randomName('upload'));
+      const clip = randomName('mp4');
+      let made;
+      let current;
+      try {
+        await saveUpload(req, upload, { max: MAX_BROLL_VIDEO, label: 'Video' });
+        made = await broll.prepare(upload, join(mediaDir, clip), { seconds: room.length }).catch((err) => {
+          console.error(`[broll] getting the clip uploaded for question ${q.id} ready failed: ${err.message}`);
+          throw new HttpError(415, "That file couldn't be read as a video. Try an MP4, MOV or WebM.");
+        });
+        // The answer may have been recorded again while it was uploading, or the office hour published.
+        const latest = editableQuestion(params.id, user);
+        if (latest.answer_video && !(await brollJobs.room(latest.answer_video, latest.answer_start, made.seconds))) throw new HttpError(400, 'This clip is too short for b-roll');
+        current = editableQuestion(params.id, user); // and as it is now, after measuring
+      } catch (err) {
+        await rm(join(mediaDir, clip), { force: true });
+        throw err;
+      } finally {
+        await rm(upload, { force: true });
+      }
+      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(description, name, clip, q.id);
+      pruneBroll([current.broll_video]);
+      brollJobs.cancel(q.id);
+      brollJobs.place(q.id);
+      // Only the start of a clip longer than the answer has room for is used, which is worth saying.
+      const used = Math.min(made.seconds, room.length);
+      const trimmed = made.original > used + 0.5 ? { from: made.original, to: used } : null;
+      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)), trimmed };
+    },
+    { auth: true, raw: true },
+  );
+
   route(
     'DELETE',
     '/api/questions/:id/broll',
     ({ params, user }) => {
       const q = editableQuestion(params.id, user);
-      db.prepare('UPDATE questions SET broll_prompt = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id = ?').run(q.id);
+      db.prepare('UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id = ?').run(q.id);
       pruneBroll([q.broll_video]);
       brollJobs?.cancel(q.id);
       return { broll: null };
@@ -1167,7 +1229,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         // Nor can b-roll that wasn't published with an answer.
         const leftoverBroll = 'FROM questions WHERE office_hour_id = ? AND broll_video IS NOT NULL AND published_broll IS NOT broll_video';
         const clips = db.prepare(`SELECT broll_video ${leftoverBroll}`).all(oh.id).map((r) => r.broll_video);
-        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
+        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
         return [names, clips];
       });
       pruneVideos(unused);

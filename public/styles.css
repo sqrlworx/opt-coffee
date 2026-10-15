@@ -437,6 +437,8 @@ textarea { resize: vertical; }
 .broll-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
 .broll-label { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
 .broll-prompt { font-family: var(--serif); font-style: italic; overflow-wrap: anywhere; }
+.broll-file { font-size: 0.85rem; color: var(--ink-2); overflow-wrap: anywhere; } /* the name of a video the expert uploaded */
+.broll-progress { width: 100%; height: 4px; accent-color: var(--accent); }
 .broll-form { display: grid; gap: 8px; }
 .broll-shot summary { cursor: pointer; color: var(--muted); }
 .broll-shot p { margin: 4px 0 0; color: var(--muted); }

@@ -5,7 +5,8 @@ const $nav = document.getElementById('nav');
 let me = null;
 let devLogin = false; // server has the dev user switcher enabled
 let speech = false; // server can transcribe recordings and read text aloud
-let brollOn = false; // server can make b-roll for answers
+let brollOn = false; // experts can add b-roll to their answers: upload it
+let makesBroll = false; // and have it made from a description
 let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
 let myVoice = null; // the one the user last picked (or the default)
 let devUsers = null;
@@ -57,6 +58,29 @@ async function api(method, path, body, { timeout } = {}) {
     throw err;
   }
   return data;
+}
+
+// Like api() with a Blob, for a file the user picked: tells `progress` how much of it has gone, from
+// 0 to 1, which fetch can't. Aborting `signal` stops sending it (rejecting with an AbortError).
+function sendFile(method, path, file, { progress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, path);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (e) => e.lengthComputable && progress?.(e.loaded / e.total);
+    xhr.upload.onload = () => progress?.(1);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(xhr.response ?? {});
+      const err = new Error(xhr.response?.error ?? `Request failed (${xhr.status})`);
+      err.status = xhr.status;
+      reject(err);
+    };
+    xhr.onerror = () => reject(new Error("Couldn't send it. Check your connection and try again."));
+    xhr.onabort = () => reject(new DOMException('Stopped', 'AbortError'));
+    signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.send(file);
+  });
 }
 
 function toast(message, kind = 'info') {
@@ -1786,7 +1810,7 @@ async function managePage({ id }) {
       toast(`Couldn't save your answer order: ${err.message}`, 'error');
     });
   };
-  window.onbeforeunload = () => (savedEdits < edits || session || finishing || uploads.size ? true : undefined);
+  window.onbeforeunload = () => (savedEdits < edits || session || finishing || uploads.size || brollUploads.size ? true : undefined);
   pageCleanup = () => {
     session?.close();
     local.forEach((url) => URL.revokeObjectURL(url));
@@ -1816,6 +1840,7 @@ async function managePage({ id }) {
     'click',
     action(async () => {
       if (finishing || uploads.size) throw new Error('Wait for your answers to finish saving (or discard any that failed) before publishing.');
+      if (brollUploads.size) throw new Error('Wait for your b-roll to finish uploading before publishing.');
       const making = queue.find((qid) => videos.get(qid) && brolls.get(qid)?.status === 'pending');
       if (making) throw new Error(`The b-roll for question ${queue.indexOf(making) + 1} is still being made. Wait for it, or remove it, before publishing.`);
       const answered = queue.filter((qid) => videos.get(qid)).length;
@@ -1954,11 +1979,14 @@ async function managePage({ id }) {
   }
 
   // ----- b-roll -----
-  // Under a recorded answer, the expert describes a shot to cut away to while they talk. The server
-  // makes it, which takes a few minutes, and places it where it fits what they're saying; the
-  // answer's video above then plays with it cut in. What they've typed is kept across redraws.
+  // Under a recorded answer, the expert describes a shot to cut away to while they talk, or uploads
+  // a video of their own. The server makes the shot, which takes a few minutes, or gets the video
+  // ready, and places it where it fits what they're saying; the answer's video above then plays
+  // with it cut in. What they've typed is kept across redraws.
+  const MAX_BROLL_UPLOAD = 500_000_000; // bytes, as the server allows
   const brollDrafts = new Map(); // question id -> description being typed
   const brollWatched = new Set();
+  const brollUploads = new Map(); // question id -> { name, sent (0 to 1), stop, show } for a video being uploaded
 
   function brollPanel(qid) {
     const broll = brolls.get(qid);
@@ -1972,12 +2000,15 @@ async function managePage({ id }) {
       const text = h('textarea', {
         rows: 2,
         maxlength: 500,
-        'aria-label': 'Describe the b-roll',
-        placeholder: 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"',
+        'aria-label': makesBroll ? 'Describe the b-roll' : 'What your video shows',
+        placeholder: makesBroll
+          ? 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"'
+          : 'What your video shows, e.g. "Hands sketching a wireframe on paper"',
         value: brollDrafts.get(qid) ?? (again ? broll?.prompt : ''),
         oninput: () => brollDrafts.set(qid, text.value),
       });
-      const submit = h('button', { type: 'submit', class: 'btn btn-primary btn-small' }, broll ? 'Make new b-roll' : 'Make b-roll');
+      const submit = makesBroll ? h('button', { type: 'submit', class: 'btn btn-primary btn-small' }, broll ? 'Make new b-roll' : 'Make b-roll') : null;
+      const file = h('input', { type: 'file', accept: 'video/*', hidden: true, onchange: () => file.files[0] && uploadBroll(qid, file.files[0], text.value) });
       const el = h(
         'form',
         { class: 'broll-form' },
@@ -1986,13 +2017,22 @@ async function managePage({ id }) {
           'div',
           { class: 'row gap-sm wrap' },
           submit,
+          h('button', { type: 'button', class: makesBroll ? 'btn btn-small' : 'btn btn-primary btn-small', onclick: () => file.click() }, 'Upload a video'),
+          file,
           broll ? h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove b-roll') : null,
           broll?.status === 'ready' ? h('button', { type: 'button', class: 'link-btn small', onclick: () => (brollDrafts.delete(qid), drawAnswer(qid)) }, 'Cancel') : null,
         ),
-        h('p', { class: 'hint' }, `A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. It's cut in where you talk about it, and your answer moves to a picture in the corner while it plays.`),
+        h(
+          'p',
+          { class: 'hint' },
+          makesBroll
+            ? `A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. Or upload a video of your own, saying above what it shows. It's cut in where you talk about it, and your answer moves to a picture in the corner while it plays.`
+            : `A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it; your answer moves to a picture in the corner while it plays.`,
+        ),
       );
       el.addEventListener('submit', (e) => {
         e.preventDefault();
+        if (!submit) return;
         action(async () => {
           const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: text.value });
           brollDrafts.delete(qid);
@@ -2001,10 +2041,25 @@ async function managePage({ id }) {
       });
       return el;
     };
-    const head = (...extra) => h('div', { class: 'broll-head' }, h('span', { class: 'broll-label' }, 'B-roll'), broll?.prompt ? h('span', { class: 'broll-prompt' }, `“${broll.prompt}”`) : null, extra);
+    const head = (...extra) => h('div', { class: 'broll-head' }, h('span', { class: 'broll-label' }, 'B-roll'), extra);
+    const described = broll?.prompt ? h('span', { class: 'broll-prompt' }, `“${broll.prompt}”`) : null;
+    const uploaded = broll?.upload ? h('span', { class: 'broll-file' }, broll.upload) : null;
 
-    if (!broll) return setChildren(box, head(), form()), box;
-    if (broll.status === 'pending') {
+    const up = brollUploads.get(qid);
+    if (up) {
+      // Cancel stops sending it; once it's all sent, the server's getting it ready.
+      const bar = h('progress', { class: 'broll-progress', max: 1, value: up.sent });
+      const said = h('span', { class: 'muted small' });
+      up.show = () => {
+        bar.value = up.sent;
+        said.textContent = up.sent < 1 ? `Uploading… ${Math.floor(up.sent * 100)}%` : 'Getting your video ready…';
+      };
+      up.show();
+      const cancel = up.sent < 1 ? h('button', { type: 'button', class: 'link-btn small', onclick: () => up.stop.abort() }, 'Cancel') : null;
+      setChildren(box, head(h('span', { class: 'broll-file' }, up.name)), bar, h('div', { class: 'row gap-sm wrap' }, said, cancel));
+    } else if (!broll) {
+      setChildren(box, head(), form());
+    } else if (broll.status === 'pending') {
       if (!brollWatched.has(qid)) {
         brollWatched.add(qid);
         watchQuestion(qid, right, (q) => q.broll?.status !== 'pending', (q) => {
@@ -2012,21 +2067,55 @@ async function managePage({ id }) {
           if (brolls.get(qid)?.status === 'pending') set(q.broll);
         });
       }
-      setChildren(box, head(), h('div', { class: 'row gap-sm wrap' }, h('span', { class: 'muted small' }, 'Making your b-roll and finding the best place for it… This takes a few minutes; you can keep working.'), h('button', { type: 'button', class: 'link-btn small', onclick: remove }, 'Cancel')));
+      const doing = broll.upload ? 'Finding the best place for your video…' : 'Making your b-roll and finding the best place for it… This takes a few minutes; you can keep working.';
+      setChildren(box, head(described, uploaded), h('div', { class: 'row gap-sm wrap' }, h('span', { class: 'muted small' }, doing), h('button', { type: 'button', class: 'link-btn small', onclick: remove }, 'Cancel')));
     } else if (broll.status === 'failed') {
-      setChildren(box, head(), h('p', { class: 'warn small' }, "⚠ This b-roll couldn't be made. Try again, or describe it differently."), form({ again: true }));
+      const why = broll.upload ? "⚠ Your video couldn't be used. Upload it again, or try another." : "⚠ This b-roll couldn't be made. Try again, or describe it differently.";
+      setChildren(box, head(described, uploaded), h('p', { class: 'warn small' }, why), form({ again: true }));
     } else if (brollDrafts.has(qid)) {
-      setChildren(box, head(), form({ again: true }));
+      setChildren(box, head(described, uploaded), form({ again: true }));
     } else {
-      const change = h('button', { type: 'button', class: 'btn btn-small', onclick: () => (brollDrafts.set(qid, broll.prompt), drawAnswer(qid)) }, 'Change');
+      const change = h('button', { type: 'button', class: 'btn btn-small', onclick: () => (brollDrafts.set(qid, broll.prompt ?? ''), drawAnswer(qid)) }, 'Change');
       const where = broll.start != null
         ? h('span', { class: 'muted small' }, `Cut in at ${fmtDuration(broll.start)}–${fmtDuration(broll.start + broll.length)}, where it fits what you're saying. Play your answer to see it.`)
-        : h('p', { class: 'warn small' }, '⚠ This answer is too short for its b-roll, so it’s left out. Re-record a longer answer, or make new b-roll to fit this one.');
+        : h('p', { class: 'warn small' }, `⚠ This answer is too short for its b-roll, so it’s left out. Re-record a longer answer${broll.upload ? '' : ', or make new b-roll to fit this one'}.`);
       // What was filmed, which may be a scene standing for the idea they described.
       const shot = broll.shot && broll.shot !== broll.prompt ? h('details', { class: 'broll-shot small' }, h('summary', {}, 'What was filmed'), h('p', {}, broll.shot)) : null;
-      setChildren(box, head(), where, shot, h('div', { class: 'row gap-sm wrap' }, change, h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove')));
+      setChildren(box, head(described, uploaded), where, shot, h('div', { class: 'row gap-sm wrap' }, change, h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove')));
     }
     return box;
+  }
+
+  // Uploads a video the expert picked as a question's b-roll, with what they typed as what it shows.
+  // The server then gets it ready, in a few seconds, and places it.
+  async function uploadBroll(qid, file, description) {
+    if (file.type && !file.type.startsWith('video/')) return toast('Choose a video file.', 'error');
+    if (file.size > MAX_BROLL_UPLOAD) return toast('That video is too large: b-roll can be up to 500 MB. Trim it, or export it smaller.', 'error');
+    const up = { name: file.name, sent: 0, stop: new AbortController(), show: null };
+    brollUploads.set(qid, up);
+    drawAnswer(qid);
+    const query = new URLSearchParams({ name: file.name });
+    if (description.trim()) query.set('description', description.trim());
+    try {
+      const res = await sendFile('PUT', `/api/questions/${qid}/broll/video?${query}`, file, {
+        signal: up.stop.signal,
+        progress: (sent) => {
+          const all = sent >= 1 && up.sent < 1;
+          up.sent = sent;
+          if (all) drawAnswer(qid); // it can't be cancelled from here on
+          else up.show?.();
+        },
+      });
+      brollDrafts.delete(qid);
+      brolls.set(qid, res.broll);
+      if (res.trimmed) toast(`Your video is ${Math.round(res.trimmed.from)} seconds long, and this answer has room for ${Math.round(res.trimmed.to)} seconds of b-roll, so its start is used.`);
+    } catch (err) {
+      if (err.status === 401) requireLogin();
+      else if (err.name !== 'AbortError') toast(`Couldn't add your video: ${err.message}`, 'error');
+    } finally {
+      brollUploads.delete(qid);
+      drawAnswer(qid);
+    }
   }
 
   // Starts a session at `qid` and carries on down the answer order from there.
@@ -2728,7 +2817,7 @@ function loginPage(_, query) {
 
 // Who's logged in, their voice, and what the server can do.
 async function loadMe() {
-  ({ user: me, devLogin, speech, broll: brollOn, voices, voice: myVoice } = await api('GET', '/api/me'));
+  ({ user: me, devLogin, speech, broll: brollOn, makesBroll, voices, voice: myVoice } = await api('GET', '/api/me'));
 }
 
 // Dev-only: switch between users without logging in. Shown when the server runs with --dev.

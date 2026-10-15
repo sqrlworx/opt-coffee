@@ -53,9 +53,10 @@ CREATE TABLE IF NOT EXISTS questions (
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir
   answer_start   REAL,                      -- seconds into answer_video where the answer begins (after the question is played); NULL = from the start
-  broll_prompt   TEXT,                      -- the expert's description of b-roll to cut away to during the answer
+  broll_prompt   TEXT,                      -- the expert's description of b-roll to cut away to during the answer; for a clip they uploaded, what it shows, if they said
   broll_shot     TEXT,                      -- the shot that was filmed for it: the description written up as something a video model can film
-  broll_status   TEXT,                      -- making it and placing it in the take: 'pending' | 'ready' | 'failed'; NULL = no b-roll
+  broll_upload   TEXT,                      -- b-roll the expert uploaded instead: their file's name; NULL when it's made from broll_prompt
+  broll_status   TEXT,                      -- making it (or getting an upload ready) and placing it in the take: 'pending' | 'ready' | 'failed'; NULL = no b-roll
   broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
   broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
   broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and shorter than the answer)
@@ -192,6 +193,8 @@ function migrate(db) {
   }
   // B-roll is written up as a shot before it's filmed.
   if (!columns.has('broll_shot')) db.exec('ALTER TABLE questions ADD COLUMN broll_shot TEXT');
+  // Experts can upload b-roll of their own.
+  if (!columns.has('broll_upload')) db.exec('ALTER TABLE questions ADD COLUMN broll_upload TEXT');
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));

@@ -1,5 +1,5 @@
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,12 +12,20 @@ const SCRIPT = fileURLToPath(new URL('./broll.py', import.meta.url));
 // after that a clip takes a few minutes on a large CPU, longer on a small one.
 const TIMEOUT = 2 * 60 * 60_000;
 const PROBE_TIMEOUT = 60_000;
+const PREPARE_TIMEOUT = 10 * 60_000; // getting an uploaded clip ready: seconds, or minutes for a long one in 4K
 const LOCAL_MAX = 5; // seconds of b-roll made locally, at most: a few minutes on a large CPU
+const UPLOAD_SIZE = 1920; // pixels on its longest side, at most, of an uploaded clip once it's ready: the finished video's width
+const UPLOAD_FPS = 30; // and frames a second, the joined video's
+const HDR = new Set(['smpte2084', 'arib-std-b67']); // PQ and HLG, as phones film by default
+// HDR brought into ordinary range, so it isn't washed out: linearised, its highlights rolled off
+// (mobius keeps the rest as it was, so it isn't darkened), and converted to BT.709.
+const TO_SDR = 'zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:desat=0,zscale=t=bt709:m=bt709:r=tv';
 const run = promisify(execFile);
 
 /**
  * B-roll for answers: a short clip made from the expert's description of it, written up as a
- * concrete shot first (an idea can't be filmed as it is). One clip at a time is made (see jobs.js).
+ * concrete shot first (an idea can't be filmed as it is), or one the expert uploads. One clip at a
+ * time is made (see jobs.js).
  *
  * - Filming: with a Gemini API key, Veo films it (src/broll/gemini.js). Otherwise, or if Veo
  *   can't (out of quota, filtered, down), src/broll/broll.py does, run with uv: LTX-Video on the
@@ -25,20 +33,31 @@ const run = promisify(execFile);
  * - Writing up the shot: with an OpenAI API key, GPT (the `planner`, src/broll/openai.js), which
  *   also has gpt-image draw a first frame for LTX-Video to animate; else Gemini; else broll.py
  *   does it with Qwen3. If GPT or Gemini fails, the next one down does it.
+ * - Uploaded clips only need ffmpeg (see prepareUpload).
  *
- * Returns null when b-roll is off: `off`, or `auto` without ffmpeg, or with neither a Gemini key
- * nor uv on the PATH.
+ * Returns null when b-roll is off: `off`, or `auto` without ffmpeg. With neither a Gemini key nor
+ * uv on the PATH, clips can only be uploaded: `generate` is null.
  * @param {{mode?: 'auto'|'on'|'off', planner?: object|null, gemini?: object|null, log?: (msg: string) => void}} opts
  */
 export function createBroll({ mode = process.env.FORUM_BROLL ?? 'auto', planner = createOpenAIPlanner(), gemini = createGemini(), log = console.warn } = {}) {
   if (mode === 'off') return null;
   const has = (tool) => !spawnSync(tool, ['-version']).error;
   const local = mode === 'on' || has('uv');
+  const uploads = {
+    /** Makes a video the expert uploaded into a clip (see prepareUpload). */
+    prepare: prepareUpload,
+    /** How long a recording is, in seconds. */
+    duration: mediaDuration,
+  };
   if (mode === 'auto') {
     const missing = ['ffmpeg', 'ffprobe'].filter((tool) => !has(tool));
-    if (missing.length || !(local || gemini)) {
-      log(`[broll] ${missing.length ? `${missing.join(' and ')} not found` : 'no Gemini API key, and uv not found'}, so experts can't add b-roll to their answers`);
+    if (missing.length) {
+      log(`[broll] ${missing.join(' and ')} not found, so experts can't add b-roll to their answers`);
       return null;
+    }
+    if (!(local || gemini)) {
+      log("[broll] no Gemini API key, and uv not found, so experts can upload b-roll but it can't be made for them");
+      return { name: 'uploaded only', generate: null, ...uploads };
     }
   }
   const writer = planner ?? gemini;
@@ -77,8 +96,7 @@ export function createBroll({ mode = process.env.FORUM_BROLL ?? 'auto', planner 
       return filmLocally(prompt, out, { seconds, seed, question, answer, shot: plan?.shot ?? null, frame: plan?.frame ?? null, signal });
     },
 
-    /** How long a recording is, in seconds. */
-    duration: mediaDuration,
+    ...uploads,
   };
 
   // LTX-Video, with broll.py: from a first frame drawn for the shot when the planner can draw one.
@@ -132,6 +150,46 @@ export function createBroll({ mode = process.env.FORUM_BROLL ?? 'auto', planner 
       });
     });
   }
+}
+
+/**
+ * Makes a video the expert uploaded as b-roll (`src`: anything ffmpeg reads, like a phone's MOV)
+ * into a clip like the ones that are made, at `out`: an H.264 MP4 that every browser plays, of its
+ * first `seconds` at most, no bigger than 1080p at 30 fps, in ordinary range (HDR is tone mapped),
+ * and without its sound (the answer's carries on over b-roll) or metadata (a phone's says where it
+ * was filmed).
+ * @returns {Promise<{seconds: number, original: number|null}>} how long the clip is, and how long the
+ *   upload was, if it says
+ */
+export async function prepareUpload(src, out, { seconds }) {
+  // `V`: video, not a cover picture, which an audio file can have.
+  const { streams = [], format = {} } = JSON.parse(
+    (await run('ffprobe', ['-v', 'error', '-select_streams', 'V', '-show_entries', 'stream=color_transfer:format=duration', '-of', 'json', src], { timeout: PROBE_TIMEOUT })).stdout,
+  );
+  if (!streams.length) throw new Error(`${src} has no video`);
+  const part = `${out}.part`;
+  const encode = (tonemap) =>
+    run('ffmpeg', [
+      '-y', '-hide_banner', '-loglevel', 'error', '-i', src,
+      '-map', '0:V:0', '-t', String(seconds), '-an', '-sn', '-dn', '-map_metadata', '-1', '-map_chapters', '-1',
+      '-vf', [`scale='min(iw,${UPLOAD_SIZE})':'min(ih,${UPLOAD_SIZE})':force_original_aspect_ratio=decrease:force_divisible_by=2`, ...(tonemap ? [TO_SDR] : []), 'format=yuv420p'].join(','),
+      '-fpsmax', String(UPLOAD_FPS), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-movflags', '+faststart', '-f', 'mp4', part,
+    ], { timeout: PREPARE_TIMEOUT, maxBuffer: 10_000_000 });
+  try {
+    const hdr = HDR.has(streams[0].color_transfer);
+    try {
+      await encode(hdr);
+    } catch (err) {
+      if (!hdr) throw err;
+      await encode(false); // an ffmpeg without zscale: kept in its own range, then
+    }
+    renameSync(part, out);
+  } catch (err) {
+    rmSync(part, { force: true });
+    throw err;
+  }
+  const original = Number(format.duration);
+  return { seconds: await mediaDuration(out), original: original > 0 ? original : null };
 }
 
 /**
