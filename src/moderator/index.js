@@ -14,6 +14,8 @@ const CACHE_LIMIT = 500;
  * - suggestOrder: always local and deterministic, computed from the groups.
  * - summarizeAnswer: sync, cached and refreshed in the background like groupQuestions. Until the
  *   LLM's summary is ready it returns the heuristic one marked `pending`, so pages can check back.
+ * - placeBroll: async; where b-roll goes in an answer. Claude picks the moment when available;
+ *   how long it plays, and where it may go, are always the heuristic's.
  *
  * `llm` stands in for Claude (tests).
  * @param {{mode?: 'auto'|'heuristic'|'claude', log?: (msg:string)=>void, llm?: object}} opts
@@ -104,6 +106,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
     },
 
     suggestOrder: heuristic.suggestOrder,
+    brollRange: heuristic.brollRange,
 
     /**
      * @param {{question: string, answer: string}} input  the answer's transcript, after the question
@@ -116,6 +119,27 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
       if (cached) return { ...cached, pending: false };
       refreshSummary(key, input);
       return { ...heuristic.summarizeAnswer(input), pending: true };
+    },
+
+    /**
+     * @param {{description: string, question: string, clip: number, answerStart: number|null, end: number,
+     *   words: [number, number, string][]|null, cues: [number, number, string][]|null}} input  the b-roll's
+     *   description and length (`clip`), and the take: where its answer starts, how long it is, and its transcript
+     * @returns {Promise<{start: number, length: number} | null>}  null when the answer is too short for b-roll
+     */
+    async placeBroll(input) {
+      const placed = heuristic.placeBroll(input);
+      const range = heuristic.brollRange(input);
+      const cues = (input.cues ?? []).filter(([start, end]) => (start + end) / 2 >= (input.answerStart ?? 0));
+      if (!llm || !placed || !cues.length) return placed;
+      try {
+        const { start } = await llm.placeBroll({ description: input.description, question: input.question, cues, ...range });
+        // LLM output is untrusted: kept where the b-roll can go.
+        if (Number.isFinite(start)) return { start: Math.round(Math.min(range.to, Math.max(range.from, start)) * 1000) / 1000, length: placed.length };
+      } catch (err) {
+        log(`[moderator] Claude b-roll placement failed: ${err.message}`);
+      }
+      return placed;
     },
   };
 }

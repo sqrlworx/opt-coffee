@@ -44,6 +44,15 @@ const SUMMARY_SCHEMA = {
   additionalProperties: false,
 };
 
+const BROLL_SCHEMA = {
+  type: 'object',
+  properties: { start: { type: 'number' } },
+  required: ['start'],
+  additionalProperties: false,
+};
+
+const secs = (t) => `${t.toFixed(1)}s`;
+
 export async function createClaudeModerator() {
   const { default: Anthropic } = await import('@anthropic-ai/sdk');
   const client = new Anthropic();
@@ -129,6 +138,21 @@ export async function createClaudeModerator() {
         'points: the 1-3 main points of the answer, in the order they were made. Each is one plain sentence of at most 20 words that states the point itself (not "The expert says..."). Skip small talk.',
       ].join('\n');
       return ask(prompt, SUMMARY_SCHEMA);
+    },
+
+    async placeBroll({ description, question, cues, length, from, to }) {
+      const prompt = [
+        "Pick where to cut away to b-roll in one answer from an office hour's video. While the b-roll plays, it fills the frame, the expert's picture moves to a small window in the corner, and the expert keeps talking.",
+        '',
+        `<question>\n${question}\n</question>`,
+        `<b_roll seconds="${length.toFixed(1)}">\n${description}\n</b_roll>`,
+        '<answer_transcript>',
+        ...cues.map(([start, end, text]) => `[${secs(start)}-${secs(end)}] ${text}`),
+        '</answer_transcript>',
+        '',
+        `start: when the b-roll starts, in seconds, between ${secs(from)} and ${secs(to)}. Cut away as the expert starts talking about what the b-roll shows, at the start of a sentence or phrase, so it illustrates what they're saying while they say it. If nothing in the answer matches it, pick a moment where it still fits, such as an example or a description, rather than an emotional or personal moment where the viewer wants to see the expert's face.`,
+      ].join('\n');
+      return ask(prompt, BROLL_SCHEMA);
     },
   };
 }

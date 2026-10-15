@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createSession, destroySession, hashPassword, parseCookies, userForSession, verifyPassword } from './auth.js';
 import { transaction } from './db.js';
 import { cuesFromWords, questionCaptions, saidInAnswer, takeCaptions, toVtt } from './speech/captions.js';
+import { createBrollJobs } from './broll/jobs.js';
 import { createSpeechJobs } from './speech/jobs.js';
 import { SAMPLE_TEXT } from './speech/voices.js';
 import { createVideoJobs } from './video.js';
@@ -19,6 +20,7 @@ const MAX_QUESTION_VIDEO = 60_000_000; // so is one asked on camera
 const MAX_SPOKEN_QUESTION = 2000; // characters of transcript; people say more than they'd type
 const MAX_ANSWER_START = 600; // seconds; a take is capped at 10 minutes in the browser
 const MAX_REPLY = 2000; // characters of a reply in a discussion
+const MAX_BROLL_PROMPT = 500; // characters describing b-roll
 const MAX_SEEDS = 20; // seed questions added at once
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp',
@@ -164,6 +166,24 @@ function loadQuestions(db, ohId, viewer) {
   return rows.map((q) => questionView(db, q, viewer));
 }
 
+/**
+ * The b-roll the expert asked for in an answer, as only they see it before publishing. `video` once
+ * it's made, with `shot`, what was filmed for their description; `start` and `length` place it in
+ * the take once it's placed, and stay null if the take is too short for it.
+ */
+function brollOf(q) {
+  if (!q.broll_status) return null;
+  const ready = q.broll_status === 'ready';
+  return {
+    prompt: q.broll_prompt,
+    status: q.broll_status,
+    shot: ready ? q.broll_shot : null,
+    video: ready ? mediaUrl(q.broll_video) : null,
+    start: ready ? q.broll_start : null,
+    length: ready ? q.broll_length : null,
+  };
+}
+
 function questionView(db, q, viewer) {
   const audioTranscript = q.asked_with === 'audio' ? transcriptOf(db, q.audio) : null;
   return {
@@ -195,17 +215,20 @@ function questionView(db, q, viewer) {
     publishedAnswerStart: q.published_answer_start,
     publishedAnswerTranscript: answerTranscriptOf(db, q.published_answer_video, q.published_answer_start),
     publishedQuestionCues: questionCaptions({ body: q.body, cues: audioTranscript?.cues }, q.published_answer_start).cues,
+    broll: brollOf(q),
+    publishedBroll: q.published_broll ? { video: mediaUrl(q.published_broll), start: q.published_broll_start, length: q.published_broll_length } : null,
   };
 }
 
 function stripPrivate(q) {
-  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, ...rest } = q;
+  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, broll, publishedBroll, ...rest } = q;
   return rest;
 }
 
 /**
  * A published answer as readers see it. `answerStart` is where the answer begins, after the
  * question; `questionCues` caption the question until then, timed from the start of the take.
+ * `broll` is cut away to during the answer, from `start` for `length` seconds into the take.
  */
 const publishedAnswer = (q) => ({
   ...stripPrivate(q),
@@ -213,6 +236,7 @@ const publishedAnswer = (q) => ({
   answerStart: q.publishedAnswerStart,
   questionCues: q.publishedQuestionCues,
   transcript: q.publishedAnswerTranscript,
+  broll: q.publishedBroll,
 });
 
 /** What readers see: the snapshot taken at the last publish, in the expert's order. */
@@ -281,13 +305,16 @@ function workingAnswers(questions) {
 
 // `speech` (src/speech/index.js) is optional; without it there are no spoken questions,
 // read-aloud audio or transcripts. So is `joiner` (src/video.js); without it published answers
-// aren't joined into one video.
-export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null }) {
+// aren't joined into one video. And `broll` (src/broll/index.js); without it experts can't add
+// b-roll to their answers.
+export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null, broll = null }) {
   mkdirSync(mediaDir, { recursive: true });
   const speechJobs = speech ? createSpeechJobs({ db, speech, mediaDir }) : null;
   speechJobs?.resume();
   const videoJobs = joiner ? createVideoJobs({ db, joiner, mediaDir }) : null;
   videoJobs?.resume();
+  const brollJobs = broll ? createBrollJobs({ db, broll, moderator, mediaDir }) : null;
+  brollJobs?.resume();
   const routes = [];
   // `raw` routes get the request body unread (ctx.req) instead of parsed JSON.
   const route = (method, pattern, handler, { auth = false, raw = false } = {}) =>
@@ -357,6 +384,12 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     };
   }
 
+  /** Deletes b-roll clips that no draft or published answer points to any more. */
+  function pruneBroll(names) {
+    const used = db.prepare('SELECT 1 FROM questions WHERE broll_video = ? OR published_broll = ?');
+    for (const name of names) if (name && !used.get(name, name)) rmSync(join(mediaDir, name), { force: true });
+  }
+
   /** Deletes a spoken question's recording that was never asked, with its transcript (and video, if it was on camera). */
   function discardRecording(name) {
     const video = db.prepare('SELECT video FROM recordings WHERE media = ?').get(name)?.video;
@@ -372,17 +405,20 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   }
   pruneRecordings();
 
-  /** Who may fetch a media file: questions' audio and video and published answers are public; draft answers reach only the expert. */
+  /**
+   * Who may fetch a media file: questions' audio and video and published answers (and their b-roll)
+   * are public; draft answers and b-roll reach only the expert.
+   */
   function canSeeMedia(name, user) {
     if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ?').get(name, name)) return true;
     if (db.prepare('SELECT 1 FROM office_hours WHERE video = ?').get(name)) return true; // only set once published
     const owner = db
       .prepare(
-        `SELECT q.published_answer_video, oh.expert_id FROM questions q JOIN office_hours oh ON oh.id = q.office_hour_id
-         WHERE q.answer_video = ? OR q.published_answer_video = ?`,
+        `SELECT q.published_answer_video, q.published_broll, oh.expert_id FROM questions q JOIN office_hours oh ON oh.id = q.office_hour_id
+         WHERE q.answer_video = ? OR q.published_answer_video = ? OR q.broll_video = ? OR q.published_broll = ?`,
       )
-      .get(name, name);
-    return Boolean(owner && (owner.published_answer_video === name || owner.expert_id === user?.id));
+      .get(name, name, name, name);
+    return Boolean(owner && (owner.published_answer_video === name || owner.published_broll === name || owner.expert_id === user?.id));
   }
 
   function subscribe(userId, type, id) {
@@ -496,6 +532,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     user: user ? publicUser(user) : null,
     devLogin,
     speech: Boolean(speech),
+    broll: Boolean(broll),
     voices: speech ? speech.voices.map((v) => ({ ...v, sample: `/media/voices/${v.id}.m4a` })) : [],
     voice: speech ? voiceOf(user) : null,
   }));
@@ -1013,7 +1050,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const name = randomName(ext);
       await saveUpload(req, join(mediaDir, name), { max: MAX_VIDEO, label: 'Video' });
       // The office hour may have been published while the video was uploading.
-      const current = db.prepare('SELECT answer_video FROM questions WHERE id = ?').get(q.id);
+      const current = db.prepare('SELECT answer_video, broll_status FROM questions WHERE id = ?').get(q.id);
       try {
         requireUnpublished(getOfficeHour(q.office_hour_id));
       } catch (err) {
@@ -1023,7 +1060,10 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       db.prepare('UPDATE questions SET answer_video = ?, answer_start = ? WHERE id = ?').run(name, answerStart, q.id);
       pruneVideos([current.answer_video]);
       speechJobs?.transcribe(name);
-      return { video: mediaUrl(name), transcript: answerTranscriptOf(db, name, answerStart) };
+      // B-roll moves to where it fits in the new take. One still being made or placed goes in it anyway.
+      if (current.broll_status === 'ready') brollJobs?.place(q.id);
+      const broll = brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id));
+      return { video: mediaUrl(name), transcript: answerTranscriptOf(db, name, answerStart), broll };
     },
     { auth: true, raw: true },
   );
@@ -1033,9 +1073,53 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     '/api/questions/:id/video',
     ({ params, user }) => {
       const q = editableQuestion(params.id, user);
-      db.prepare('UPDATE questions SET answer_video = NULL, answer_start = NULL WHERE id = ?').run(q.id);
+      // Its b-roll is kept, unplaced, for the next take.
+      db.prepare('UPDATE questions SET answer_video = NULL, answer_start = NULL, broll_start = NULL, broll_length = NULL WHERE id = ?').run(q.id);
       pruneVideos([q.answer_video]);
-      return { video: null };
+      return { video: null, broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+    },
+    { auth: true },
+  );
+
+  // B-roll for an answer: the expert describes a shot to cut away to while they talk. A clip of it
+  // is made in the background, as long as the answer has room for, and placed in the take where
+  // it fits what's being said (src/broll/jobs.js). Asking again replaces it.
+  route(
+    'POST',
+    '/api/questions/:id/broll',
+    async ({ params, user, body }) => {
+      if (!brollJobs) throw new HttpError(503, 'B-roll is not available on this server');
+      const q = editableQuestion(params.id, user);
+      const prompt = str(body.prompt, 'Description', { min: 3, max: MAX_BROLL_PROMPT }).replace(/\s+/g, ' ');
+      if (!q.answer_video) throw new HttpError(409, 'Record an answer before adding b-roll to it');
+      let room;
+      try {
+        room = await brollJobs.room(q.answer_video, q.answer_start);
+      } catch (err) {
+        console.error(`[broll] measuring the answer to question ${q.id} failed: ${err.message}`);
+        throw new HttpError(500, "Couldn't read this answer's video");
+      }
+      if (!room) throw new HttpError(400, 'This answer is too short for b-roll');
+      // The office hour may have been published meanwhile.
+      const current = editableQuestion(params.id, user);
+      db.prepare("UPDATE questions SET broll_prompt = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(prompt, randomName('mp4'), q.id);
+      pruneBroll([current.broll_video]);
+      brollJobs.cancel(q.id);
+      brollJobs.generate(q.id);
+      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+    },
+    { auth: true },
+  );
+
+  route(
+    'DELETE',
+    '/api/questions/:id/broll',
+    ({ params, user }) => {
+      const q = editableQuestion(params.id, user);
+      db.prepare('UPDATE questions SET broll_prompt = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id = ?').run(q.id);
+      pruneBroll([q.broll_video]);
+      brollJobs?.cancel(q.id);
+      return { broll: null };
     },
     { auth: true },
   );
@@ -1060,20 +1144,34 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const oh = getOfficeHour(params.id);
       requireExpert(oh, user);
       requireUnpublished(oh);
-      const working = workingAnswers(loadQuestions(db, oh.id, user));
+      const questions = loadQuestions(db, oh.id, user);
+      const working = workingAnswers(questions);
       if (working.length === 0) throw new HttpError(400, 'Record an answer for at least one queued question before publishing');
+      const making = questions.find((q) => working.some(([id]) => id === q.id) && q.broll?.status === 'pending');
+      if (making) throw new HttpError(409, `The b-roll for question ${making.planPosition} is still being made. Wait for it, or remove it, before publishing.`);
       const t = now();
-      const unused = transaction(db, () => {
-        const snapshot = db.prepare('UPDATE questions SET published_position = ?, published_answer_video = answer_video, published_answer_start = answer_start WHERE id = ?');
+      const [unused, unusedBroll] = transaction(db, () => {
+        // B-roll goes with an answer if it's made and placed.
+        const placed = "broll_status = 'ready' AND broll_start IS NOT NULL";
+        const snapshot = db.prepare(
+          `UPDATE questions SET published_position = ?, published_answer_video = answer_video, published_answer_start = answer_start,
+             published_broll = IIF(${placed}, broll_video, NULL), published_broll_start = IIF(${placed}, broll_start, NULL), published_broll_length = IIF(${placed}, broll_length, NULL)
+           WHERE id = ?`,
+        );
         working.forEach(([id], i) => snapshot.run(i + 1, id));
         db.prepare('UPDATE office_hours SET published_at = ?, closed_at = COALESCE(closed_at, ?) WHERE id = ?').run(t, t, oh.id);
         // Videos recorded for questions that didn't make the cut can never be published now.
         const leftover = 'FROM questions WHERE office_hour_id = ? AND published_position IS NULL AND answer_video IS NOT NULL';
         const names = db.prepare(`SELECT answer_video ${leftover}`).all(oh.id).map((r) => r.answer_video);
         db.prepare(`UPDATE questions SET answer_video = NULL, answer_start = NULL WHERE id IN (SELECT id ${leftover})`).run(oh.id);
-        return names;
+        // Nor can b-roll that wasn't published with an answer.
+        const leftoverBroll = 'FROM questions WHERE office_hour_id = ? AND broll_video IS NOT NULL AND published_broll IS NOT broll_video';
+        const clips = db.prepare(`SELECT broll_video ${leftoverBroll}`).all(oh.id).map((r) => r.broll_video);
+        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
+        return [names, clips];
       });
       pruneVideos(unused);
+      pruneBroll(unusedBroll);
       videoJobs?.join(oh.id);
       return { officeHour: serializeOfficeHour(db, getOfficeHour(oh.id), user) };
     },
@@ -1254,8 +1352,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     res.end(JSON.stringify(payload));
   }
 
-  // `idle()` resolves when background speech and video work is done (for tests).
-  return Object.assign(handle, { idle: () => Promise.all([speechJobs?.idle(), videoJobs?.idle()]) });
+  // `idle()` resolves when background speech, video and b-roll work is done (for tests).
+  return Object.assign(handle, { idle: () => Promise.all([speechJobs?.idle(), videoJobs?.idle(), brollJobs?.idle()]) });
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');

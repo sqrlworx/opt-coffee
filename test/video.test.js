@@ -427,3 +427,60 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The colour of a pixel at `x`, `y` (fractions of the frame) `t` seconds into `file`, as [r, g, b].
+function pixel(file, t, x, y) {
+  const out = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', String(t), '-i', file, '-frames:v', '1', '-vf', `crop=2:2:iw*${x}:ih*${y},scale=1:1,format=rgb24`, '-f', 'rawvideo', '-']);
+  return [...out];
+}
+const near = ([r, g, b], [er, eg, eb]) => Math.abs(r - er) < 40 && Math.abs(g - eg) < 40 && Math.abs(b - eb) < 40;
+
+test('ffmpeg cuts away to b-roll: it fills the frame, and the answer moves to the top left', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+  try {
+    // A red answer, and blue b-roll, square and at another frame rate, as the generator might make it.
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=512x512:rate=24:duration=3', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    const out = join(dir, 'joined.mp4');
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1.5, length: 2 } }], out);
+    assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`); // the answer's timing doesn't change
+    assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
+    const [red, blue] = [[255, 0, 0], [0, 0, 255]];
+    assert.ok(near(pixel(out, 1, 0.5, 0.5), red));
+    assert.ok(near(pixel(out, 2.5, 0.5, 0.5), blue));
+    assert.ok(near(pixel(out, 2.5, 0.12, 0.17), red), 'the answer, at the top left');
+    assert.ok(near(pixel(out, 2.5, 0.12, 0.0535), [255, 255, 255]), 'in a white frame');
+    assert.ok(near(pixel(out, 4, 0.5, 0.5), red));
+    assert.ok(near(pixel(out, 4, 0.12, 0.17), red));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a finisher is given the b-roll and the filter that cuts it in over its picture', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_finish_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  try {
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    // Stands in for src/finish: its picture at 1080p is [pic], its sound is input 1 and the b-roll input 2.
+    const finisher = {
+      async finish(jobs) {
+        for (const { input, output, cutaway } of jobs) {
+          assert.equal(cutaway.input, join(dir, 'b.mp4'));
+          ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', `[0:v]scale=1920:1080,fps=30[pic];${cutaway.filter};[cut]format=yuv420p[v]`, '-map', '[v]', '-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac', output);
+        }
+        return {};
+      },
+    };
+    const out = join(dir, 'finished.mp4');
+    await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1, length: 1.8 } }], out);
+    assert.ok(near(pixel(out, 2, 0.5, 0.5), [0, 0, 255]));
+    assert.ok(near(pixel(out, 2, 0.12, 0.17), [255, 0, 0]));
+    assert.ok(near(pixel(out, 3.5, 0.5, 0.5), [255, 0, 0]));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

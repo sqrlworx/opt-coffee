@@ -5,6 +5,7 @@ const $nav = document.getElementById('nav');
 let me = null;
 let devLogin = false; // server has the dev user switcher enabled
 let speech = false; // server can transcribe recordings and read text aloud
+let brollOn = false; // server can make b-roll for answers
 let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
 let myVoice = null; // the one the user last picked (or the default)
 let devUsers = null;
@@ -479,6 +480,114 @@ function videoPlayer(src, transcript) {
   return video;
 }
 
+// An answer's video with its b-roll cut in, as it is in the joined video (src/video.js): from
+// `broll.start` for `broll.length` seconds, the b-roll fills the frame and the answer moves to a
+// picture at the top left. The b-roll is muted, since the answer's sound carries on, and kept in
+// step with the answer. The video's own controls would shrink into that picture, so it gets these
+// instead: play, the time, and a timeline marking where the b-roll is. Without b-roll it's the
+// video as it was. Called again for the same video, it updates the same frame with `broll`.
+function brollView(video, broll) {
+  if (video.brollView) return video.brollView.update(broll);
+  const el = h('div', { class: 'broll-view' }, video);
+  const clip = h('video', { class: 'broll-clip', preload: 'auto', playsinline: true, 'aria-hidden': 'true' });
+  clip.muted = true;
+  const playBtn = h('button', { type: 'button', class: 'jp-btn', 'aria-label': 'Play', onclick: () => toggle() }, icon('play'));
+  const time = h('span', { class: 'jp-time' });
+  const fill = h('span', { class: 'jp-fill' });
+  const span = h('span', { class: 'broll-span', title: 'B-roll' });
+  const bar = h('div', { class: 'jp-bar', role: 'slider', tabindex: '0', 'aria-label': 'Seek' }, fill, span);
+  const controls = h('div', { class: 'broll-controls' }, playBtn, time, bar);
+  let current = null;
+
+  const length = () => (Number.isFinite(video.duration) ? video.duration : 0);
+  const toggle = () => (video.paused || video.ended ? video.play().catch(() => {}) : video.pause());
+  const seek = (t) => (video.currentTime = Math.max(0, Math.min(t, length() || t)));
+  function tick() {
+    if (!current) return;
+    const t = video.currentTime;
+    const cut = t >= current.start && t < current.start + current.length;
+    el.classList.toggle('is-cut', cut);
+    if (cut) {
+      const at = t - current.start;
+      if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
+      if (video.paused) clip.pause();
+      else if (clip.paused && !clip.ended) clip.play().catch(() => {});
+    } else {
+      clip.pause();
+    }
+    const total = length();
+    fill.style.width = `${total ? (100 * t) / total : 0}%`;
+    span.style.left = `${total ? (100 * current.start) / total : 0}%`;
+    span.style.width = `${total ? (100 * current.length) / total : 0}%`;
+    time.textContent = `${fmtDuration(t)} / ${fmtDuration(total)}`;
+  }
+  // Every frame while it plays, so the cut lands on time; timeupdate is only a few times a second.
+  let frame = 0;
+  const loop = () => {
+    tick();
+    frame = video.paused ? 0 : requestAnimationFrame(loop);
+  };
+  video.addEventListener('play', () => {
+    el.classList.add('playing');
+    setChildren(playBtn, icon('pause'));
+    playBtn.setAttribute('aria-label', 'Pause');
+    cancelAnimationFrame(frame);
+    loop();
+  });
+  video.addEventListener('pause', () => {
+    el.classList.remove('playing');
+    setChildren(playBtn, icon('play'));
+    playBtn.setAttribute('aria-label', 'Play');
+    tick();
+  });
+  ['timeupdate', 'seeked', 'loadedmetadata', 'durationchange'].forEach((type) => video.addEventListener(type, tick));
+  video.addEventListener('click', () => current && toggle());
+  clip.addEventListener('click', toggle);
+
+  const timeAt = (e) => {
+    const r = bar.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * length();
+  };
+  let scrubbing = false;
+  bar.addEventListener('pointerdown', (e) => {
+    scrubbing = true;
+    bar.setPointerCapture(e.pointerId);
+    seek(timeAt(e));
+  });
+  bar.addEventListener('pointermove', (e) => scrubbing && seek(timeAt(e)));
+  bar.addEventListener('pointerup', () => (scrubbing = false));
+  bar.addEventListener('pointercancel', () => (scrubbing = false));
+  bar.addEventListener('keydown', (e) => {
+    const keys = { ArrowLeft: -5, ArrowRight: 5 };
+    if (e.key in keys) seek(video.currentTime + keys[e.key]);
+    else if (e.key === ' ' || e.key === 'k') toggle();
+    else return;
+    e.preventDefault();
+  });
+
+  const view = {
+    el,
+    update(next) {
+      current = next?.video ? next : null;
+      el.classList.toggle('has-broll', Boolean(current));
+      video.controls = !current;
+      if (current) {
+        if (clip.getAttribute('src') !== current.video) clip.src = current.video;
+        if (!clip.isConnected) el.append(clip, controls);
+        tick();
+      } else {
+        el.classList.remove('is-cut');
+        clip.pause();
+        clip.remove();
+        controls.remove();
+      }
+      return view;
+    },
+  };
+  video.brollView = view;
+  return view.update(broll);
+}
+
 function audioPlayer(src) {
   return fixDuration(h('audio', { class: 'q-audio', src, controls: true, preload: 'metadata' }));
 }
@@ -652,7 +761,7 @@ function questionText(q) {
 }
 
 // Published answers: each question as text, then the video answer (with subtitles once its
-// transcript is ready). Fills `videos` (question id -> video) for the discussion.
+// transcript is ready, and its b-roll cut in). Fills `videos` (question id -> video) for the discussion.
 function qaList(answers, videos) {
   return h(
     'ol',
@@ -664,7 +773,7 @@ function qaList(answers, videos) {
         'li',
         { class: 'qa' },
         h('div', { class: 'qa-q' }, questionText(q), h('div', { class: 'qa-q-meta' }, questionMeta(q), h('span', { class: 'muted small' }, `▲ ${q.votes}`))),
-        h('div', { class: 'qa-a' }, video),
+        h('div', { class: 'qa-a' }, brollView(video, q.broll).el),
       );
     }),
   );
@@ -1590,6 +1699,7 @@ async function managePage({ id }) {
   let queue = [...data.plan.queue];
   const videos = new Map([...questions.values()].map((q) => [q.id, q.answerVideo])); // draft answer URL per question
   const transcripts = new Map([...questions.values()].map((q) => [q.id, q.answerTranscript])); // and its transcript
+  const brolls = new Map([...questions.values()].map((q) => [q.id, q.broll])); // and its b-roll
   // The answer order saves itself whenever it changes, so leaving or refreshing never loses it.
   let edits = 0; // changes made to the answer order
   let savedEdits = 0; // how many of them the server has
@@ -1643,6 +1753,8 @@ async function managePage({ id }) {
     'click',
     action(async () => {
       if (finishing || uploads.size) throw new Error('Wait for your answers to finish saving (or discard any that failed) before publishing.');
+      const making = queue.find((qid) => videos.get(qid) && brolls.get(qid)?.status === 'pending');
+      if (making) throw new Error(`The b-roll for question ${queue.indexOf(making) + 1} is still being made. Wait for it, or remove it, before publishing.`);
       const answered = queue.filter((qid) => videos.get(qid)).length;
       const unanswered = queue.length - answered;
       const note = unanswered ? `\n\n${unanswered} queued question(s) have no recorded answer and will be left out.` : '';
@@ -1692,6 +1804,7 @@ async function managePage({ id }) {
         keepLocal(qid, take.url);
         videos.set(qid, res.video);
         transcripts.set(qid, res.transcript);
+        brolls.set(qid, res.broll); // its b-roll moves to where it fits in the new take
       } catch (err) {
         if (uploads.get(qid) !== take) return;
         if (err.status === 401) return requireLogin();
@@ -1753,10 +1866,12 @@ async function managePage({ id }) {
     }
     const url = videos.get(qid);
     const video = url ? player(local.get(qid) ?? url, transcripts.get(qid)) : null;
+    const broll = brolls.get(qid);
     setChildren(
       box,
-      video,
+      video ? brollView(video, broll?.status === 'ready' && broll.start != null ? broll : null).el : null,
       video ? answerTranscript(video, transcripts.get(qid), { questionId: qid, pick: (q) => q.answerTranscript, onUpdate: (t) => transcripts.set(qid, t), editable: true }) : null,
+      video && brollOn ? brollPanel(qid) : null,
       buttons(
         h('button', { class: url ? 'btn btn-small' : 'btn btn-primary btn-small', onclick: action(() => startSession(qid)) }, url ? 'Re-record from here' : '● Answer from here'),
         url ? h('button', { class: 'btn btn-small', onclick: action(() => removeAnswer(qid)) }, 'Remove') : null,
@@ -1767,11 +1882,88 @@ async function managePage({ id }) {
 
   async function removeAnswer(qid) {
     if (!confirm('Delete this recorded answer?')) return;
-    await api('DELETE', `/api/questions/${qid}/video`);
+    const res = await api('DELETE', `/api/questions/${qid}/video`);
     keepLocal(qid, null);
     videos.set(qid, null);
     transcripts.set(qid, null);
+    brolls.set(qid, res.broll); // kept for the next take
     drawAnswer(qid);
+  }
+
+  // ----- b-roll -----
+  // Under a recorded answer, the expert describes a shot to cut away to while they talk. The server
+  // makes it, which takes a few minutes, and places it where it fits what they're saying; the
+  // answer's video above then plays with it cut in. What they've typed is kept across redraws.
+  const brollDrafts = new Map(); // question id -> description being typed
+  const brollWatched = new Set();
+
+  function brollPanel(qid) {
+    const broll = brolls.get(qid);
+    const box = h('div', { class: 'broll' });
+    const set = (next) => {
+      brolls.set(qid, next);
+      drawAnswer(qid);
+    };
+    const remove = action(async () => set((await api('DELETE', `/api/questions/${qid}/broll`)).broll));
+    const form = ({ again = false } = {}) => {
+      const text = h('textarea', {
+        rows: 2,
+        maxlength: 500,
+        'aria-label': 'Describe the b-roll',
+        placeholder: 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"',
+        value: brollDrafts.get(qid) ?? (again ? broll?.prompt : ''),
+        oninput: () => brollDrafts.set(qid, text.value),
+      });
+      const submit = h('button', { type: 'submit', class: 'btn btn-primary btn-small' }, broll ? 'Make new b-roll' : 'Make b-roll');
+      const el = h(
+        'form',
+        { class: 'broll-form' },
+        text,
+        h(
+          'div',
+          { class: 'row gap-sm wrap' },
+          submit,
+          broll ? h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove b-roll') : null,
+          broll?.status === 'ready' ? h('button', { type: 'button', class: 'link-btn small', onclick: () => (brollDrafts.delete(qid), drawAnswer(qid)) }, 'Cancel') : null,
+        ),
+        h('p', { class: 'hint' }, `A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. It's cut in where you talk about it, and your answer moves to a picture in the corner while it plays.`),
+      );
+      el.addEventListener('submit', (e) => {
+        e.preventDefault();
+        action(async () => {
+          const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: text.value });
+          brollDrafts.delete(qid);
+          set(res.broll);
+        })({ currentTarget: submit });
+      });
+      return el;
+    };
+    const head = (...extra) => h('div', { class: 'broll-head' }, h('span', { class: 'broll-label' }, 'B-roll'), broll?.prompt ? h('span', { class: 'broll-prompt' }, `“${broll.prompt}”`) : null, extra);
+
+    if (!broll) return setChildren(box, head(), form()), box;
+    if (broll.status === 'pending') {
+      if (!brollWatched.has(qid)) {
+        brollWatched.add(qid);
+        watchQuestion(qid, right, (q) => q.broll?.status !== 'pending', (q) => {
+          brollWatched.delete(qid);
+          if (brolls.get(qid)?.status === 'pending') set(q.broll);
+        });
+      }
+      setChildren(box, head(), h('div', { class: 'row gap-sm wrap' }, h('span', { class: 'muted small' }, 'Making your b-roll and finding the best place for it… This takes a few minutes; you can keep working.'), h('button', { type: 'button', class: 'link-btn small', onclick: remove }, 'Cancel')));
+    } else if (broll.status === 'failed') {
+      setChildren(box, head(), h('p', { class: 'warn small' }, "⚠ This b-roll couldn't be made. Try again, or describe it differently."), form({ again: true }));
+    } else if (brollDrafts.has(qid)) {
+      setChildren(box, head(), form({ again: true }));
+    } else {
+      const change = h('button', { type: 'button', class: 'btn btn-small', onclick: () => (brollDrafts.set(qid, broll.prompt), drawAnswer(qid)) }, 'Change');
+      const where = broll.start != null
+        ? h('span', { class: 'muted small' }, `Cut in at ${fmtDuration(broll.start)}–${fmtDuration(broll.start + broll.length)}, where it fits what you're saying. Play your answer to see it.`)
+        : h('p', { class: 'warn small' }, '⚠ This answer is too short for its b-roll, so it’s left out. Re-record a longer answer, or make new b-roll to fit this one.');
+      // What was filmed, which may be a scene standing for the idea they described.
+      const shot = broll.shot && broll.shot !== broll.prompt ? h('details', { class: 'broll-shot small' }, h('summary', {}, 'What was filmed'), h('p', {}, broll.shot)) : null;
+      setChildren(box, head(), where, shot, h('div', { class: 'row gap-sm wrap' }, change, h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove')));
+    }
+    return box;
   }
 
   // Starts a session at `qid` and carries on down the answer order from there.
@@ -2473,7 +2665,7 @@ function loginPage(_, query) {
 
 // Who's logged in, their voice, and what the server can do.
 async function loadMe() {
-  ({ user: me, devLogin, speech, voices, voice: myVoice } = await api('GET', '/api/me'));
+  ({ user: me, devLogin, speech, broll: brollOn, voices, voice: myVoice } = await api('GET', '/api/me'));
 }
 
 // Dev-only: switch between users without logging in. Shown when the server runs with --dev.

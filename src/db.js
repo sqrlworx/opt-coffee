@@ -53,9 +53,18 @@ CREATE TABLE IF NOT EXISTS questions (
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir
   answer_start   REAL,                      -- seconds into answer_video where the answer begins (after the question is played); NULL = from the start
+  broll_prompt   TEXT,                      -- the expert's description of b-roll to cut away to during the answer
+  broll_shot     TEXT,                      -- the shot that was filmed for it: the description written up as something a video model can film
+  broll_status   TEXT,                      -- making it and placing it in the take: 'pending' | 'ready' | 'failed'; NULL = no b-roll
+  broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
+  broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
+  broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and shorter than the answer)
   published_position     INTEGER,           -- snapshot taken at publish time: what readers see
   published_answer_video TEXT,
-  published_answer_start REAL
+  published_answer_start REAL,
+  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start and length
+  published_broll_start  REAL,
+  published_broll_length REAL
 );
 CREATE INDEX IF NOT EXISTS questions_by_oh ON questions(office_hour_id);
 
@@ -168,6 +177,21 @@ function migrate(db) {
   if (!columns.has('lip_sync')) db.exec('ALTER TABLE questions ADD COLUMN lip_sync TEXT');
   // Askers pick the voice their typed question is read aloud in.
   if (!columns.has('voice')) db.exec('ALTER TABLE questions ADD COLUMN voice TEXT');
+  if (!columns.has('broll_status')) {
+    // Experts can add b-roll to their answers.
+    db.exec(`
+      ALTER TABLE questions ADD COLUMN broll_prompt TEXT;
+      ALTER TABLE questions ADD COLUMN broll_status TEXT;
+      ALTER TABLE questions ADD COLUMN broll_video TEXT;
+      ALTER TABLE questions ADD COLUMN broll_start REAL;
+      ALTER TABLE questions ADD COLUMN broll_length REAL;
+      ALTER TABLE questions ADD COLUMN published_broll TEXT;
+      ALTER TABLE questions ADD COLUMN published_broll_start REAL;
+      ALTER TABLE questions ADD COLUMN published_broll_length REAL;
+    `);
+  }
+  // B-roll is written up as a shot before it's filmed.
+  if (!columns.has('broll_shot')) db.exec('ALTER TABLE questions ADD COLUMN broll_shot TEXT');
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));

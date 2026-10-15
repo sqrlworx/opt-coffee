@@ -347,3 +347,76 @@ export function summarizeAnswer({ question, answer }) {
   }
   return summary;
 }
+
+// ---------- b-roll ----------
+
+const BROLL_SHARE = 0.6; // of an answer, at most, is b-roll
+const MIN_BROLL = 1.5; // seconds; a cutaway shorter than this isn't worth it
+const LEAD = 2.5; // seconds the expert is on camera, at most, before cutting away
+const TAIL = 1.5; // and after cutting back, before the answer ends
+const PHRASE_GAP = 0.25; // seconds of silence before a word that starts a phrase
+const SENTENCE_GAP = 0.6;
+
+/**
+ * Where b-roll can go in an answer, and for how long. The expert is seen first and last: the
+ * b-roll starts a little after the answer does and ends a little before, and it's no more than
+ * 60% of the answer (so always shorter than it). The take starts with the question, up to
+ * `answerStart`; `end` is how long the take is, and `clip` how long the b-roll is.
+ * @returns {{length: number, from: number, to: number} | null}  the length it plays for, and the
+ *   earliest and latest it can start; null when the answer is too short for any
+ */
+export function brollRange({ clip, answerStart, end }) {
+  const from = answerStart ?? 0;
+  const answer = end - from;
+  const length = Math.min(clip, answer * BROLL_SHARE);
+  if (!(length >= MIN_BROLL)) return null;
+  const spare = answer - length;
+  return { length: round3(length), from: round3(from + Math.min(LEAD, spare / 2)), to: round3(end - length - Math.min(TAIL, spare / 2)) };
+}
+
+/**
+ * Where to cut away to b-roll in an answer: as the expert talks about what it shows (the words
+ * it's described with), on a sentence or phrase starting. A word said just before the cut counts
+ * nearly as much as one said during it, and less the later it comes. Without a transcript, or when
+ * nothing said matches, it goes about a third of the way into the answer, at a phrase if there is
+ * one there. See brollRange for how long it plays and where it can go.
+ * @param {{description: string, clip: number, answerStart: number|null, end: number, words?: [number, number, string][] | null}} input
+ *   `words` are the take's, from speech-to-text, timed from its start
+ * @returns {{start: number, length: number} | null}  null when the answer is too short for b-roll
+ */
+export function placeBroll(input) {
+  const range = brollRange(input);
+  if (!range) return null;
+  const { length, from, to } = range;
+  const answerStart = input.answerStart ?? 0;
+  const answer = input.end - answerStart;
+  const wanted = new Set(tokenize(input.description).map((t) => t.stem));
+  const said = (input.words ?? [])
+    .filter(([start, end]) => (start + end) / 2 >= answerStart)
+    .map(([start, end, text]) => ({ start, end, text: String(text).trim(), stems: tokenize(String(text)).map((t) => t.stem) }));
+  // Cuts can start where a phrase does: after a pause or punctuation. A sentence is better still.
+  const starts = [{ at: from, boundary: 0 }];
+  said.forEach((w, i) => {
+    if (w.start < from || w.start > to) return;
+    const before = said[i - 1];
+    const gap = before ? w.start - before.end : Infinity;
+    const boundary = !before || gap >= SENTENCE_GAP || /[.?!]["')\]]?$/.test(before.text) ? 0.25 : gap >= PHRASE_GAP || /[,;:]$/.test(before.text) ? 0.1 : 0;
+    if (boundary) starts.push({ at: w.start, boundary });
+  });
+  const relevance = (at) => {
+    const best = new Map(); // stem -> its weight, counted once
+    for (const w of said) {
+      if (w.end < at - 1 || w.start >= at + length) continue;
+      const weight = w.start < at ? 0.8 : 1 - (0.5 * (w.start - at)) / length;
+      for (const s of w.stems) if (wanted.has(s)) best.set(s, Math.max(best.get(s) ?? 0, weight));
+    }
+    return [...best.values()].reduce((a, b) => a + b, 0);
+  };
+  const score = ({ at, boundary }) => relevance(at) + boundary - 0.3 * Math.abs((at - answerStart) / answer - 1 / 3);
+  const best = starts.reduce((a, b) => (score(b) > score(a) ? b : a));
+  // Without a transcript there are no phrases to go by, so it goes a third of the way in.
+  const at = said.length ? best.at : Math.min(to, Math.max(from, answerStart + answer / 3));
+  return { start: round3(at), length };
+}
+
+const round3 = (secs) => Math.round(secs * 1000) / 1000;

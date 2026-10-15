@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { followUpQuestions, groupQuestions, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
+import { brollRange, followUpQuestions, groupQuestions, placeBroll, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
 import { createModerator } from '../src/moderator/index.js';
 
 const Q = (id, body, votes = 0, source = 'asker') => ({ id, body, votes, source, createdAt: `2026-01-01T00:00:0${id % 10}Z` });
@@ -205,4 +205,69 @@ test('follow-up questions come from people\'s replies: unanswered first, then mo
   // The facade falls back to the heuristic without Claude.
   const moderator = await createModerator({ mode: 'heuristic' });
   assert.deepEqual(await moderator.followUpQuestions({ title: 't' }, discussion, { count: 1 }), ['How much time do you spend coding each week?']);
+});
+
+// ---------- b-roll ----------
+
+// Words as speech-to-text times them, from `at` seconds: a third of a second each, with a longer
+// pause after a sentence.
+function spoken(text, at) {
+  const words = [];
+  for (const w of text.split(' ')) {
+    words.push([Math.round(at * 100) / 100, Math.round((at + 0.3) * 100) / 100, ` ${w}`]);
+    at += /[.?!]$/.test(w) ? 0.9 : 0.35;
+  }
+  return words;
+}
+const kitchen = spoken('So the first thing is to plan your week. Then, when you cook, start with fresh vegetables and chop them all before you turn on the stove. That saves a lot of time. Finally, clean up as you go.', 3);
+
+test('b-roll is shorter than the answer, and starts after it does and ends before it does', () => {
+  assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 23 }), { length: 5, from: 5.5, to: 16.5 });
+  // A short answer gets a shorter cut, with less room either side.
+  assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 8 }), { length: 3, from: 4, to: 4 });
+  assert.deepEqual(brollRange({ clip: 5, answerStart: null, end: 6 }), { length: 3.6, from: 1.2, to: 1.2 });
+  // Too short to cut away at all.
+  assert.equal(brollRange({ clip: 5, answerStart: 3, end: 5.4 }), null);
+  assert.equal(placeBroll({ description: 'anything', clip: 5, answerStart: 3, end: 5.4, words: null }), null);
+});
+
+test('b-roll goes where the expert talks about what it shows, on a phrase starting', () => {
+  const placed = placeBroll({ description: 'Close-up of hands chopping fresh vegetables on a board', clip: 4, answerStart: 3, end: 20, words: kitchen });
+  assert.deepEqual(placed, { start: 8.1, length: 4 }); // "start with fresh vegetables and chop them…", after "cook,"
+  assert.equal(kitchen.find(([start]) => start === placed.start)[2], ' start');
+  // Words said just before the cut count nearly as much: the stove comes up at the end of a
+  // sentence, with no phrase starting in it to cut on, so it's cut to as the next one starts.
+  const stove = placeBroll({ description: 'A gas stove being turned on', clip: 4, answerStart: 3, end: 20, words: kitchen });
+  assert.equal(kitchen.find(([start]) => start === stove.start)[2], ' That');
+});
+
+test("b-roll that matches nothing said goes about a third of the way in, at a sentence if there's one", () => {
+  const placed = placeBroll({ description: 'A sunset over the ocean', clip: 4, answerStart: 3, end: 20, words: kitchen });
+  assert.equal(kitchen.find(([start]) => start === placed.start)[2], ' Then,');
+  // Without a transcript, a third of the way into the answer.
+  assert.deepEqual(placeBroll({ description: 'A sunset', clip: 4, answerStart: 2, end: 20, words: null }), { start: 8, length: 4 });
+  // The question at the start of the take isn't the answer: nothing said in it counts.
+  const words = [...spoken('Can you show a sunset?', 0), ...spoken('Sure. It depends on where you live and the season.', 2)];
+  assert.ok(placeBroll({ description: 'A sunset', clip: 2, answerStart: 2, end: 12, words }).start >= 2);
+});
+
+test('Claude picks where b-roll goes when configured, kept where it can go, with the heuristic as fallback', async () => {
+  const calls = [];
+  let reply;
+  const llm = { placeBroll: async (input) => (calls.push(input), reply(input)) };
+  const moderator = await createModerator({ llm, log: () => {} });
+  const cues = [[0, 2.5, 'How do you cook a weeknight dinner?'], [3, 6.5, 'So the first thing is to plan your week.'], [7, 14, 'Then, when you cook, start with fresh vegetables.']];
+  const input = { description: 'Hands chopping vegetables', question: 'How do you cook a weeknight dinner?', clip: 4, answerStart: 3, end: 20, words: kitchen, cues };
+
+  reply = () => ({ start: 7.2 });
+  assert.deepEqual(await moderator.placeBroll(input), { start: 7.2, length: 4 });
+  // It sees the answer, not the question at the start of the take, and where the b-roll can go.
+  assert.deepEqual(calls[0], { description: 'Hands chopping vegetables', question: 'How do you cook a weeknight dinner?', cues: cues.slice(1), length: 4, from: 5.5, to: 14.5 });
+  reply = () => ({ start: 19 });
+  assert.deepEqual(await moderator.placeBroll(input), { start: 14.5, length: 4 }); // can't end after the answer does
+  reply = () => Promise.reject(new Error('overloaded'));
+  assert.deepEqual(await moderator.placeBroll(input), placeBroll(input));
+  // Without a transcript there's nothing to ask about.
+  assert.deepEqual(await moderator.placeBroll({ ...input, words: null, cues: null }), placeBroll({ ...input, words: null }));
+  assert.equal(calls.length, 3);
 });

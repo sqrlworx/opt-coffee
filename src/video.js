@@ -14,11 +14,51 @@ const TRANSCRIPT_WAIT = 30 * 60_000; // longest a finished join waits for transc
 const TRANSCRIPT_POLL = 1000;
 const WIDTH = 1280;
 const HEIGHT = 720;
+const FINISHED = [1920, 1080]; // the size src/finish renders takes at
 // Finding a question's sound in a video, by lining up how loud each is over time.
 const LOUDNESS_RATE = 8000; // samples per second
 const STEP = 0.005; // seconds between loudness measurements
 const QUESTION_LATE = [-0.1, 0.5]; // how early or late a question's sound might start in its take, in seconds
 const MIN_MATCH = 0.4; // correlation below which it isn't taken as found
+// The expert's picture while b-roll plays, in fractions of the frame's width: at the top left and
+// framed like the asker's in the player (.jp-pip in public/styles.css), a 4:3 crop with rounded
+// corners, a thin white frame and a soft shadow below it.
+const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022, blur: 0.009, drop: 0.005 };
+const CUT_FADE = 0.3; // seconds the cut to b-roll and back takes
+
+/**
+ * An ffmpeg filter graph that cuts away to b-roll: from `start` for `length` seconds, the b-roll
+ * ([`broll`], any size or frame rate) fills the frame, and the picture ([`pic`], `width`x`height`
+ * at 30 fps) moves to the top left. They fade in and out. Its output, [`out`], is timed like [`pic`].
+ */
+export function cutawayFilter({ width, height, start, length, pic = 'pic', broll = 'broll', out = 'cut' }) {
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const pw = even(PIP.width * width);
+  const ph = even((pw * 3) / 4);
+  const ring = Math.max(1, Math.round(PIP.ring * width));
+  const [cw, ch] = [pw + 2 * ring, ph + 2 * ring];
+  const radius = Math.round(PIP.radius * width);
+  const blur = Math.max(1, Math.round(PIP.blur * width));
+  const [x, y] = [Math.round(PIP.inset * width), Math.round(PIP.inset * width)];
+  const t = (secs) => String(Math.round(secs * 1000) / 1000);
+  const fade = Math.min(CUT_FADE, length / 2);
+  const at = `setpts=PTS-STARTPTS+${t(start)}/TB`;
+  const fades = `fade=t=in:st=${t(start)}:d=${t(fade)}:alpha=1,fade=t=out:st=${t(start + length - fade)}:d=${t(fade)}:alpha=1`;
+  // Rounded corners, smoothed over a pixel, as the alpha of an RGBA picture.
+  const round = (r) => `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*clip(${r}+0.5-hypot(max(abs(X+0.5-W/2)-(W/2-${r}),0),max(abs(Y+0.5-H/2)-(H/2-${r}),0)),0,1)'`;
+  return [
+    `[${pic}]split=2[cut_base][cut_face]`,
+    `[${broll}]fps=30,scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height},setsar=1,trim=duration=${t(length)},${at},format=yuva420p,${fades}[cut_broll]`,
+    `[cut_face]trim=start=${t(start)}:duration=${t(length)},${at},crop=min(iw\\,ih*4/3):min(ih\\,iw*3/4),scale=${pw}:${ph}:flags=lanczos,setsar=1,format=rgba,${round(radius)}[cut_pic]`,
+    `color=white:s=${cw}x${ch}:r=30:d=${t(length)},${at},format=rgba,${round(radius + ring)}[cut_card]`,
+    `[cut_card][cut_pic]overlay=${ring}:${ring}:format=auto,${fades}[cut_framed]`,
+    `[cut_framed]split=2[cut_top][cut_shade]`,
+    `[cut_shade]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.45,pad=${cw + 6 * blur}:${ch + 6 * blur}:${3 * blur}:${3 * blur}:color=black@0,gblur=sigma=${blur}[cut_shadow]`,
+    `[cut_base][cut_broll]overlay=0:0:eof_action=pass[cut_b]`,
+    `[cut_b][cut_shadow]overlay=${x - 3 * blur}:${y - 3 * blur + Math.round(PIP.drop * width)}:eof_action=pass[cut_bs]`,
+    `[cut_bs][cut_top]overlay=${x}:${y}:eof_action=pass,format=yuv420p[${out}]`,
+  ].join(';');
+}
 
 /**
  * Joins answer videos into one with ffmpeg. Each take is re-encoded to the same size, frame rate
@@ -30,6 +70,8 @@ const MIN_MATCH = 0.4; // correlation below which it isn't taken as found
  * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. If that
  * fails, the takes are joined as recorded.
  *
+ * A take with b-roll cuts away to it (see cutawayFilter), under the captions.
+ *
  * Returns null when ffmpeg isn't on the PATH.
  */
 export function createVideoJoiner({ finisher = null, log = console.warn } = {}) {
@@ -40,17 +82,20 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
   const ffmpeg = (args) => run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args], { timeout: FFMPEG_TIMEOUT, maxBuffer: 10_000_000 });
   const probe = async (file, entries) => (await run('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file])).stdout.trim();
 
-  // The takes as recorded, brought to the same size, frame rate and codecs.
+  // The takes as recorded, brought to the same size, frame rate and codecs, with their b-roll cut in.
   async function reencode(takes, dir) {
     const parts = [];
-    for (const [i, { file }] of takes.entries()) {
+    for (const [i, { file, broll }] of takes.entries()) {
       const part = join(dir, `${i}.mp4`);
       // Every take has sound, but a part without any would break joining, so give it silence.
       const silent = !(await probe(file, 'stream=codec_type')).includes('audio');
+      const fit = `[0:v]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`;
+      const inputs = ['-i', file, ...(broll ? ['-i', broll.file] : [])];
       await ffmpeg([
-        '-i', file,
+        ...inputs,
         ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-shortest'] : []),
-        '-vf', `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`,
+        '-filter_complex', broll ? `${fit}[pic];${cutawayFilter({ width: WIDTH, height: HEIGHT, start: broll.start, length: broll.length, broll: '1:v', out: 'v' })}` : `${fit}[v]`,
+        '-map', '[v]', '-map', silent ? `${inputs.length / 2}:a` : '0:a:0',
         '-af', 'aresample=48000:async=1',
         '-ac', '2',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
@@ -100,8 +145,10 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
   async function finish(takes, dir) {
     const parts = takes.map((_, i) => join(dir, `finished_${i}.mp4`));
     try {
+      // The b-roll is cut in over the finished picture, as input 2 (see src/finish/finish.py).
+      const cutaway = ({ file, start, length }) => ({ input: file, filter: cutawayFilter({ width: FINISHED[0], height: FINISHED[1], start, length, broll: '2:v' }) });
       await finisher.finish(
-        takes.map((t, i) => ({ input: t.file, output: parts[i], answer_start: t.answerStart ?? null, cues: t.cues ?? null, words: t.words ?? null })),
+        takes.map((t, i) => ({ input: t.file, output: parts[i], answer_start: t.answerStart ?? null, cues: t.cues ?? null, words: t.words ?? null, cutaway: t.broll ? cutaway(t.broll) : null })),
         dir,
       );
       return parts;
@@ -117,8 +164,8 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
 
     /**
      * Writes the takes, in order, into one MP4 at `out`. A take is a file name, or
-     * {file, answerStart, cues, words} with what finishing uses: where the answer starts after the
-     * question, and the transcript's cues and word timings.
+     * {file, answerStart, cues, words, broll} with what finishing uses: where the answer starts after the
+     * question, and the transcript's cues and word timings; and b-roll to cut away to, {file, start, length}.
      * @returns {Promise<{durations: number[], captioned: boolean[]}>} how long each part is in the
      *   result, in seconds, and whether its captions are burned in
      */
@@ -219,7 +266,8 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
   async function render(officeHourId, { remake = false } = {}) {
     const answers = db
       .prepare(
-        `SELECT id, body, asked_with AS askedWith, audio, published_answer_video AS video, published_answer_start AS answerStart
+        `SELECT id, body, asked_with AS askedWith, audio, published_answer_video AS video, published_answer_start AS answerStart,
+                published_broll AS broll, published_broll_start AS brollStart, published_broll_length AS brollLength
          FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position`,
       )
       .all(officeHourId);
@@ -232,7 +280,8 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
       const takes = answers.map((a) => {
         const take = texts.get(a.video);
         const asked = { body: a.body, ...(a.askedWith === 'audio' ? texts.get(a.audio) : null) };
-        return { file: join(mediaDir, a.video), answerStart: a.answerStart, ...(take && takeCaptions(asked, take, a.answerStart)) };
+        const broll = a.broll ? { file: join(mediaDir, a.broll), start: a.brollStart, length: a.brollLength } : null;
+        return { file: join(mediaDir, a.video), answerStart: a.answerStart, broll, ...(take && takeCaptions(asked, take, a.answerStart)) };
       });
       const { durations, captioned } = await joiner.join(takes, join(mediaDir, name));
       // Where each answer starts and ends in the joined video, and where its question's sound

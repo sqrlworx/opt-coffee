@@ -30,7 +30,8 @@ export function createFinisher({
   return {
     /**
      * Renders each take into a finished part; the parts join without re-encoding.
-     * @param {{input: string, output: string, answer_start: number|null, cues: [number, number, string][]|null, words: [number, number, string][]|null}[]} takes
+     * @param {{input: string, output: string, answer_start: number|null, cues: [number, number, string][]|null, words: [number, number, string][]|null,
+     *   cutaway: {input: string, filter: string}|null}[]} takes  cutaway: b-roll, and the filter graph that cuts it in (see finish.py)
      * @param {string} dir  scratch directory for the job file
      * @returns {Promise<object>} the finisher's report: what was measured and done, per take
      */

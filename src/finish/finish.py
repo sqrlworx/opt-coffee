@@ -28,7 +28,8 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
     uv run finish.py job.json
 
     {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "answer_start": 4.95,
-                "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null}],
+                "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
+                "cutaway": {"input": "media/b.mp4", "filter": "..."} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -37,7 +38,10 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
 - sound (sound.py): the voice restored to studio quality (or, as "natural", only cleaned up),
   then a broadcast voice chain, with question and answer each at -16 LUFS;
 - captions (captions.py), when the take has a transcript: a few words at a time, a colour per
-  speaker, louder words bigger and key words heavier or in italics.
+  speaker, louder words bigger and key words heavier or in italics;
+- b-roll, when the take has a cutaway: its clip, and the ffmpeg filter graph that cuts away to it
+  (made by src/video.js), from [pic], the finished picture, and [2:v], the clip, to [cut]. It goes
+  under the grain and the captions.
 
 The takes are cut into pieces of a few seconds that render in parallel. Logs go to stderr; the
 last line on stdout is a JSON report. Exits non-zero on failure.
@@ -265,16 +269,21 @@ def placement(size: tuple[int, int]) -> tuple[float, float, float]:
 def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, fonts: Path, tmp: Path) -> None:
     listing = tmp / f"take{index}.txt"
     listing.write_text("".join(f"file '{p}'\n" for p in pieces))
+    picture = f"[0:v]setpts=N/{FPS}/TB,{fit_filter(info['size'])},cas=strength=0.4:planes=1"  # sharpen the detail the upscale softened (luma only)
     finishing = [
-        "cas=strength=0.4:planes=1",  # sharpen the detail the upscale softened (luma only)
         "noise=c0s=3:c0f=t",  # a fine moving grain, as from a camera sensor
         *([f"ass={_escape(ass)}:fontsdir={_escape(fonts)}"] if ass else []),
         "format=yuv420p",
     ]
-    graph = f"[0:v]setpts=N/{FPS}/TB,{fit_filter(info['size'])},{','.join(finishing)}[v]"
+    cutaway = take.get("cutaway")
+    if cutaway:
+        graph = f"{picture}[pic];{cutaway['filter']};[cut]{','.join(finishing)}[v]"
+    else:
+        graph = f"{picture},{','.join(finishing)}[v]"
     ffmpeg(
         "-f", "concat", "-safe", "0", "-i", str(listing),
         "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", str(audio),
+        *(["-i", cutaway["input"]] if cutaway else []),
         "-filter_complex", graph, "-map", "[v]", "-map", "1:a",
         "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
