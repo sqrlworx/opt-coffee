@@ -11,7 +11,9 @@
     "start": "node server.js",
     "dev": "node server.js --dev",
     "seed": "node scripts/seed.js",
-    "test": "node --test --test-reporter=spec \"test/*.test.js\""
+    "test": "node --test --test-reporter=spec \"test/*.test.js\"",
+    "mobile:build": "npm --prefix mobile install && npm --prefix mobile run build",
+    "mobile:dev": "node scripts/mobile-dev.js"
   },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "*"

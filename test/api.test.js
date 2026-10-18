@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb } from '../src/db.js';
@@ -221,6 +221,41 @@ test('explore lists open office hours and people; static shell is served', async
   assert.match(await html.text(), /<main id="app"/);
   const traversal = await fetch(`${base}/..%2fpackage.json`);
   assert.doesNotMatch(await traversal.text(), /"name": "forum"/);
+});
+
+test('the mobile app is served at /m/ once it is built', async () => {
+  const mobileDir = mkdtempSync(join(tmpdir(), 'forum_mobile_'));
+  const mobileServer = createServer(createApp({ db, moderator: await createModerator({ mode: 'heuristic' }), mobileDir }));
+  await new Promise((resolve) => mobileServer.listen(0, resolve));
+  const mobileBase = `http://localhost:${mobileServer.address().port}`;
+  try {
+    // Not built yet: it says how to build it.
+    let res = await fetch(`${mobileBase}/m/`);
+    assert.equal(res.status, 404);
+    assert.match((await res.json()).error, /npm run build/);
+
+    mkdirSync(join(mobileDir, 'assets'));
+    writeFileSync(join(mobileDir, 'index.html'), '<div id="root"></div>');
+    writeFileSync(join(mobileDir, 'assets', 'app.js'), 'console.log(1)');
+    res = await fetch(`${mobileBase}/m`, { redirect: 'manual' });
+    assert.equal(res.status, 301);
+    assert.equal(res.headers.get('location'), '/m/');
+    res = await fetch(`${mobileBase}/m/`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), '<div id="root"></div>');
+    res = await fetch(`${mobileBase}/m/assets/app.js`);
+    assert.equal(res.headers.get('content-type'), 'text/javascript');
+    assert.equal(await res.text(), 'console.log(1)');
+    // Unknown paths get its shell; nothing outside it is served.
+    assert.equal(await (await fetch(`${mobileBase}/m/explore`)).text(), '<div id="root"></div>');
+    assert.doesNotMatch(await (await fetch(`${mobileBase}/m/..%2f..%2fpackage.json`)).text(), /"name"/);
+    // The page and the API are where they were.
+    assert.match(await (await fetch(`${mobileBase}/`)).text(), /<main id="app"/);
+    assert.equal((await fetch(`${mobileBase}/api/explore`)).status, 200);
+  } finally {
+    mobileServer.close();
+    rmSync(mobileDir, { recursive: true, force: true });
+  }
 });
 
 test('dev user switcher is off by default', async () => {

@@ -16,6 +16,13 @@ npm test
 
 Requires Node 22.13+ (uses the built-in `node:sqlite`). The app has no required dependencies and no build step.
 
+There's also a mobile app, for phones (see Mobile app). It has a build step, and the server serves it at `/m/` once it's built:
+
+```bash
+npm run mobile:build   # installs its dependencies and builds mobile/dist; then open http://localhost:3000/m/
+npm run mobile:dev     # http://localhost:5173/m/ with hot reload; starts the server on port 3000 too (as npm run dev), unless one's already running there (FORUM_URL to change it)
+```
+
 Joining the published answers into one video needs `ffmpeg` (with `ffprobe`) on the PATH. Without it, readers get the answers one by one. Speech (spoken questions, read-aloud and transcripts) also needs [uv](https://docs.astral.sh/uv/) and `ffmpeg`. Without uv it's switched off and everything else works. On first start, uv installs the Python dependencies and the models download (a few GB in total, cached afterwards). Speech is ready once the log shows the models loading. Finishing the joined video (see Watching) also needs uv; its first join installs its own Python dependencies and downloads its models and fonts (about 2 GB). B-roll needs ffmpeg, which is all uploading it needs; having it made also needs a Gemini API key (filmed by Veo) or uv (filmed locally). Locally, the first clip installs its Python dependencies and downloads its models (about 42 GB).
 
 Settings and API keys can also go in a `.env` file in the working directory, which the server reads on start (it's git-ignored). Variables already set in the environment win.
@@ -110,6 +117,15 @@ Recording needs camera and microphone access, and browsers only allow that on `l
 
 **Drafts and publishing.** Before publishing, the planner edits a private working copy (`plan_position`, `answer_video`). The answer order saves itself whenever it changes, so leaving or refreshing the planner doesn't lose it. Publishing copies it once into a snapshot (`published_position`, `published_answer_video`), and the public page and feed read only that snapshot. Questions that weren't answered are left off the public page for everyone but the expert, who sees them folded away under the answers. Once readers can see it's published, the API doesn't send those questions to anyone else, and only counts the answered ones for them (`questionCount`, on the page and on cards). Publishing is one-way. Afterwards the planner redirects to the public page, and the API refuses edits with 409: plan saves, recording or removing videos, and publishing again. An upload that is still in flight when the expert publishes is also rejected, and its file is discarded.
 
+**Mobile app** (`mobile/`). The same forum for phones, as a [React Native Web](https://necolas.github.io/react-native-web/) app built with Vite, over the same API and media: the server serves its build at `/m/`, so it shares the page's login, and links work in both with `/m/` in front (`/m/#/oh/3`). It does everything the page does, laid out for a phone held upright. Pages are one column; tabs along the bottom (Feed, Explore, Host, You) replace the nav bar, and make way for the keyboard. Everything tappable is at least 44 points, text fields use 16px text so iPhones don't zoom into them, and it keeps clear of the notch and home indicator. The expert's card under their name opens as a sheet when it's tapped, instead of on hover. Play buttons on questions always show, since there's no hover. The planner's two lists are two tabs: questions are added to the answer order with a tap and moved with ↑ and ↓, instead of dragged. Recording asks for the front camera, and the recording session is full screen with its buttons at the bottom. B-roll uploads come from the camera roll.
+- *Split screen instead of picture in picture.* Wherever the page shows one picture over another, the phone splits the player in two: the picture that would be in the corner goes in the top half and the main one in the bottom half, each at full width (`mobile/src/media/split.js`). The player is two 16:9 pictures tall, so a split never changes its size, and between splits the main picture sits in the middle. Each half slides and fades in over 0.3 seconds, like the cut to b-roll.
+  - In the joined video, while a question plays, the asker (their video, or the fox saying it) is in the top half and the joined video in the bottom half. While an answer's b-roll plays, the server has drawn the expert into the corner of the joined video's picture. The player crops them back out of it, from where `cutawayFilter` in `src/video.js` puts them, into the top half, and plays the b-roll clip in the bottom half in step with the video (muted, since the expert's sound carries on). Captions burned into the video are under the clip then, so the player draws that answer's captions itself.
+  - An answer's own video with b-roll, in the planner, or published answers that weren't joined: the expert moves to the top half while the b-roll plays in the bottom half.
+  - While recording, a question asked on camera plays the asker's video in the top half and the camera moves to the bottom half. The rest of the time the camera has the whole frame.
+  - Fullscreen on a phone turned sideways, the halves go side by side, the top one on the left.
+- The player has its own controls: a tap shows them, and they fade while it plays. The timeline is above the buttons and can be dragged with a finger, and it says which question is under it.
+- The fox is drawn by `public/fox.js`, which the page uses too.
+
 ## Layout
 
 ```
@@ -122,9 +138,10 @@ src/speech/             worker.py (Whisper + Kokoro) · index.js (worker process
 src/broll/              broll.py (writing up the shot with Qwen3, filming it with LTX-Video; run with uv) · shot.md (how a shot is written up) · gemini.js (Veo filming it, and Gemini writing it up, with a key) · openai.js (GPT and gpt-image planning the shot instead, with a key) · index.js (running it, getting uploaded videos ready, how long a recording is) · jobs.js (making b-roll and placing it, in the background)
 src/video.js            joining published answers into one video with ffmpeg, cutting in their b-roll, finding each question in it, and its background queue
 src/finish/             finishing the joined video: finish.py (entry, run with uv) · look.py (picture) · sound.py (dialogue) · captions.py · assets.py (models and fonts) · index.js
-public/                 vanilla-JS single-page app (hash routing), and fox.webp, the fox the player draws
+public/                 vanilla-JS single-page app (hash routing), and fox.webp and fox.js, the fox the players draw
+mobile/                 the mobile app (React Native Web, built with Vite; served at /m/): src/pages · src/officehour · src/manage (planner, recording session) · src/media (players, split screen, transcripts) · test/
 scripts/seed.js         demo data
-test/                   node:test — moderator unit tests, API lifecycle tests, speech tests (with a fake engine, and lip sync with uv if installed), video tests (fake joiners, plus real ffmpeg if installed), finishing tests (caption and sound decisions, with uv if installed), b-roll tests (with a fake generator; making a real clip takes minutes, so it isn't run, but getting an uploaded one ready with ffmpeg is, if installed)
+test/                   node:test — serving the mobile app, moderator unit tests, API lifecycle tests, speech tests (with a fake engine, and lip sync with uv if installed), video tests (fake joiners, plus real ffmpeg if installed), finishing tests (caption and sound decisions, with uv if installed), b-roll tests (with a fake generator; making a real clip takes minutes, so it isn't run, but getting an uploaded one ready with ffmpeg is, if installed)
 ```
 
 ## Not built yet

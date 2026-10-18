@@ -13,6 +13,8 @@ import { SAMPLE_TEXT } from './speech/voices.js';
 import { createVideoJobs } from './video.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
+// The mobile app's build (mobile/, `npm run build` there), served at /m/.
+const MOBILE_DIR = fileURLToPath(new URL('../mobile/dist/', import.meta.url));
 const MAX_BODY = 100_000;
 const MAX_VIDEO = 300_000_000; // ~10 minutes at the bitrate the browser records with
 const MAX_AUDIO = 20_000_000; // a spoken question is capped at 90 seconds in the browser
@@ -25,7 +27,7 @@ const MAX_BROLL_VIDEO = 500_000_000; // an uploaded b-roll clip: a minute or two
 const MAX_FILE_NAME = 200; // characters kept of an uploaded file's name
 const MAX_SEEDS = 20; // seed questions added at once
 const MIME = {
-  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.png': 'image/png',
   '.webm': 'video/webm', '.mp4': 'video/mp4', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.vtt': 'text/vtt; charset=utf-8',
 };
 // What MediaRecorder produces: WebM in Chrome/Firefox, MP4 in Safari (and newer Chrome), Ogg in Firefox.
@@ -312,8 +314,8 @@ function workingAnswers(questions) {
 // `speech` (src/speech/index.js) is optional; without it there are no spoken questions,
 // read-aloud audio or transcripts. So is `joiner` (src/video.js); without it published answers
 // aren't joined into one video. And `broll` (src/broll/index.js); without it experts can't add
-// b-roll to their answers.
-export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null, broll = null }) {
+// b-roll to their answers. `mobileDir` is the mobile app's build, served at /m/.
+export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null, broll = null, mobileDir = MOBILE_DIR }) {
   mkdirSync(mediaDir, { recursive: true });
   const speechJobs = speech ? createSpeechJobs({ db, speech, mediaDir }) : null;
   speechJobs?.resume();
@@ -1399,20 +1401,31 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     createReadStream(file, { start, end }).pipe(res);
   }
 
-  async function serveStatic(req, res, pathname) {
+  async function serveStatic(req, res, pathname, dir = PUBLIC_DIR) {
     const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
-    const file = normalize(join(PUBLIC_DIR, rel));
+    const file = normalize(join(dir, rel));
     try {
-      if (!file.startsWith(PUBLIC_DIR) || rel.split(/[\\/]/).includes('..')) throw new Error('outside public dir');
+      if (!file.startsWith(dir) || rel.split(/[\\/]/).includes('..')) throw new Error('outside public dir');
       const data = await readFile(file);
       res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' });
       res.end(data);
     } catch {
       // Unknown paths get the SPA shell; routing happens client-side via the hash.
-      const data = await readFile(join(PUBLIC_DIR, 'index.html'));
+      const data = await readFile(join(dir, 'index.html'));
       res.writeHead(pathname.includes('.') && !pathname.endsWith('.html') ? 404 : 200, { 'Content-Type': MIME['.html'] });
       res.end(data);
     }
+  }
+
+  // The mobile app, at /m/ once it's built. It's another shell over the same API and media.
+  async function serveMobile(req, res, pathname) {
+    if (pathname === '/m') {
+      res.writeHead(301, { Location: '/m/' });
+      return res.end();
+    }
+    const dir = normalize(join(mobileDir, '/'));
+    if (!existsSync(join(dir, 'index.html'))) return sendJson(res, 404, { error: "The mobile app isn't built. Run: cd mobile && npm install && npm run build" });
+    return serveStatic(req, res, pathname.slice('/m'.length), dir);
   }
 
   function sendJson(res, status, payload, headers = {}) {
@@ -1434,6 +1447,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
           else res.destroy();
         });
       }
+      if (url.pathname === '/m' || url.pathname.startsWith('/m/')) return serveMobile(req, res, url.pathname);
       return serveStatic(req, res, url.pathname);
     }
 

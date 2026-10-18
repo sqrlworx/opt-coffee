@@ -22,8 +22,9 @@ const QUESTION_LATE = [-0.1, 0.5]; // how early or late a question's sound might
 const MIN_MATCH = 0.4; // correlation below which it isn't taken as found
 // The expert's picture while b-roll plays, in fractions of the frame's width: at the top left and
 // framed like the asker's in the player (.jp-pip in public/styles.css), a 4:3 crop with rounded
-// corners, a thin white frame and a soft shadow below it.
-const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022, blur: 0.009, drop: 0.005 };
+// corners, a thin white frame and a soft shadow below it. The mobile app crops it back out to show
+// the expert in the top half of its split screen (pipRect in mobile/src/media/split.js).
+export const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022, blur: 0.009, drop: 0.005 };
 const CUT_FADE = 0.3; // seconds the cut to b-roll and back takes
 
 /**
