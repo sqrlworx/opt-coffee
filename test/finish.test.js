@@ -158,6 +158,24 @@ print(json.dumps({
   assert.deepEqual(focus, { close: 0.638, low: 0.911, small: 0.091, none: 0.6, wide: 0.5 }); // without a face, more off the top; wider than a half, no crop up or down
 });
 
+test("the page's split screen crops the take beside its b-roll to frame the face: centred across, framed down like the phone's halves", { skip }, () => {
+  const focus = py(`
+import captions
+print(json.dumps({
+    # A webcam's 16:9 take shows half its width in the left half (8:9): centred on the face, as far
+    # as the take goes.
+    'left': captions.side_focus((0.1, 0.3, 0.12, 0.2), 16 / 9),
+    'off': captions.side_focus((0.55, 0.3, 0.12, 0.2), 16 / 9),
+    # A phone's 3:4 take shows all of its width, and is framed down as the phone's halves are, for
+    # this shape.
+    'phone': captions.side_focus((0.35, 0.3, 0.3, 0.3), 3 / 4),
+    'phone half': captions.half_focus((0.35, 0.3, 0.3, 0.3), 3 / 4),
+    'none': captions.side_focus(None, 3 / 4),
+}))
+`);
+  assert.deepEqual(focus, { left: [0, 0.5], off: [0.72, 0.5], phone: [0.5, 0.792], 'phone half': 0.548, none: [0.5, 0.6] });
+});
+
 test('the voice is matched towards natural speech: dull microphones brought up, missing bands left alone', { skip }, () => {
   const gains = py(`
 import numpy as np, sound

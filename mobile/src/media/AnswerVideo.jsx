@@ -1,11 +1,12 @@
-// One answer's video, with its b-roll cut in as it is in the joined video (src/video.js), but split
-// screen: from `broll.start` for `broll.length` seconds, the expert moves to the top half and the
-// b-roll plays in the bottom half, muted (the expert's sound carries on) and kept in step. A video's
-// own controls would end up in one half, so it gets these instead: play, the time, and a timeline
-// marking where the b-roll is. Between cuts the take has the whole stage. Each fills its place,
-// cropping more off the top than the bottom, except that a take alone on a phone turned sideways is
-// shown whole. Without b-roll it's the video with its own controls, as it was. `videoRef` is the
-// answer's <video>, for its transcript to follow.
+// One answer's video, with its b-roll cut in as the phone plays it in the joined video: from
+// `broll.start` for `broll.length` seconds, split screen, the expert moving to the top half while the
+// b-roll plays in the bottom half, or full screen, the b-roll fading in over the whole stage. The
+// b-roll is muted (the expert's sound carries on) and kept in step. A video's own controls would end
+// up in one half, so it gets these instead: play, the time, and a timeline marking where the b-roll
+// is. Between cuts the take has the whole stage. Each fills its place, cropping more off the top than
+// the bottom, except that a take alone on a phone turned sideways is shown whole. Without b-roll it's
+// the video with its own controls, as it was. `videoRef` is the answer's <video>, for its transcript
+// to follow.
 import { useEffect, useRef, useState } from 'react';
 import { fmtDuration } from '../format.js';
 import { color } from '../theme.js';
@@ -83,13 +84,14 @@ function BrollStage({ src, captions, broll, videoRef }) {
   const toggle = () => (video.current.paused || video.current.ended ? video.current.play().catch(() => {}) : video.current.pause());
   const seek = (t) => (video.current.currentTime = Math.max(0, Math.min(t, view.total || t)));
   const { total } = view;
+  const split = view.cut && !broll.full; // full-screen b-roll covers the take where it is
 
   return (
     <div ref={stageRef} className="split-stage" style={{ ...stageStyle, borderRadius: 12 }} onClick={toggle}>
-      <video ref={video} src={src} preload="metadata" playsInline style={layer(view.cut ? 'top' : 'full', wide, { fit: wide && !view.cut ? 'contain' : 'cover', extra: { objectPosition: view.cut ? focusPosition() : 'center' } })}>
+      <video ref={video} src={src} preload="metadata" playsInline style={layer(split ? 'top' : 'full', wide, { fit: wide && !split ? 'contain' : 'cover', extra: { objectPosition: split ? focusPosition() : 'center' } })}>
         {captions ? <track key={captions} kind="subtitles" src={captions} srcLang="en" label="English" /> : null}
       </video>
-      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer('bottom', wide, { shown: view.cut, z: 1 })} />
+      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer(broll.full ? 'full' : 'bottom', wide, { shown: view.cut, z: 1 })} />
       {view.playing ? null : <BigPlay onPress={toggle} />}
       <div style={controlsBar} onClick={(e) => e.stopPropagation()}>
         <CtrlButton label={view.playing ? 'Pause' : 'Play'} onPress={toggle}>

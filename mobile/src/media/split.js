@@ -1,8 +1,8 @@
 // Split screen, the phone's picture in picture. Where the page shows one picture over another (the
-// asker over the joined video while their question plays, the expert over their b-roll, the asker
-// over the camera while recording), a phone splits the player in two instead: the expert in the top
-// half, and the asker or the b-roll in the bottom half, each at full width. This is the arithmetic
-// for that, kept apart from React so it can be tested (test/split.test.js).
+// asker over the joined video while their question plays, the asker over the camera while
+// recording) or beside it (the expert beside split-screen b-roll), a phone splits the player in two:
+// the expert in the top half, and the asker or the b-roll in the bottom half, each at full width.
+// This is the arithmetic for that, kept apart from React so it can be tested (test/split.test.js).
 
 // Where a layer sits on the stage, an upright player (9:16): `top` and `bottom` are its halves, and
 // `full` is all of it, for a lone picture before or after a split. A stage wider than tall
@@ -41,9 +41,9 @@ export const partAt = (parts, t) => parts.find((p) => t < p.end) ?? parts.at(-1)
 
 // What's on screen `t` seconds into the joined video (once it's `started`): `asking`, the question
 // being played at the start of its take, up to where the answer starts, with `at`, how far into the
-// question's sound (which starts a little after the take does); or `cut`, the answer's b-roll, with
-// `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under the expert,
-// if either.
+// question's sound (which starts a little after the take does); or `cut`, the answer's split-screen
+// b-roll, with `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under
+// the expert, if either. Full-screen b-roll is cut into the joined video itself, so it needs no split.
 export function moment(parts, t, started = true) {
   const part = partAt(parts, t);
   if (!part || !started) return { part, split: null, asking: null, cut: null, at: 0, clipAt: 0 };
@@ -52,12 +52,13 @@ export function moment(parts, t, started = true) {
   const asking = q.answerStart != null && into >= 0 && into < q.answerStart ? q : null;
   const at = asking ? into - (part.questionStart ?? 0) : 0;
   const b = q.broll;
-  const cut = !asking && b?.video && b.start != null && into >= b.start && into < b.start + b.length ? b : null;
+  const cut = !asking && b?.video && !b.full && b.start != null && into >= b.start && into < b.start + b.length ? b : null;
   return { part, split: asking ? 'question' : cut ? 'broll' : null, asking, cut, at, clipAt: cut ? into - b.start : 0 };
 }
 
-// The same for one answer's own video with its b-roll (the planner, and published answers when they
-// weren't joined): the expert in the top half while the b-roll plays in the bottom half.
+// Whether one answer's own video is in its b-roll at `t` (the planner, and published answers when
+// they weren't joined): split screen, the expert in the top half while the b-roll plays in the
+// bottom half, or full screen, the b-roll over all of it.
 export const brollAt = (broll, t) => Boolean(broll?.video && broll.start != null && t >= broll.start && t < broll.start + broll.length);
 
 // The captions over the joined video, [start, end, text] over all of it: each answer's question and
@@ -78,13 +79,13 @@ export function cutCue(part, t) {
   return cue && [part.start + cue[0], part.start + cue[1], cue[2]];
 }
 
-// Where the expert's picture is in a frame of the joined video while b-roll plays, as the server
-// draws it there (cutawayFilter in src/video.js, which this mirrors): a 4:3 crop of their take at
-// the top left, in a thin white frame with rounded corners. The rectangle, [x, y, width, height] in
-// pixels of a frame `width` wide, is that picture inside its frame, brought in past the rounded
-// corners, so the top half shows just the expert, cropped from the video already playing. The
-// phone's own copy of the joined video has no b-roll cut in, so this is for a video joined before
-// there was one.
+// Where the expert's picture is in a frame of the page's joined video while b-roll plays in its
+// corner, as the server draws it there (cutawayFilter in src/video.js, which this mirrors): a 4:3
+// crop of their take at the top left, in a thin white frame with rounded corners. The rectangle,
+// [x, y, width, height] in pixels of a frame `width` wide, is that picture inside its frame, brought
+// in past the rounded corners, so the top half shows just the expert, cropped from the video already
+// playing. The phone's own copy of the joined video has no split-screen b-roll cut in, so this is for
+// a video joined before there was one, when all b-roll was cut in that way.
 export const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022 };
 
 export function pipRect(width) {

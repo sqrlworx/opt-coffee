@@ -30,6 +30,7 @@ TALLEST = 9 / 20  # a tall phone's screen, in fullscreen
 MOBILE_SIZE = 0.06  # as a share of as much of the copy's width as the whole player shows
 MOBILE_MARGIN = 1 / 30  # how far above the bottom of the expert's half they sit, as a share of the copy's height
 FOCUS = 0.6  # how far down a picture a half's crop sits without a face to go by (see half_focus)
+SIDE = 8 / 9  # the left half of the page's 16:9 frame, beside split-screen b-roll (see side_focus)
 EMPHASIS_SHARE = 0.4  # at most this share of phrases gets an emphasised word
 
 EXPERT = "&H00FFFFFF"  # ASS colours are &HAABBGGRR
@@ -234,13 +235,14 @@ def caption_top(height: int) -> float:
     return height * (1 - BOTTOM) - 1.3 * 1.12 * SIZE * height
 
 
-def half_focus(face: tuple | None, aspect: float) -> float:
+def half_focus(face: tuple | None, aspect: float, half: float = HALF) -> float:
     """How far down a picture of shape `aspect` (width / height) the crop sits that fills a half of
-    the phone's player with it, to frame `face` (YuNet's box, x, y, w, h, as fractions of the
-    picture): as CSS's object-position, 0 at the top and 1 at the bottom. The chin always stays in;
-    then the top of the head too, if there's room, with the eyes a third of the way down if there's
-    room for that. Without a face it's FOCUS, a little lower than the middle, as faces are."""
-    shown = aspect / HALF  # how much of the picture's height a half shows
+    the phone's player with it (or another box of shape `half`), to frame `face` (YuNet's box, x, y,
+    w, h, as fractions of the picture): as CSS's object-position, 0 at the top and 1 at the bottom.
+    The chin always stays in; then the top of the head too, if there's room, with the eyes a third of
+    the way down if there's room for that. Without a face it's FOCUS, a little lower than the middle,
+    as faces are."""
+    shown = aspect / half  # how much of the picture's height a half shows
     if shown >= 1:
         return 0.5
     if face is None:
@@ -252,6 +254,20 @@ def half_focus(face: tuple | None, aspect: float) -> float:
     highest = y - 0.3 * h  # the head in
     top = max(lowest, min(highest, y + 0.35 * h - shown / 3))
     return round(float(np.clip(top / (1 - shown), 0, 1)), 3)
+
+
+def side_focus(face: tuple | None, aspect: float) -> tuple[float, float]:
+    """Where the left half of the page's split screen (SIDE) crops a take of shape `aspect` to fill
+    it, framing `face` (as in half_focus): (across, down), as CSS's object-position. Across, the face
+    is centred as far as the take allows, since the page records 16:9 and the half shows only the
+    middle half of that; down, it's framed as in the phone's halves. Without a face it's the middle
+    across and FOCUS down."""
+    shown = SIDE / aspect  # how much of the take's width the half shows
+    across = 0.5
+    if face is not None and shown < 1:
+        x, _, w, _ = face
+        across = round(float(np.clip((x + w / 2 - shown / 2) / (1 - shown), 0, 1)), 3)
+    return across, half_focus(face, aspect, SIDE)
 
 
 def _mobile_layout(width: int, height: int, focus: float) -> tuple[int, int, float]:

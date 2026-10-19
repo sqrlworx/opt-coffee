@@ -39,6 +39,13 @@ test('b-roll takes the bottom half, timed from its start in the take', () => {
   assert.equal(moment(parts, 19).split, null, 'it ends after its length');
 });
 
+test('full-screen b-roll doesn’t split: the joined video has it cut in', () => {
+  const full = joinedParts([asked, { ...withBroll, broll: { ...withBroll.broll, full: true } }], chapters);
+  const m = moment(full, 17);
+  assert.deepEqual([m.split, m.cut], [null, null]);
+  assert.equal(brollAt(full[1].q.broll, 17 - 10), true, 'an answer’s own video still cuts to it, over the whole stage');
+});
+
 test('an answer’s own video splits for its b-roll the same way', () => {
   assert.equal(brollAt(withBroll.broll, 7), true);
   assert.equal(brollAt(withBroll.broll, 9), false);

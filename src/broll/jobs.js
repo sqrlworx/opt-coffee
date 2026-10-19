@@ -114,6 +114,7 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
           end,
           cues: t?.cues ?? null,
           words: t?.words ?? null,
+          full: Boolean(q.broll_full),
         });
         // Too short for it, after a re-recording: it stays, unplaced, for a longer take.
         if (still.run(placed?.start ?? null, placed?.length ?? null, id, clip, take).changes) return;

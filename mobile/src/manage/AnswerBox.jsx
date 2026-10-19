@@ -10,7 +10,7 @@ import { AnswerVideo } from '../media/AnswerVideo.jsx';
 import { AnswerTranscript } from '../media/transcript.jsx';
 import { Video } from '../media/Video.jsx';
 import { color, font, radius } from '../theme.js';
-import { Button, Disclosure, Field, Hint, Label, Row, Small, Warn } from '../ui/index.jsx';
+import { Button, Checkbox, Disclosure, Field, Hint, Label, Row, Small, Warn } from '../ui/index.jsx';
 
 // `plan` is the planner's state (Manage.jsx): what each question has, and what can be done to it.
 export function AnswerBox({ qid, plan }) {
@@ -56,9 +56,10 @@ export function AnswerBox({ qid, plan }) {
 }
 
 // Under a recorded answer, the expert describes a shot to cut away to while they talk, or uploads a
-// video of their own (from the phone's camera roll). The server makes the shot, which takes a few
-// minutes, or gets the video ready, and places it where it fits what they're saying; the answer's
-// video above then plays with it cut in. What they've typed is kept while the planner redraws.
+// video of their own (from the phone's camera roll), split screen or, if they tick Full screen first,
+// full screen. The server makes the shot, which takes a few minutes, or gets the video ready, and
+// places it where it fits what they're saying; the answer's video above then plays with it cut in.
+// What they've typed, and ticked, is kept while the planner redraws.
 function BrollPanel({ qid, plan }) {
   const { makesBroll } = useApp();
   const { m } = plan;
@@ -76,6 +77,7 @@ function BrollPanel({ qid, plan }) {
 
   const form = (again = false) => {
     const draft = m.brollDrafts.get(qid) ?? (again ? (broll?.prompt ?? '') : '');
+    const full = m.brollFull.get(qid) ?? (again && Boolean(broll?.full));
     return (
       <View style={{ gap: 8 }}>
         <Field
@@ -87,6 +89,8 @@ function BrollPanel({ qid, plan }) {
           aria-label={makesBroll ? 'Describe the b-roll' : 'What your video shows'}
           placeholder={makesBroll ? 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"' : 'What your video shows, e.g. "Hands sketching a wireframe on paper"'}
         />
+        {/* Before the buttons: picking a video starts uploading it. */}
+        <Checkbox checked={full} onChange={(on) => (m.brollFull.set(qid, on), plan.bump())} label="Full screen" />
         <Row wrap gap={8}>
           {makesBroll ? (
             <Button
@@ -96,13 +100,14 @@ function BrollPanel({ qid, plan }) {
               onPress={async () => {
                 const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: draft });
                 m.brollDrafts.delete(qid);
+                m.brollFull.delete(qid);
                 plan.setBroll(qid, res.broll);
               }}
             />
           ) : null}
           <Button kind={makesBroll ? 'ring' : 'primary'} small title="Upload a video" onPress={() => file.current.click()} />
           {broll ? <Button kind="ring" small title="Remove b-roll" onPress={remove} /> : null}
-          {broll?.status === 'ready' ? <Button kind="link" small title="Cancel" onPress={() => (m.brollDrafts.delete(qid), plan.bump())} /> : null}
+          {broll?.status === 'ready' ? <Button kind="link" small title="Cancel" onPress={() => (m.brollDrafts.delete(qid), m.brollFull.delete(qid), plan.bump())} /> : null}
         </Row>
         <input
           ref={file}
@@ -112,13 +117,13 @@ function BrollPanel({ qid, plan }) {
           onChange={(e) => {
             const picked = e.target.files[0];
             e.target.value = ''; // so picking the same file again still counts
-            if (picked) plan.uploadBroll(qid, picked, draft);
+            if (picked) plan.uploadBroll(qid, picked, draft, full);
           }}
         />
         <Hint>
           {makesBroll
-            ? "A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. Or upload a video of your own, saying above what it shows. It's cut in where you talk about it, and while it plays your answer moves to the top half of the screen."
-            : "A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it; while it plays your answer moves to the top half of the screen."}
+            ? "A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. Or upload a video of your own, saying above what it shows. It's cut in where you talk about it, and while it plays your answer moves to the top half of the screen. Tick Full screen before uploading a video to have it take the whole screen instead, with your voice over it."
+            : "A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it; while it plays your answer moves to the top half of the screen. Tick Full screen before uploading to have it take the whole screen instead, with your voice over it."}
         </Hint>
       </View>
     );
@@ -179,7 +184,7 @@ function BrollPanel({ qid, plan }) {
         {head}
         {broll.start != null ? (
           <Small style={{ color: color.muted }}>
-            Cut in at {fmtDuration(broll.start)}–{fmtDuration(broll.start + broll.length)}, where it fits what you're saying. Play your answer to see it.
+            Cut in {broll.full ? 'full screen ' : ''}at {fmtDuration(broll.start)}–{fmtDuration(broll.start + broll.length)}, where it fits what you're saying. Play your answer to see it.
           </Small>
         ) : (
           <Warn>This answer is too short for its b-roll, so it’s left out. Re-record a longer answer{broll.upload ? '' : ', or make new b-roll to fit this one'}.</Warn>
@@ -191,7 +196,7 @@ function BrollPanel({ qid, plan }) {
           </Disclosure>
         ) : null}
         <Row wrap gap={8}>
-          <Button kind="ring" small title="Change" onPress={() => (m.brollDrafts.set(qid, broll.prompt ?? ''), plan.bump())} />
+          <Button kind="ring" small title="Change" onPress={() => (m.brollDrafts.set(qid, broll.prompt ?? ''), m.brollFull.set(qid, broll.full), plan.bump())} />
           <Button kind="ring" small title="Remove" onPress={remove} />
         </Row>
       </>

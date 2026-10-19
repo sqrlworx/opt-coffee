@@ -149,7 +149,7 @@ test('the expert describes b-roll for an answer; it is made to fit, and placed w
 
   const res = await expert('POST', `/api/questions/${qid}/broll`, { prompt: `  ${prompt}\n` });
   assert.equal(res.status, 200);
-  assert.deepEqual(res.broll, { prompt, upload: null, status: 'pending', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(res.broll, { prompt, upload: null, status: 'pending', shot: null, video: null, start: null, length: null, full: false });
   await app.idle();
 
   // As long as the answer has room for: 5 seconds, the most made, out of an 18-second answer. The
@@ -237,7 +237,7 @@ test('asking again replaces the b-roll, removing it deletes it, and failures are
   assert.equal(res.status, 200);
   await app.idle();
   const { broll } = (await expert('GET', `/api/questions/${qid}`)).question;
-  assert.deepEqual(broll, { prompt: 'A pan on fire [fail]', upload: null, status: 'failed', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(broll, { prompt: 'A pan on fire [fail]', upload: null, status: 'failed', shot: null, video: null, start: null, length: null, full: false });
   assert.ok(!existsSync(join(mediaDir, row(qid).broll_video)));
 });
 
@@ -263,9 +263,9 @@ test('publishing waits for b-roll being made, then publishes it with the answer 
   await app.idle();
 
   const q = row(qid);
-  assert.deepEqual(joins.at(-1).map((tk) => tk.broll), [{ file: join(mediaDir, q.broll_video), start: q.broll_start, length: q.broll_length }]);
+  assert.deepEqual(joins.at(-1).map((tk) => tk.broll), [{ file: join(mediaDir, q.broll_video), start: q.broll_start, length: q.broll_length, full: false }]);
   const { answers } = await reader('GET', `/api/office-hours/${ohId}`);
-  assert.deepEqual(answers[0].broll, { video: `/media/${q.broll_video}`, start: q.broll_start, length: q.broll_length });
+  assert.deepEqual(answers[0].broll, { video: `/media/${q.broll_video}`, start: q.broll_start, length: q.broll_length, full: false });
   assert.equal((await reader.media(answers[0].broll.video)).status, 200); // public, like the answer
   assert.ok(!existsSync(join(mediaDir, leftOver)));
   assert.equal(row(other.id).broll_status, null);
@@ -319,7 +319,7 @@ test('the expert uploads a video of their own as b-roll; as much of its start as
   // first 10.8 seconds are used, which the expert is told.
   const res = await upload({ name: 'Kitchen\tprep.mov\n', description: '  Chopping onions\n on a board ' }, take('kitchen', 30), 'video/quicktime');
   assert.equal(res.status, 200);
-  assert.deepEqual(res.broll, { prompt: 'Chopping onions on a board', upload: 'Kitchen prep.mov', status: 'pending', shot: null, video: null, start: null, length: null });
+  assert.deepEqual(res.broll, { prompt: 'Chopping onions on a board', upload: 'Kitchen prep.mov', status: 'pending', shot: null, video: null, start: null, length: null, full: false });
   assert.deepEqual(res.trimmed, { from: 30, to: 10.8 });
   assert.deepEqual(prepared.at(-1), { upload: 'take: kitchen 30s', seconds: 10.8 });
   assert.equal(readdirSync(mediaDir).length, files + 1); // the clip; not the upload itself
@@ -365,6 +365,43 @@ test('an uploaded video is placed right away, even while other b-roll is being m
   assert.ok(stopped.includes('Steam over a pot of soup'));
   assert.ok(!made.some((m) => m.prompt === 'Steam over a pot of soup'));
   assert.deepEqual([row(first.qid).broll_status, row(first.qid).broll_upload, row(first.qid).broll_prompt], ['ready', 'soup.mp4', null]);
+});
+
+test('an uploaded video can be full screen instead of split screen, through re-recording, publishing and joining', async () => {
+  const expert = await register('full_host');
+  const asker = await register('full_asker');
+  const reader = client();
+  const { ohId, qid } = await answered(expert, asker, 20, 2);
+  const upload = (query) => expert('PUT', `/api/questions/${qid}/broll/video?${new URLSearchParams({ name: 'whisking.mov', ...query })}`, take('whisking', 4), 'video/quicktime');
+
+  const res = await upload({ full: '1' });
+  assert.deepEqual([res.status, res.broll.full], [200, true]);
+  await app.idle();
+  assert.deepEqual([row(qid).broll_status, row(qid).broll_full], ['ready', 1]);
+  // Placed again in a new take, it's still full screen.
+  await expert('PUT', `/api/questions/${qid}/video?answerStart=2`, take('again', 16));
+  await app.idle();
+  const { broll } = (await expert('GET', `/api/questions/${qid}`)).question;
+  assert.deepEqual([broll.status, broll.start != null, broll.full], ['ready', true, true]);
+
+  // Uploading again without it, making b-roll and removing it all go back to split screen.
+  assert.equal((await upload({})).broll.full, false);
+  assert.equal((await upload({ full: '1' })).broll.full, true);
+  assert.equal((await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'A whisk beating eggs' })).broll.full, false);
+  await app.idle();
+  assert.equal((await upload({ full: '1' })).broll.full, true);
+  await expert('DELETE', `/api/questions/${qid}/broll`);
+  assert.equal(row(qid).broll_full, 0);
+
+  // Published, and joined, full screen; readers get it that way.
+  assert.equal((await upload({ full: '1' })).status, 200);
+  await app.idle();
+  assert.equal((await expert('POST', `/api/office-hours/${ohId}/publish`)).status, 200);
+  await app.idle();
+  const q = row(qid);
+  assert.deepEqual(joins.at(-1).map((tk) => tk.broll), [{ file: join(mediaDir, q.broll_video), start: q.broll_start, length: q.broll_length, full: true }]);
+  const { answers } = await reader('GET', `/api/office-hours/${ohId}`);
+  assert.equal(answers[0].broll.full, true);
 });
 
 test('on startup, an uploaded video being placed is placed, and one that has gone is marked failed, not made', async () => {

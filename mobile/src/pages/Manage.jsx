@@ -55,6 +55,7 @@ function Planner({ data, reload }) {
       finishing: 0, // takes kept but still being finished by the browser, about to start saving
       local: new Map(), // question id -> object URL of its saved take, to keep playing from
       brollDrafts: new Map(), // question id -> b-roll description being typed
+      brollFull: new Map(), // question id -> whether a video uploaded as its b-roll is to be full screen
       brollUploads: new Map(), // question id -> { name, sent (0 to 1), stop } for a video being uploaded
       // The answer order saves itself whenever it changes, so leaving or refreshing never loses it.
       edits: 0,
@@ -204,8 +205,9 @@ function Planner({ data, reload }) {
       bump();
     },
     // Uploads a video the expert picked as a question's b-roll, with what they typed as what it
-    // shows. The server then gets it ready, in a few seconds, and places it.
-    async uploadBroll(qid, file, description) {
+    // shows, full screen or split screen. The server then gets it ready, in a few seconds, and
+    // places it.
+    async uploadBroll(qid, file, description, full) {
       if (file.type && !file.type.startsWith('video/')) return toast('Choose a video file.', 'error');
       if (file.size > MAX_BROLL_UPLOAD) return toast('That video is too large: b-roll can be up to 500 MB. Trim it, or export it smaller.', 'error');
       const up = { name: file.name, sent: 0, stop: new AbortController() };
@@ -213,6 +215,7 @@ function Planner({ data, reload }) {
       bump();
       const query = new URLSearchParams({ name: file.name });
       if (description.trim()) query.set('description', description.trim());
+      if (full) query.set('full', '1');
       try {
         const res = await sendFile('PUT', `/api/questions/${qid}/broll/video?${query}`, file, {
           signal: up.stop.signal,
@@ -222,6 +225,7 @@ function Planner({ data, reload }) {
           },
         });
         s.brollDrafts.delete(qid);
+        s.brollFull.delete(qid);
         s.brolls.set(qid, res.broll);
         if (res.trimmed) toast(`Your video is ${Math.round(res.trimmed.from)} seconds long, and this answer has room for ${Math.round(res.trimmed.to)} seconds of b-roll, so its start is used.`);
       } catch (err) {

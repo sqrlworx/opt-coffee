@@ -31,7 +31,8 @@ export function createFinisher({
     /**
      * Renders each take into a finished part; the parts join without re-encoding.
      * @param {{input: string, output: string, answer_start: number|null, cues: [number, number, string][]|null, words: [number, number, string][]|null,
-     *   cutaway: {input: string, filter: string}|null}[]} takes  cutaway: b-roll, and the filter graph that cuts it in (see finish.py)
+     *   cutaway: {input: string, layout: 'split'|'corner', filter: string, mobile_filter: string|null}|null}[]} takes  cutaway: b-roll, split
+     *   screen or full screen, and the filter graphs that cut it in, and into the phone's copy when it's full screen (see finish.py)
      * @param {string} dir  scratch directory for the job file
      * @returns {Promise<object>} the finisher's report: what was measured and done, per take
      */

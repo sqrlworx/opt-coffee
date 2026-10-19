@@ -270,4 +270,8 @@ test('Claude picks where b-roll goes when configured, kept where it can go, with
   // Without a transcript there's nothing to ask about.
   assert.deepEqual(await moderator.placeBroll({ ...input, words: null, cues: null }), placeBroll({ ...input, words: null }));
   assert.equal(calls.length, 3);
+  // It's told when the b-roll is full screen rather than split screen, which hides the expert more.
+  reply = () => ({ start: 7.2 });
+  await moderator.placeBroll({ ...input, full: true });
+  assert.equal(calls.at(-1).full, true);
 });

@@ -176,7 +176,8 @@ function loadQuestions(db, ohId, viewer) {
  * The b-roll the expert asked for in an answer, as only they see it before publishing. `video` once
  * it's made, with `shot`, what was filmed for their description; `start` and `length` place it in
  * the take once it's placed, and stay null if the take is too short for it. A clip they uploaded
- * has `upload`, its file's name, and `prompt` only if they said what it shows.
+ * has `upload`, its file's name, and `prompt` only if they said what it shows. `full` is true when
+ * it's full screen rather than split screen, which only an uploaded clip can be.
  */
 function brollOf(q) {
   if (!q.broll_status) return null;
@@ -189,6 +190,7 @@ function brollOf(q) {
     video: ready ? mediaUrl(q.broll_video) : null,
     start: ready ? q.broll_start : null,
     length: ready ? q.broll_length : null,
+    full: Boolean(q.broll_full),
   };
 }
 
@@ -224,7 +226,7 @@ function questionView(db, q, viewer) {
     publishedAnswerTranscript: answerTranscriptOf(db, q.published_answer_video, q.published_answer_start),
     publishedQuestionCues: questionCaptions({ body: q.body, cues: audioTranscript?.cues }, q.published_answer_start).cues,
     broll: brollOf(q),
-    publishedBroll: q.published_broll ? { video: mediaUrl(q.published_broll), start: q.published_broll_start, length: q.published_broll_length } : null,
+    publishedBroll: q.published_broll ? { video: mediaUrl(q.published_broll), start: q.published_broll_start, length: q.published_broll_length, full: Boolean(q.published_broll_full) } : null,
   };
 }
 
@@ -236,7 +238,8 @@ function stripPrivate(q) {
 /**
  * A published answer as readers see it. `answerStart` is where the answer begins, after the
  * question; `questionCues` caption the question until then, timed from the start of the take.
- * `broll` is cut away to during the answer, from `start` for `length` seconds into the take.
+ * `broll` is cut away to during the answer, from `start` for `length` seconds into the take, split
+ * screen or, with `full`, full screen.
  */
 const publishedAnswer = (q) => ({
   ...stripPrivate(q),
@@ -257,7 +260,8 @@ function publishedAnswers(questions) {
 
 /**
  * The published answers as one video, or null without ffmpeg. `mobileSrc` is its copy for the mobile
- * app: upright, without the b-roll, and with burned-in captions placed for its split screen (null
+ * app: upright, with full-screen b-roll but not split-screen b-roll (the app plays that in half of
+ * its player), and with burned-in captions placed for its split screen (null
  * for a video joined before there were copies; one joined before they were upright is landscape
  * until it's joined again). `chapters` place each answer in it; `captions` is true where its
  * captions are burned into the picture, so players don't draw them again.
@@ -1137,7 +1141,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       await brollRoom(q);
       // The office hour may have been published meanwhile.
       const current = editableQuestion(params.id, user);
-      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = NULL, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(prompt, randomName('mp4'), q.id);
+      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = NULL, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL, broll_full = 0 WHERE id = ?").run(prompt, randomName('mp4'), q.id);
       pruneBroll([current.broll_video]);
       brollJobs.cancel(q.id);
       brollJobs.generate(q.id);
@@ -1147,9 +1151,10 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   );
 
   // Or the expert uploads a clip of their own, as the raw body: any video ffmpeg reads (a phone's
-  // MOV, say), with `?name=`, its file's name, and `?description=`, what it shows, if they say. It's
-  // made into a clip like the ones that are made, of as much of its start as the answer has room
-  // for (src/broll/index.js), then placed the same way, right away. It replaces any b-roll before it.
+  // MOV, say), with `?name=`, its file's name, `?description=`, what it shows, if they say, and
+  // `?full=1` for full screen rather than split screen. It's made into a clip like the ones that are
+  // made, of as much of its start as the answer has room for (src/broll/index.js), then placed the
+  // same way, right away. It replaces any b-roll before it.
   route(
     'PUT',
     '/api/questions/:id/broll/video',
@@ -1158,6 +1163,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const q = editableQuestion(params.id, user);
       const description = str(url.searchParams.get('description'), 'Description', { max: MAX_BROLL_PROMPT, optional: true })?.replace(/\s+/g, ' ') || null;
       const name = Array.from(String(url.searchParams.get('name') ?? '').replace(/[\p{C}\s]+/gu, ' ').trim()).slice(0, MAX_FILE_NAME).join('') || 'video';
+      const full = url.searchParams.get('full') === '1';
       // Cross-site forms can't send these content types, so this also blocks CSRF. What the file
       // really is, ffmpeg finds out.
       const type = contentType(req);
@@ -1183,7 +1189,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       } finally {
         await rm(upload, { force: true });
       }
-      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL WHERE id = ?").run(description, name, clip, q.id);
+      db.prepare("UPDATE questions SET broll_prompt = ?, broll_upload = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL, broll_full = ? WHERE id = ?").run(description, name, clip, full ? 1 : 0, q.id);
       pruneBroll([current.broll_video]);
       brollJobs.cancel(q.id);
       brollJobs.place(q.id);
@@ -1200,7 +1206,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     '/api/questions/:id/broll',
     ({ params, user }) => {
       const q = editableQuestion(params.id, user);
-      db.prepare('UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id = ?').run(q.id);
+      db.prepare('UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL, broll_full = 0 WHERE id = ?').run(q.id);
       pruneBroll([q.broll_video]);
       brollJobs?.cancel(q.id);
       return { broll: null };
@@ -1239,7 +1245,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         const placed = "broll_status = 'ready' AND broll_start IS NOT NULL";
         const snapshot = db.prepare(
           `UPDATE questions SET published_position = ?, published_answer_video = answer_video, published_answer_start = answer_start,
-             published_broll = IIF(${placed}, broll_video, NULL), published_broll_start = IIF(${placed}, broll_start, NULL), published_broll_length = IIF(${placed}, broll_length, NULL)
+             published_broll = IIF(${placed}, broll_video, NULL), published_broll_start = IIF(${placed}, broll_start, NULL), published_broll_length = IIF(${placed}, broll_length, NULL),
+             published_broll_full = IIF(${placed}, broll_full, NULL)
            WHERE id = ?`,
         );
         working.forEach(([id], i) => snapshot.run(i + 1, id));
@@ -1251,7 +1258,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         // Nor can b-roll that wasn't published with an answer.
         const leftoverBroll = 'FROM questions WHERE office_hour_id = ? AND broll_video IS NOT NULL AND published_broll IS NOT broll_video';
         const clips = db.prepare(`SELECT broll_video ${leftoverBroll}`).all(oh.id).map((r) => r.broll_video);
-        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
+        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL, broll_full = 0 WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
         return [names, clips];
       });
       pruneVideos(unused);

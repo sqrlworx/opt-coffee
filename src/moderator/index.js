@@ -123,8 +123,9 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
 
     /**
      * @param {{description: string, question: string, clip: number, answerStart: number|null, end: number,
-     *   words: [number, number, string][]|null, cues: [number, number, string][]|null}} input  the b-roll's
-     *   description and length (`clip`), and the take: where its answer starts, how long it is, and its transcript
+     *   words: [number, number, string][]|null, cues: [number, number, string][]|null, full?: boolean}} input  the b-roll's
+     *   description and length (`clip`), and the take: where its answer starts, how long it is, and its transcript;
+     *   `full` when the b-roll is full screen rather than split screen
      * @returns {Promise<{start: number, length: number} | null>}  null when the answer is too short for b-roll
      */
     async placeBroll(input) {
@@ -133,7 +134,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
       const cues = (input.cues ?? []).filter(([start, end]) => (start + end) / 2 >= (input.answerStart ?? 0));
       if (!llm || !placed || !cues.length) return placed;
       try {
-        const { start } = await llm.placeBroll({ description: input.description, question: input.question, cues, ...range });
+        const { start } = await llm.placeBroll({ description: input.description, question: input.question, cues, ...range, ...(input.full ? { full: true } : {}) });
         // LLM output is untrusted: kept where the b-roll can go.
         if (Number.isFinite(start)) return { start: Math.round(Math.min(range.to, Math.max(range.from, start)) * 1000) / 1000, length: placed.length };
       } catch (err) {

@@ -30,7 +30,8 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
     {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null, "mobile_size": [1080, 1440],
                 "asker_video": "media/q.mp4" or null,
                 "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
-                "cutaway": {"input": "media/b.mp4", "filter": "...", "start": 2.5, "length": 6} or null}],
+                "cutaway": {"input": "media/b.mp4", "layout": "split" or "corner", "filter": "...", "mobile_filter": "..." or null,
+                            "start": 2.5, "length": 6} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -42,16 +43,21 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
   speaker, louder words bigger and key words heavier or in italics;
 - b-roll, when the take has a cutaway: its clip, and the ffmpeg filter graph that cuts away to it
   (made by src/video.js), from [pic], the finished picture, and [2:v], the clip, to [cut]. It goes
-  under the grain and the captions. `start` and `length` are when it plays.
+  under the grain and the captions. `start` and `length` are when it plays. Split screen (`layout`
+  "split") puts the take beside the clip, from [half], the take filling the left half, which is
+  made here, framed to the expert's face (see side_focus in captions.py). Full screen ("corner")
+  fills the frame with the clip and puts the take in the corner, and fills the phone's copy with
+  the clip too, with `mobile_filter`, from [phonepic], that copy's picture, and [2:v] to [phonecut].
 
 With a `mobile_output`, the take is also written there for the mobile app, in the same pass: the
 same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
 take is 9:16), filled and cropped, so that the phone can fill its upright player with it, or either
-half of it (mobile/src/media/split.js). It has no b-roll cut in, since the phone plays the clip in
-the bottom half. The expert has the top half whenever the player splits, cropped to frame their
-face (see half_focus in captions.py), and the captions go at the bottom of that, just above the
-split. The report says where that crop is for each take (`expert_focus`), and where the crop that
-frames the asker's face in their `asker_video` is (`asker_focus`, null without a face).
+half of it (mobile/src/media/split.js). Full-screen b-roll fills it too, but split-screen b-roll
+isn't cut in, since the phone plays that clip in the bottom half. The expert has the top half
+whenever the player splits, cropped to frame their face (see half_focus in captions.py), and the
+captions go at the bottom of that, just above the split. The report says where that crop is for
+each take (`expert_focus`), and where the crop that frames the asker's face in their `asker_video`
+is (`asker_focus`, null without a face).
 
 The takes are cut into pieces of a few seconds that render in parallel. Logs go to stderr; the
 last line on stdout is a JSON report. Exits non-zero on failure.
@@ -294,8 +300,9 @@ def placement(size: tuple[int, int], out: tuple[int, int] = (OUT_W, OUT_H), fill
 
 
 def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, mobile_ass: Path | None, fonts: Path, tmp: Path) -> None:
-    """Encodes the take to `output`, and to `mobile_output` if it has one: upright, without the
-    b-roll, and with `mobile_ass`, its captions placed for the phone. One pass makes both."""
+    """Encodes the take to `output`, and to `mobile_output` if it has one: upright, with full-screen
+    b-roll but not split-screen b-roll, and with `mobile_ass`, its captions placed for the phone. One
+    pass makes both."""
     listing = tmp / f"take{index}.txt"
     listing.write_text("".join(f"file '{p}'\n" for p in pieces))
     sharpen = "cas=strength=0.4:planes=1"  # the detail the upscale softened (luma only)
@@ -307,11 +314,28 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
     cutaway = take.get("cutaway")
     phone = take.get("mobile_output")
     pw, ph = take.get("mobile_size") or (0, 0)
-    picture = f"[0:v]setpts=N/{FPS}/TB" + (",split=2[desktop][phone];[desktop]" if phone else ",") + f"{fit_filter(info['size'])},{sharpen}"
+    split = bool(cutaway) and cutaway.get("layout") == "split"
+    copies = ["desktop", *(["phone"] if phone else []), *(["face"] if split else [])]
+    labels = "".join(f"[{c}]" for c in copies)
+    picture = f"[0:v]setpts=N/{FPS}/TB" + (f",split={len(copies)}{labels};[desktop]" if len(copies) > 1 else ",") + f"{fit_filter(info['size'])},{sharpen}"
     graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain},{burn(ass)}[v]" if cutaway else f"{picture},{grain},{burn(ass)}[v]"
+    if split:
+        # The take beside its split-screen b-roll, filling the left half, framed to the expert's face
+        # while the b-roll plays.
+        size, track = info["size"], info["track"]
+        face = None
+        if track is not None:
+            during = track[int(cutaway["start"] * FPS) : int((cutaway["start"] + cutaway["length"]) * FPS)]
+            x, y, w, h = np.median(during if len(during) else track, axis=0)
+            face = (x / size[0], y / size[1], w / size[0], h / size[1])
+        across, down = captions.side_focus(face, size[0] / size[1])
+        hw = OUT_W // 2
+        graph += f";[face]scale={hw}:{OUT_H}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={hw}:{OUT_H}:(iw-ow)*{across}:(ih-oh)*{down},{sharpen}[half]"
     if phone:
         fill = f"scale={pw}:{ph}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={pw}:{ph}"
-        graph += f";[phone]{fill},{sharpen},{grain},{burn(mobile_ass)}[vm]"
+        # Full-screen b-roll fills the phone's copy too.
+        mobile_cut = cutaway and cutaway.get("mobile_filter")
+        graph += f";[phone]{fill},{sharpen}" + (f"[phonepic];{mobile_cut};[phonecut]" if mobile_cut else ",") + f"{grain},{burn(mobile_ass)}[vm]"
     settings = [
         "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",

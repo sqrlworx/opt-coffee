@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   closed_at           TEXT,                 -- expert closed questions early
   published_at        TEXT,
   video               TEXT,                 -- the published answers joined into one video (file in the media dir)
-  video_mobile         TEXT,                 -- its copy for the mobile app: upright (3:4, or 9:16 when every take is), without the b-roll, burned-in captions placed for its split screen; NULL if joined before there were copies
+  video_mobile         TEXT,                 -- its copy for the mobile app: upright (3:4, or 9:16 when every take is), with full-screen b-roll but not split-screen b-roll, burned-in captions placed for its split screen; NULL if joined before there were copies
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
   follow_up_of        INTEGER REFERENCES office_hours(id) ON DELETE SET NULL,  -- picks up the discussion of this (published) office hour
   video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start, expert_focus, asker_focus], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late); expert_focus, asker_focus: where the phone's halves crop the expert in its copy and the asker's video to frame their faces (CSS object-position, 0-1 down), or null
@@ -61,12 +61,14 @@ CREATE TABLE IF NOT EXISTS questions (
   broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
   broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
   broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and shorter than the answer)
+  broll_full     INTEGER NOT NULL DEFAULT 0, -- 1: full screen, for a clip the expert uploaded: it fills the page's frame with the expert in the corner, and the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
   published_position     INTEGER,           -- snapshot taken at publish time: what readers see
   published_answer_video TEXT,
   published_answer_start REAL,
-  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start and length
+  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start, length and whether it's full screen
   published_broll_start  REAL,
-  published_broll_length REAL
+  published_broll_length REAL,
+  published_broll_full   INTEGER
 );
 CREATE INDEX IF NOT EXISTS questions_by_oh ON questions(office_hour_id);
 
@@ -196,6 +198,13 @@ function migrate(db) {
   if (!columns.has('broll_shot')) db.exec('ALTER TABLE questions ADD COLUMN broll_shot TEXT');
   // Experts can upload b-roll of their own.
   if (!columns.has('broll_upload')) db.exec('ALTER TABLE questions ADD COLUMN broll_upload TEXT');
+  if (!columns.has('broll_full')) {
+    // B-roll they upload can be full screen instead of split screen.
+    db.exec(`
+      ALTER TABLE questions ADD COLUMN broll_full INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE questions ADD COLUMN published_broll_full INTEGER;
+    `);
+  }
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));

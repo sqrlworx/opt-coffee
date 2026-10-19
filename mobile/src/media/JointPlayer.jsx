@@ -4,19 +4,20 @@
 //
 // The expert has the top half whenever it splits. While a question is played (the start of each
 // take, up to its `answerStart`), the asker is under them: their video for a question asked on
-// camera, kept in step with the question, and otherwise the fox saying it. While an answer's b-roll
-// plays, the clip is, in step. The rest of the time the joined video has the whole stage. The halves
-// crop the expert and the asker to frame their faces, where the server found them (the chapters'
+// camera, kept in step with the question, and otherwise the fox saying it. While an answer's
+// split-screen b-roll plays, the clip is, in step. The rest of the time the joined video has the
+// whole stage, full-screen b-roll included, which the server cuts into it. The halves crop the
+// expert and the asker to frame their faces, where the server found them (the chapters'
 // expertFocus and askerFocus).
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
 // until the stage is tapped. It plays the joined video's copy for phones where there is one: upright,
-// with no b-roll cut in, and with its burned-in captions at the bottom of the expert's half (see
-// write_mobile_ass in src/finish/captions.py). A video joined before there was one plays as the page
-// has it, the expert cropped from the corner where the server put them over the b-roll. Captions
-// that aren't burned in are drawn there too, just above the split, or low on the joined video while
-// it plays alone. So are burned-in ones while b-roll covers them, in a video joined before there were
-// copies for phones.
+// with full-screen b-roll but not split-screen b-roll cut in, and with its burned-in captions at the
+// bottom of the expert's half (see write_mobile_ass in src/finish/captions.py). A video joined before
+// there was one plays as the page has it, the expert cropped from the corner where the server put
+// them over the b-roll. Captions that aren't burned in are drawn there too, just above the split, or
+// low on the joined video while it plays alone. So are burned-in ones while b-roll covers them, in a
+// video joined before there were copies for phones.
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { blinkAt, fox } from '../../../public/fox.js';
 import { api } from '../api.js';
@@ -72,7 +73,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     for (const p of [parts[i], parts[i + 1]]) {
       if (!r.started || !p) continue;
       if (p.q.askerVideo) face(p).preload = 'auto';
-      if (p.q.broll?.video) clip(p.q).preload = 'auto';
+      if (p.q.broll?.video && !p.q.broll.full) clip(p.q).preload = 'auto';
       lipSync(p.q);
     }
     showFace(m.asking?.askerVideo ? face(m.part) : null, m.at);

@@ -140,9 +140,12 @@ export async function createClaudeModerator() {
       return ask(prompt, SUMMARY_SCHEMA);
     },
 
-    async placeBroll({ description, question, cues, length, from, to }) {
+    async placeBroll({ description, question, cues, length, from, to, full = false }) {
+      const looks = full
+        ? "it fills the screen, the expert's picture moves to a small window in the corner (on a phone it isn't seen at all), and the expert keeps talking."
+        : 'the screen splits, the expert on one side and the b-roll on the other, and the expert keeps talking.';
       const prompt = [
-        "Pick where to cut away to b-roll in one answer from an office hour's video. While the b-roll plays, it fills the frame, the expert's picture moves to a small window in the corner, and the expert keeps talking.",
+        `Pick where to cut away to b-roll in one answer from an office hour's video. While the b-roll plays, ${looks}`,
         '',
         `<question>\n${question}\n</question>`,
         `<b_roll seconds="${length.toFixed(1)}">\n${description}\n</b_roll>`,

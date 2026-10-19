@@ -519,17 +519,45 @@ function pixel(file, t, x, y) {
 }
 const near = ([r, g, b], [er, eg, eb]) => Math.abs(r - er) < 40 && Math.abs(g - eg) < 40 && Math.abs(b - eb) < 40;
 
-test('ffmpeg cuts away to b-roll: it fills the frame, and the answer moves to the top left', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+test('ffmpeg cuts away to b-roll split screen: the answer fills the left half and the b-roll the right', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
   const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
   try {
-    // A red answer, and blue b-roll, square and at another frame rate, as the generator might make it.
+    // A red answer, and blue b-roll, square and at another frame rate, as the generator might make it;
+    // then a green answer recorded upright.
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=512x512:rate=24:duration=3', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=660:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
+    const out = join(dir, 'joined.mp4');
+    const broll = { file: join(dir, 'b.mp4'), start: 1.5, length: 2 };
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4'), broll }], out);
+    assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`); // the answer's timing doesn't change
+    assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
+    const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
+    assert.ok(near(pixel(out, 1, 0.75, 0.5), red));
+    assert.ok(near(pixel(out, 2.5, 0.25, 0.5), red), 'the answer on the left');
+    assert.ok(near(pixel(out, 2.5, 0.75, 0.5), blue), 'the b-roll on the right');
+    assert.ok(near(pixel(out, 4, 0.75, 0.5), red));
+    // The upright answer sits between bars, then fills its half.
+    assert.ok(near(pixel(out, 6, 0.05, 0.5), black));
+    assert.ok(near(pixel(out, 7.5, 0.02, 0.5), green) && near(pixel(out, 7.5, 0.48, 0.02), green));
+    assert.ok(near(pixel(out, 7.5, 0.75, 0.5), blue));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ffmpeg cuts away to full-screen b-roll: it fills the frame, and the answer moves to the top left', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_full_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+  try {
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=512x512:rate=24:duration=3', '-c:v', 'libx264', join(dir, 'b.mp4'));
     const out = join(dir, 'joined.mp4');
-    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1.5, length: 2 } }], out);
-    assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`); // the answer's timing doesn't change
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1.5, length: 2, full: true } }], out);
+    assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`);
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     const [red, blue] = [[255, 0, 0], [0, 0, 255]];
     assert.ok(near(pixel(out, 1, 0.5, 0.5), red));
@@ -543,27 +571,29 @@ test('ffmpeg cuts away to b-roll: it fills the frame, and the answer moves to th
   }
 });
 
-test("ffmpeg makes the phone's copy upright, each take filling it, without the b-roll", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+test("ffmpeg makes the phone's copy upright, each take filling it, with full-screen b-roll but not split-screen b-roll", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_phone_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
   const size = (file) => execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString().trim();
   try {
-    // A red answer from a webcam, wider than tall, with blue b-roll; then a green one recorded
-    // upright, narrower than the copy.
+    // A red answer from a webcam, wider than tall, with blue b-roll split screen; a green one recorded
+    // upright, narrower than the copy; then the red one again, its b-roll full screen.
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=660:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
     const joiner = createVideoJoiner();
     const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
-    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1, length: 2 } }, { file: join(dir, 'c.mp4') }], out, phone);
+    const broll = { file: join(dir, 'b.mp4'), start: 1, length: 2 };
+    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }, { file: join(dir, 'a.mp4'), broll: { ...broll, full: true } }], out, phone);
     assert.equal(mobile, true);
     assert.equal(size(phone), '720,960'); // 3:4, as the app records answers
     const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
-    assert.ok(near(pixel(out, 2, 0.5, 0.5), blue), 'the page has the b-roll cut in');
+    assert.ok(near(pixel(out, 2, 0.75, 0.5), blue), 'the page has split-screen b-roll cut in');
     assert.ok(near(pixel(phone, 2, 0.5, 0.5), red), 'the phone plays it in its other half instead');
     assert.ok(near(pixel(phone, 2, 0.02, 0.5), red) && near(pixel(phone, 2, 0.98, 0.5), red), 'filled to the edges, its sides cropped');
     assert.ok(near(pixel(out, 5, 0.05, 0.5), black), 'the upright take between bars on the page');
     assert.ok(near(pixel(phone, 5, 0.02, 0.5), green) && near(pixel(phone, 5, 0.5, 0.02), green), "filling the phone's copy");
+    assert.ok(near(pixel(phone, 8, 0.5, 0.5), blue) && near(pixel(phone, 8, 0.02, 0.02), blue), 'full-screen b-roll fills it too');
     // When every take is 9:16, as the app recorded answers before, so is the copy: nothing is cropped.
     const tall = join(dir, 'tall.mp4');
     await joiner.join([{ file: join(dir, 'c.mp4') }, { file: join(dir, 'c.mp4') }], join(dir, 'joined_tall.mp4'), tall);
@@ -576,29 +606,51 @@ test("ffmpeg makes the phone's copy upright, each take filling it, without the b
   }
 });
 
-test('a finisher is given the b-roll and the filter that cuts it in over its picture', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+test('a finisher is given the b-roll and the filters that cut it in: beside the take it fills the left half with, or full screen, into the phone\'s copy too', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_finish_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const size = (file) => execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString().trim();
   try {
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
-    // Stands in for src/finish: its picture at 1080p is [pic], its sound is input 1 and the b-roll input 2.
+    // Stands in for src/finish: its picture at 1080p is [pic], its sound is input 1 and the b-roll
+    // input 2. Split screen takes the take filling the left half too, [half]; full screen also cuts
+    // into the phone's copy, from [phonepic] to [phonecut].
     const finisher = {
       async finish(jobs) {
-        for (const { input, output, cutaway } of jobs) {
+        for (const { input, output, mobile_output: copy, mobile_size: [pw, ph], cutaway } of jobs) {
           assert.equal(cutaway.input, join(dir, 'b.mp4'));
           assert.deepEqual([cutaway.start, cutaway.length], [1, 1.8]); // when it plays
-          ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', `[0:v]scale=1920:1080,fps=30[pic];${cutaway.filter};[cut]format=yuv420p[v]`, '-map', '[v]', '-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac', output);
+          const split = cutaway.layout === 'split';
+          assert.equal(cutaway.mobile_filter == null, split);
+          const fill = `scale=${pw}:${ph}:force_original_aspect_ratio=increase,crop=${pw}:${ph}`;
+          const graph = [
+            `[0:v]fps=30,split=${split ? 3 : 2}[d][p]${split ? '[f]' : ''}`,
+            '[d]scale=1920:1080[pic]',
+            ...(split ? ['[f]scale=960:1080:force_original_aspect_ratio=increase,crop=960:1080[half]'] : []),
+            `${cutaway.filter};[cut]format=yuv420p[v]`,
+            split ? `[p]${fill},format=yuv420p[vm]` : `[p]${fill}[phonepic];${cutaway.mobile_filter};[phonecut]format=yuv420p[vm]`,
+          ];
+          const encode = ['-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac'];
+          ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', graph.join(';'), '-map', '[v]', ...encode, output, '-map', '[vm]', ...encode, copy);
         }
         return {};
       },
     };
-    const out = join(dir, 'finished.mp4');
-    await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1, length: 1.8 } }], out);
-    assert.ok(near(pixel(out, 2, 0.5, 0.5), [0, 0, 255]));
+    const [out, phone] = [join(dir, 'finished.mp4'), join(dir, 'phone.mp4')];
+    const broll = { file: join(dir, 'b.mp4'), start: 1, length: 1.8 };
+    await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'a.mp4'), broll: { ...broll, full: true } }], out, phone);
+    assert.equal(size(out), '1920,1080'); // finished, not joined as recorded
+    const [red, blue] = [[255, 0, 0], [0, 0, 255]];
+    // Split screen: the take on the left and the b-roll on the right; the phone plays it in its other half.
+    assert.ok(near(pixel(out, 2, 0.25, 0.5), red) && near(pixel(out, 2, 0.75, 0.5), blue));
+    assert.ok(near(pixel(out, 3.5, 0.75, 0.5), red));
+    assert.ok(near(pixel(phone, 2, 0.5, 0.5), red));
+    // Full screen: the b-roll fills the frame, the expert's picture where pipBox says, and the phone's copy.
+    assert.ok(near(pixel(out, 6, 0.5, 0.5), blue));
     const [x, y, w, h] = pipBox(1920);
-    assert.ok(near(pixel(out, 2, (x + w / 2) / 1920, (y + h / 2) / 1080), [255, 0, 0])); // the expert's picture is where pipBox says
-    assert.ok(near(pixel(out, 3.5, 0.5, 0.5), [255, 0, 0]));
+    assert.ok(near(pixel(out, 6, (x + w / 2) / 1920, (y + h / 2) / 1080), red));
+    assert.ok(near(pixel(phone, 6, 0.5, 0.5), blue));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
