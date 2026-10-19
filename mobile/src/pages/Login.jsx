@@ -19,7 +19,7 @@ export default function LoginPage({ query }) {
   return (
     <View style={{ gap: 20 }}>
       <H1>Welcome to off hours</H1>
-      <Muted>Ask experts questions. Host your own office hours.</Muted>
+      <Muted>Ask experts questions. Host your own off hours.</Muted>
       <Card style={{ gap: 18 }}>
         <Field label="Username" value={f.username} onChangeText={set('username')} autoComplete="username" autoCapitalize="none" autoCorrect={false} maxLength={30} />
         {mode === 'register' ? <Field label="Display name" value={f.displayName} onChangeText={set('displayName')} autoComplete="name" maxLength={60} /> : null}

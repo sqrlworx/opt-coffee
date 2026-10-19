@@ -337,46 +337,56 @@ function askForm(oh, onAsked) {
   return form;
 }
 
-// Picks the voice a typed question is read aloud in, starting from the one the asker picked last
-// time. Each voice has a button to hear a short sample of it.
+// Picks the voice a typed question is read aloud in from a dropdown, starting from the one the asker
+// picked last time. The button beside it plays a short sample of the voice picked.
 function voicePicker() {
   let chosen = voices.some((v) => v.id === myVoice) ? myVoice : voices[0].id;
-  let playing = null; // { audio, button } of the sample being played
+  let playing = null; // the sample being played
   const PLAY = '▶';
+  const voice = () => voices.find((v) => v.id === chosen);
+  const option = (v) => h('option', { value: v.id, selected: v.id === chosen }, v.name);
+  const accents = [...new Set(voices.map((v) => v.accent).filter(Boolean))];
+  // Grouped by accent, so the closed dropdown needs only the voice's name.
+  const select = h('select', { id: 'ask-voice' }, voices.filter((v) => !v.accent).map(option), accents.map((accent) => h('optgroup', { label: accent }, voices.filter((v) => v.accent === accent).map(option))));
+  const play = h('button', { type: 'button', class: 'voice-play', 'aria-pressed': 'false' }, PLAY);
+  const label = () => {
+    play.title = `Hear ${voice().name}`;
+    play.setAttribute('aria-label', play.title);
+  };
 
   function stop() {
     if (!playing) return;
-    playing.audio.pause();
-    playing.button.textContent = PLAY;
-    playing.button.setAttribute('aria-pressed', 'false');
+    playing.pause();
     playing = null;
+    play.textContent = PLAY;
+    play.setAttribute('aria-pressed', 'false');
   }
 
-  function preview(v, button) {
-    const again = playing?.button === button;
-    stop();
-    if (again) return; // a second click stops it
+  function preview() {
+    if (playing) return stop(); // a second click stops it
+    const v = voice();
     const audio = new Audio(v.sample);
-    playing = { audio, button };
-    button.textContent = '…'; // the first preview of a voice takes a moment to make
-    button.setAttribute('aria-pressed', 'true');
-    audio.addEventListener('playing', () => playing?.audio === audio && (button.textContent = '■'));
-    audio.addEventListener('ended', () => playing?.audio === audio && stop());
+    playing = audio;
+    play.textContent = '…'; // the first preview of a voice takes a moment to make
+    play.setAttribute('aria-pressed', 'true');
+    audio.addEventListener('playing', () => playing === audio && (play.textContent = '■'));
+    audio.addEventListener('ended', () => playing === audio && stop());
     audio.addEventListener('error', () => {
-      if (playing?.audio !== audio) return;
+      if (playing !== audio) return;
       stop();
       toast(`Couldn't play ${v.name}'s voice right now`, 'error');
     });
     audio.play().catch(() => {}); // a failed load is reported by the error event
   }
 
-  const options = voices.map((v) => {
-    const radio = h('input', { type: 'radio', name: 'ask-voice', value: v.id, checked: v.id === chosen, onchange: () => (chosen = v.id) });
-    const play = h('button', { type: 'button', class: 'voice-play', 'aria-pressed': 'false', 'aria-label': `Hear ${v.name}`, title: `Hear ${v.name}` }, PLAY);
-    play.addEventListener('click', () => preview(v, play));
-    return h('div', { class: 'voice' }, h('label', {}, radio, h('span', { class: 'voice-name' }, v.name), v.accent ? h('span', { class: 'voice-accent' }, v.accent) : null), play);
+  select.addEventListener('change', () => {
+    chosen = select.value;
+    stop(); // it was the last voice's sample
+    label();
   });
-  const el = h('fieldset', { class: 'voices' }, h('legend', {}, 'Read aloud to the expert in'), h('div', { class: 'voice-list' }, options));
+  play.addEventListener('click', preview);
+  label();
+  const el = h('div', { class: 'ask-voice' }, h('label', { for: 'ask-voice' }, 'Read aloud to the expert in'), h('span', { class: 'ask-voice-pick' }, select, play));
   return { el, value: () => chosen, stop };
 }
 
@@ -1508,7 +1518,7 @@ async function feedPage() {
   return h(
     'div',
     {},
-    h('div', { class: 'page-head' }, h('h1', {}, 'Your feed'), h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host office hours')),
+    h('div', { class: 'page-head' }, h('h1', {}, 'Your feed'), h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host off hours')),
     items.length === 0
       ? empty('Nothing here yet. Subscribe to experts or office hours and they\'ll show up here.', h('a', { class: 'btn btn-outline', href: '#/explore' }, 'Explore office hours'))
       : h('div', { class: 'stack' }, items.map(feedItem)),
@@ -1558,7 +1568,7 @@ async function explorePage() {
   return h(
     'div',
     {},
-    h('div', { class: 'page-head' }, h('h1', {}, 'Explore'), me ? h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host office hours') : null),
+    h('div', { class: 'page-head' }, h('h1', {}, 'Explore'), me ? h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host off hours') : null),
     h('section', {}, h('h2', { class: 'section-title' }, 'Taking questions now'), open.length ? h('div', { class: 'grid' }, open.map(ohCard)) : empty('No office hours are open right now.')),
     h('section', {}, h('h2', { class: 'section-title' }, 'Recently answered'), published.length ? h('div', { class: 'grid' }, published.map(ohCard)) : empty('Nothing answered yet.')),
     h(
@@ -2604,7 +2614,7 @@ async function newOfficeHourPage(_, query) {
     h('label', {}, 'Title', f.title),
     h('label', {}, 'Topic', f.topic),
     h('label', {}, 'Description', f.description),
-    h('div', { class: 'row gap wrap' }, h('label', { class: 'grow' }, 'Questions due by', f.deadline, h('span', { class: 'hint' }, 'Askers can submit and +1 until then.')), h('label', { class: 'grow' }, 'Answers expected', f.answers, h('span', { class: 'hint' }, "Lets people know when to check back. Not enforced."))),
+    h('div', { class: 'row gap wrap' }, h('label', { class: 'grow' }, 'Questions due by', f.deadline), h('label', { class: 'grow' }, 'Answers expected', f.answers)),
     h('label', { class: 'check' }, f.anon, ' Allow anonymous questions'),
     fromDiscussion,
     me.expertise.length === 0 ? h('p', { class: 'notice' }, 'Tip: ', h('a', { href: `#/u/${me.username}` }, 'add your expertise and bio'), ' so the moderator can suggest better seed questions.') : null,
@@ -2627,7 +2637,7 @@ async function newOfficeHourPage(_, query) {
       go(`#/oh/${officeHour.id}/manage`);
     })({ currentTarget: form.querySelector('button[type=submit]') });
   });
-  return h('div', { class: 'narrow' }, h('h1', {}, followUp ? 'Follow-up Q&A' : 'Host office hours'), form);
+  return h('div', { class: 'narrow' }, h('h1', {}, followUp ? 'Follow-up Q&A' : 'Host off hours'), form);
 }
 
 async function profilePage({ username }) {
@@ -2701,7 +2711,7 @@ function loginPage(_, query) {
       go(next);
     })({ currentTarget: submit });
   });
-  return h('div', { class: 'narrow' }, h('h1', {}, 'Welcome to off hours'), h('p', { class: 'muted' }, 'Ask experts questions. Host your own office hours.'), form);
+  return h('div', { class: 'narrow' }, h('h1', {}, 'Welcome to off hours'), h('p', { class: 'muted' }, 'Ask experts questions. Host your own off hours.'), form);
 }
 
 // ---------- shell & routing ----------

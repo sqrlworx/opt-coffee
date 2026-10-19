@@ -91,7 +91,7 @@ export function CardList({ items }) {
 
 export const HostLink = () => (
   <Link to="#/oh/new" style={{ fontWeight: '600' }}>
-    + Host office hours
+    + Host off hours
   </Link>
 );
 

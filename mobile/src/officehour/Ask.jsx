@@ -74,11 +74,11 @@ export function AskForm({ oh, onAsked }) {
   );
 }
 
-// Picks the voice a typed question is read aloud in, starting from the one the asker picked last
-// time. Each voice has a button to hear a short sample of it; a second tap stops it.
+// Picks the voice a typed question is read aloud in from a dropdown, starting from the one the asker
+// picked last time. The button beside it plays a short sample of the voice picked; a second tap stops it.
 function VoicePicker({ voices, value, onChange }) {
   const { toast } = useApp();
-  const [playing, setPlaying] = useState(null); // { id, loading } of the sample being played
+  const [playing, setPlaying] = useState(null); // { loading } of the sample being played
   const audio = useRef(null);
   const stop = () => {
     audio.current?.pause();
@@ -86,41 +86,47 @@ function VoicePicker({ voices, value, onChange }) {
     setPlaying(null);
   };
   useEffect(() => stop, []); // eslint-disable-line react-hooks/exhaustive-deps
-  const preview = (v) => {
-    const again = playing?.id === v.id;
-    stop();
-    if (again) return;
-    const sample = new Audio(v.sample);
+  const picked = voices.find((v) => v.id === value) ?? voices[0];
+  const option = (v) => (
+    <option key={v.id} value={v.id}>
+      {v.name}
+    </option>
+  );
+  const accents = [...new Set(voices.map((v) => v.accent).filter(Boolean))];
+  const pick = (id) => {
+    stop(); // it was the last voice's sample
+    onChange(id);
+  };
+  const preview = () => {
+    if (playing) return stop();
+    const sample = new Audio(picked.sample);
     audio.current = sample;
-    setPlaying({ id: v.id, loading: true }); // the first preview of a voice takes a moment to make
-    sample.addEventListener('playing', () => audio.current === sample && setPlaying({ id: v.id, loading: false }));
+    setPlaying({ loading: true }); // the first preview of a voice takes a moment to make
+    sample.addEventListener('playing', () => audio.current === sample && setPlaying({ loading: false }));
     sample.addEventListener('ended', () => audio.current === sample && stop());
     sample.addEventListener('error', () => {
       if (audio.current !== sample) return;
       stop();
-      toast(`Couldn't play ${v.name}'s voice right now`, 'error');
+      toast(`Couldn't play ${picked.name}'s voice right now`, 'error');
     });
     sample.play().catch(() => {}); // a failed load is reported by the error event
   };
   return (
     <View style={{ gap: 8 }}>
       <Label>Read aloud to the expert in</Label>
-      <View role="radiogroup" aria-label="Voice" style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-        {voices.map((v) => {
-          const on = v.id === value;
-          const mine = playing?.id === v.id;
-          return (
-            <View key={v.id} style={[styles.voice, on && styles.voiceOn]}>
-              <Pressable role="radio" aria-checked={on} onPress={() => onChange(v.id)} style={styles.voicePick}>
-                <Text style={[styles.voiceName, on && { color: color.accent }]}>{v.name}</Text>
-                {v.accent ? <Text style={styles.voiceAccent}>{v.accent}</Text> : null}
-              </Pressable>
-              <Pressable role="button" aria-label={`Hear ${v.name}`} aria-pressed={mine} onPress={() => preview(v)} style={[styles.voicePlay, mine && { backgroundColor: color.accent }]}>
-                <Text style={[styles.voicePlayText, mine && { color: color.accentInk }]}>{mine ? (playing.loading ? '…' : '■') : '▶'}</Text>
-              </Pressable>
-            </View>
-          );
-        })}
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        {/* Grouped by accent, so the closed dropdown needs only the voice's name. */}
+        <select className="native-input" aria-label="Read aloud to the expert in" value={picked.id} onChange={(e) => pick(e.target.value)} style={{ flex: 1, minWidth: 0 }}>
+          {voices.filter((v) => !v.accent).map(option)}
+          {accents.map((accent) => (
+            <optgroup key={accent} label={accent}>
+              {voices.filter((v) => v.accent === accent).map(option)}
+            </optgroup>
+          ))}
+        </select>
+        <Pressable role="button" aria-label={`Hear ${picked.name}`} aria-pressed={Boolean(playing)} onPress={preview} style={[styles.voicePlay, playing && { backgroundColor: color.accent }]}>
+          <Text style={[styles.voicePlayText, playing && { color: color.accentInk }]}>{playing ? (playing.loading ? '…' : '■') : '▶'}</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -306,13 +312,8 @@ const take = { display: 'block', width: '100%', aspectRatio: String(HALF), objec
 
 const styles = StyleSheet.create({
   askInput: { borderWidth: 0, borderBottomWidth: 1, borderColor: color.lineStrong, borderRadius: 0, backgroundColor: 'transparent', paddingHorizontal: 0, fontFamily: font.serif, fontSize: 21, lineHeight: 29, boxShadow: 'none' },
-  voice: { flexDirection: 'row', alignItems: 'center', borderRadius: radius.pill, backgroundColor: color.surface },
-  voiceOn: { backgroundColor: color.accentSoft, boxShadow: `inset 0 0 0 1px ${color.accentRing}` },
-  voicePick: { flexDirection: 'row', alignItems: 'baseline', gap: 6, paddingLeft: 14, paddingRight: 6, minHeight: 44, justifyContent: 'center', cursor: 'pointer' },
-  voiceName: { fontFamily: font.sans, fontSize: 15, fontWeight: '600', color: color.ink, lineHeight: 44 },
-  voiceAccent: { fontFamily: font.sans, fontSize: 12, color: color.muted },
-  voicePlay: { width: 34, height: 34, marginRight: 5, borderRadius: 17, backgroundColor: color.raised, alignItems: 'center', justifyContent: 'center', cursor: 'pointer' },
-  voicePlayText: { fontSize: 10, color: color.ink2 },
+  voicePlay: { width: 48, height: 48, borderRadius: 24, backgroundColor: color.surface, alignItems: 'center', justifyContent: 'center', cursor: 'pointer' },
+  voicePlayText: { fontSize: 12, color: color.ink2 },
   recPill: { backgroundColor: color.accent, borderRadius: radius.pill, paddingVertical: 4, paddingHorizontal: 11 },
   recText: { color: '#fff', fontFamily: font.sans, fontSize: 13, fontWeight: '700', letterSpacing: 0.5, fontVariant: ['tabular-nums'] },
   cueEditor: { gap: 10, padding: 14, borderRadius: radius.sm, backgroundColor: color.surface },

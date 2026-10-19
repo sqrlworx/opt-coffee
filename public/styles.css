@@ -181,20 +181,14 @@ textarea { resize: vertical; }
 .ask-mode:hover { color: var(--ink); }
 .ask-mode[aria-pressed=true] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgba(40, 30, 20, 0.14), 0 0 0 1px rgba(40, 30, 20, 0.04); }
 .spoken { display: grid; gap: 12px; padding: 4px 0; }
-/* The voice a typed question is read aloud in: soft pills, tinted once one is yours. */
-.voices { border: none; margin: 0; padding: 0; min-width: 0; }
-.voices legend { padding: 0; margin-bottom: 8px; font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; }
-.voice-list { display: flex; flex-wrap: wrap; gap: 8px; }
-.voice { position: relative; display: inline-flex; align-items: center; border-radius: 999px; background: var(--surface); font-size: 0.85rem; transition: background-color 0.15s, box-shadow 0.15s; }
-.voice:hover { background: var(--surface-2); }
-.voice:has(input:checked) { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-ring); }
-.voice:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
-.voice label { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 4px 6px 14px; cursor: pointer; }
-.voice input { position: absolute; opacity: 0; pointer-events: none; }
-.voice-name { font-weight: 600; color: var(--ink); }
-.voice:has(input:checked) .voice-name { color: var(--accent); }
-.voice-accent { color: var(--muted); font-size: 0.75rem; }
-.voice-play { display: inline-grid; place-items: center; width: 26px; height: 26px; margin: 3px 4px 3px 0; border: none; border-radius: 50%; background: var(--raised); color: var(--ink-2); font: inherit; font-size: 0.6rem; cursor: pointer; transition: background-color 0.15s, color 0.15s; }
+/* The voice a typed question is read aloud in: a soft pill of a dropdown, and a button to hear it. */
+.ask-voice { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.ask-voice label { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.12em; cursor: pointer; }
+.ask-voice-pick { display: inline-flex; align-items: center; gap: 6px; }
+.ask-voice select { appearance: none; height: 30px; padding: 0 32px 0 14px; border: none; border-radius: 999px; background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236f6a62' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 13px center / 10px 6px; color: var(--ink); font: inherit; font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: background-color 0.15s; }
+.ask-voice select:hover { background-color: var(--surface-2); }
+.ask-voice select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.voice-play { display: inline-grid; place-items: center; width: 30px; height: 30px; border: none; border-radius: 50%; background: var(--surface); color: var(--ink-2); font: inherit; font-size: 0.6rem; cursor: pointer; transition: background-color 0.15s, color 0.15s; }
 .voice-play:hover, .voice-play[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); }
 .q-take { display: block; width: 100%; max-width: 480px; aspect-ratio: 16 / 9; background: #111; border-radius: var(--radius-sm); }
 .q-take.live { transform: scaleX(-1); } /* mirror the camera preview, like a selfie view */

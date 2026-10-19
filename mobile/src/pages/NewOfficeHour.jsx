@@ -55,7 +55,7 @@ function OfficeHourForm({ followUp }) {
 
   return (
     <View style={{ gap: 20 }}>
-      <H1>{followUp ? 'Follow-up Q&A' : 'Host office hours'}</H1>
+      <H1>{followUp ? 'Follow-up Q&A' : 'Host off hours'}</H1>
       <Card style={{ gap: 18 }}>
         {followUp ? (
           <Small style={{ color: color.muted }}>
@@ -65,8 +65,8 @@ function OfficeHourForm({ followUp }) {
         <Field label="Title" value={f.title} onChangeText={set('title')} maxLength={120} placeholder="e.g. Ask me anything about breaking into product design" />
         <Field label="Topic" value={f.topic} onChangeText={set('topic')} maxLength={60} placeholder="Optional — e.g. Career growth" />
         <Field label="Description" value={f.description} onChangeText={set('description')} multiline rows={followUp ? 5 : 3} maxLength={2000} placeholder="What should people ask about? Anything off-limits?" />
-        <DateTimeField label="Questions due by" value={f.deadline} onChange={set('deadline')} hint="Askers can submit and +1 until then." />
-        <DateTimeField label="Answers expected" value={f.answers} onChange={set('answers')} hint="Lets people know when to check back. Not enforced." />
+        <DateTimeField label="Questions due by" value={f.deadline} onChange={set('deadline')} />
+        <DateTimeField label="Answers expected" value={f.answers} onChange={set('answers')} />
         <Checkbox checked={f.anon} onChange={set('anon')} label="Allow anonymous questions" />
         {followUp ? (
           <View style={{ gap: 10 }}>
