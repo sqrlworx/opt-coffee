@@ -2495,7 +2495,7 @@ async function managePage({ id }) {
       { class: 'card oh-header' },
       h('div', { class: 'row gap-sm wrap space-between' }, topicChip(oh), h('a', { class: 'btn btn-outline', href: `#/oh/${oh.id}` }, 'View public page')),
       h('h1', {}, oh.title),
-      h('p', { class: 'muted small' }, `Answers expected ${fmtDate(oh.answersExpectedAt)} · moderator: ${data.moderator}`),
+      h('p', { class: 'muted small' }, `Answers expected ${fmtDate(oh.answersExpectedAt)}`, h('br'), `moderator: ${data.moderator}`),
       oh.status === 'open'
         ? h(
             'div',

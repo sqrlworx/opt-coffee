@@ -271,7 +271,8 @@ function Planner({ data, reload }) {
         </Row>
         <H1 style={{ fontSize: 38, lineHeight: 40, letterSpacing: -1 }}>{oh.title}</H1>
         <Small style={{ color: color.muted }}>
-          Answers expected {fmtDate(oh.answersExpectedAt)} · moderator: {data.moderator}
+          Answers expected {fmtDate(oh.answersExpectedAt)}
+          {'\n'}moderator: {data.moderator}
         </Small>
         {oh.status === 'open' ? (
           <Button
