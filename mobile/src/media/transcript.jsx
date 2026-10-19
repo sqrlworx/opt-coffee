@@ -136,15 +136,32 @@ export function CaptionsLink({ url }) {
 // in the background, so a pending one is watched). A spoken question's text is its transcript, which
 // follows along as the recording plays. One asked on camera plays its video instead (it has the
 // sound too), shown under the text while it plays. On the page the button only shows on hover;
-// phones can't hover, so it's always there.
-export function QuestionText({ q, style }) {
+// phones can't hover, so it's always there. With `meta`, who asked, the button goes after that,
+// under the text, instead of beside the text.
+export function QuestionText({ q, style, meta = null }) {
   const [audio, setAudio] = useState({ audio: q.audio, audioStatus: q.audioStatus });
   useWatchQuestion(q.id, !audio.audio && audio.audioStatus === 'pending', (x) => x.audioStatus !== 'pending', (x) => setAudio({ audio: x.audio, audioStatus: x.audioStatus }));
   const mediaRef = useRef(null);
   const playing = usePlaying(mediaRef);
   const [seen, setSeen] = useState(false); // the asker's video has a picture to show
   const textStyle = [styles.qBody, style];
-  if (!audio.audio) return <Text style={textStyle}>{q.body}</Text>;
+  const below = (button = null) => (
+    <View style={styles.meta}>
+      <View style={{ flexShrink: 1 }}>{meta}</View>
+      {button}
+    </View>
+  );
+  if (!audio.audio) {
+    const plain = <Text style={textStyle}>{q.body}</Text>;
+    return meta ? (
+      <View style={{ gap: 6, minWidth: 0 }}>
+        {plain}
+        {below()}
+      </View>
+    ) : (
+      plain
+    );
+  }
   const video = Boolean(q.askerVideo);
   const label = video ? 'Watch the question as it was asked' : q.askedWith === 'audio' ? 'Play the question as it was asked' : 'Listen to the question';
   const button = (
@@ -166,10 +183,17 @@ export function QuestionText({ q, style }) {
   const text = cues?.length ? <SyncedCues mediaRef={mediaRef} cues={cues} style={textStyle} /> : <Text style={textStyle}>{q.body}</Text>;
   return (
     <View style={{ gap: 10, minWidth: 0 }}>
-      <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-        <View style={{ flex: 1, minWidth: 0 }}>{text}</View>
-        {button}
-      </View>
+      {meta ? (
+        <View style={{ gap: 6 }}>
+          {text}
+          {below(button)}
+        </View>
+      ) : (
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+          <View style={{ flex: 1, minWidth: 0 }}>{text}</View>
+          {button}
+        </View>
+      )}
       {video ? (
         <Video
           ref={mediaRef}
@@ -219,4 +243,5 @@ const styles = StyleSheet.create({
   editor: { gap: 10, padding: 14, borderRadius: 12, backgroundColor: color.surface },
   transcriptBox: { maxHeight: 320, overflowY: 'auto' },
   playBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: color.surface, alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1, cursor: 'pointer' },
+  meta: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 34 }, // as tall with the play button as without
 });

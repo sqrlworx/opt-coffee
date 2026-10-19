@@ -32,6 +32,7 @@ const stopped = [];
 const prepared = [];
 const fakeBroll = {
   name: 'fake',
+  model: 'fake-video',
   async generate(prompt, out, { seconds, question, answer, signal }) {
     await Promise.race([gate, new Promise((resolve, reject) => signal?.addEventListener('abort', () => (stopped.push(prompt), reject(new Error('killed')))))]);
     if (prompt.includes('[fail]')) throw new Error('out of memory');
@@ -136,7 +137,8 @@ async function answered(expert, asker, secs = 12, answerStart = 2) {
 test('the expert describes b-roll for an answer; it is made to fit, and placed where they talk about it', async () => {
   const expert = await register('broll_host');
   const asker = await register('broll_asker');
-  assert.equal((await expert('GET', '/api/me')).broll, true);
+  const me = await expert('GET', '/api/me');
+  assert.deepEqual([me.broll, me.makesBroll, me.brollModel], [true, true, 'fake-video']); // the planner names the model
   const { ohId, qid } = await answered(expert, asker, 20, 2);
   const words = transcribed(row(qid).answer_video, 'First, plan the week. Then chop the onions and peppers for the sauce. Cook it slowly, and taste it as you go.', 3);
   const prompt = 'Close-up of a knife chopping onions on a wooden board';
@@ -442,7 +444,7 @@ test("with nothing to make b-roll with, it can still be uploaded", async (t) => 
   const expert = await register('uploads_only_host', onlyBase);
   const asker = await register('uploads_only_asker', onlyBase);
   const me = await expert('GET', '/api/me');
-  assert.deepEqual([me.broll, me.makesBroll], [true, false]);
+  assert.deepEqual([me.broll, me.makesBroll, me.brollModel], [true, false, null]);
   const { qid } = await answered(expert, asker);
   assert.deepEqual(await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'Waves on a beach' }), { status: 503, error: "B-roll can't be made on this server, only uploaded" });
   assert.equal((await expert('PUT', `/api/questions/${qid}/broll/video?name=waves.mp4`, take('waves', 4), 'video/mp4')).status, 200);
@@ -607,6 +609,7 @@ test('when planning with OpenAI fails, the shot is written up locally instead', 
   try {
     const broll = createBroll({ mode: 'on', planner, gemini: null, log: (msg) => logs.push(msg) });
     assert.equal(broll.name, 'ltx-video 2b, shots written by fake');
+    assert.equal(broll.model, 'LTX-Video 2B');
     await assert.rejects(broll.generate('Waves on a beach', join(tmpdir(), 'unused.mp4'), { seconds: 4 }), /Couldn't start making b-roll/);
     assert.match(logs.join('\n'), /writing up the shot with fake failed, so it's written up locally: Rate limit reached/);
   } finally {
@@ -696,6 +699,7 @@ test("b-roll is filmed by Veo when it can be, and locally when it can't", async 
   // GPT writes the shot when there's an OpenAI key, else Gemini; Veo films it.
   let broll = createBroll({ mode: 'on', planner, gemini, log });
   assert.equal(broll.name, 'veo-fake, or ltx-video 2b locally, shots written by gpt-fake');
+  assert.equal(broll.model, 'veo-fake');
   assert.equal(broll.maxSeconds, 8);
   assert.deepEqual(await broll.generate('a ticket counter', join(dir, 'a.mp4'), { seconds: 5 }), { seconds: 6, shot: "GPT's shot of a ticket counter" });
   broll = createBroll({ mode: 'on', planner: null, gemini, log });

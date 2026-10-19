@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, View } from 'react-native';
 import { api } from '../api.js';
-import { fmtDate, plural, relative } from '../format.js';
+import { plural, relative } from '../format.js';
 import { useLoad } from '../hooks.js';
 import { go } from '../router.js';
 import { color, radius } from '../theme.js';
@@ -43,8 +43,6 @@ function FeedItem({ item }) {
     else if (oh.status === 'open') cta = ['Ask a question →', true];
     else cta = ['View questions →', false];
   }
-  // Once it's published, readers are only told about the questions that were answered.
-  const counted = oh.status === 'open' ? 'so far' : oh.status === 'published' && !oh.isExpert ? 'answered' : 'asked';
   const more = announced ? 0 : item.answerCount - item.preview.length;
   return (
     <View style={styles.card}>
@@ -66,12 +64,7 @@ function FeedItem({ item }) {
         </Row>
       </Pressable>
       {announced ? (
-        <>
-          {oh.description ? <T numberOfLines={3}>{oh.description}</T> : null}
-          <Small style={{ color: color.muted }}>
-            {plural(oh.questionCount, 'question')} {counted} · questions until {fmtDate(oh.questionsDeadline)} · answers expected {fmtDate(oh.answersExpectedAt)}
-          </Small>
-        </>
+        oh.description ? <T numberOfLines={3}>{oh.description}</T> : null
       ) : (
         <View style={{ gap: 6 }}>
           {item.preview.map((q) => (

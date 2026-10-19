@@ -65,6 +65,8 @@ export function createBroll({ mode = process.env.FORUM_BROLL ?? 'auto', planner 
 
   return {
     name: `${filmedBy}, shots written by ${planner?.name ?? gemini?.textName ?? 'qwen3 8b'}`,
+    /** The model that films clips, as the planner names it: Veo's, else LTX-Video locally. */
+    model: gemini?.videoName ?? 'LTX-Video 2B',
     /** The longest clip it makes. */
     maxSeconds: gemini?.maxSeconds ?? LOCAL_MAX,
 

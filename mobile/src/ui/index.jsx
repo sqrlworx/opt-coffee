@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useApp } from '../context.js';
-import { countdownParts, fmtDate, relative } from '../format.js';
+import { countdownParts, fmtDay, relative } from '../format.js';
 import { useMounted, useNow } from '../hooks.js';
 import { go } from '../router.js';
 import { color, font, radius, TOUCH } from '../theme.js';
@@ -231,7 +231,7 @@ export function StatusBadge({ oh }) {
   let text;
   let kind = 'closed';
   if (oh.status === 'open') [text, kind] = [`Taking questions · closes ${relative(oh.questionsDeadline)}`, 'open'];
-  else if (oh.status === 'closed') text = `Questions closed · answers expected ${fmtDate(oh.answersExpectedAt)}`;
+  else if (oh.status === 'closed') text = `Closed · answers ${fmtDay(oh.answersExpectedAt)}`;
   else if (oh.processing) text = 'Published · preparing the video';
   else [text, kind] = [`Answered ${relative(oh.publishedAt)}`, 'published'];
   return (

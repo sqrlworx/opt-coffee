@@ -9,6 +9,7 @@ let devLogin = false; // server has the dev user switcher enabled
 let speech = false; // server can transcribe recordings and read text aloud
 let brollOn = false; // experts can add b-roll to their answers: upload it
 let makesBroll = false; // and have it made from a description
+let brollModel = null; // by this model, which films it
 let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
 let myVoice = null; // the one the user last picked (or the default)
 let devUsers = null;
@@ -114,6 +115,10 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+function fmtDay(iso) {
+  return new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
 // The time left until `deadline`, as 2d 05h 09m 30s, ticking down each second while it's on the page.
 function countdown(deadline) {
   const end = new Date(deadline).getTime();
@@ -170,7 +175,7 @@ function userLink(user) {
 
 function statusBadge(oh) {
   if (oh.status === 'open') return h('span', { class: 'badge badge-open' }, `Taking questions · closes ${relative(oh.questionsDeadline)}`);
-  if (oh.status === 'closed') return h('span', { class: 'badge badge-closed' }, `Questions closed · answers expected ${fmtDate(oh.answersExpectedAt)}`);
+  if (oh.status === 'closed') return h('span', { class: 'badge badge-closed' }, `Closed · answers ${fmtDay(oh.answersExpectedAt)}`);
   if (oh.processing) return h('span', { class: 'badge badge-closed' }, 'Published · preparing the video');
   return h('span', { class: 'badge badge-published' }, `Answered ${relative(oh.publishedAt)}`);
 }
@@ -1533,17 +1538,7 @@ function feedItem(item) {
     else if (oh.isExpert) action = cta('View office hour →', false);
     else if (oh.status === 'open') action = cta('Ask a question →');
     else action = cta('View questions →', false);
-    // Once it's published, readers are only told about the questions that were answered.
-    const counted = oh.status === 'open' ? 'so far' : oh.status === 'published' && !oh.isExpert ? 'answered' : 'asked';
-    return h(
-      'article',
-      { class: 'card feed-item' },
-      head,
-      title,
-      oh.description ? h('p', { class: 'desc clamp' }, oh.description) : null,
-      h('p', { class: 'muted small' }, `${plural(oh.questionCount, 'question')} ${counted} · questions until ${fmtDate(oh.questionsDeadline)} · answers expected ${fmtDate(oh.answersExpectedAt)}`),
-      action,
-    );
+    return h('article', { class: 'card feed-item' }, head, title, oh.description ? h('p', { class: 'desc clamp' }, oh.description) : null, action);
   }
 
   const more = item.answerCount - item.preview.length;
@@ -1919,13 +1914,9 @@ async function managePage({ id }) {
           broll ? h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove b-roll') : null,
           broll?.status === 'ready' ? h('button', { type: 'button', class: 'link-btn small', onclick: () => (brollDrafts.delete(qid), brollFull.delete(qid), drawAnswer(qid)) }, 'Cancel') : null,
         ),
-        h(
-          'p',
-          { class: 'hint' },
-          makesBroll
-            ? `A few seconds of video, shorter than your answer: footage, a diagram, an animation, whatever you describe. Labels work best kept to a few short words. Or upload a video of your own, saying above what it shows. It's cut in where you talk about it, beside your answer while it plays. Tick Full screen before uploading a video to have it fill the frame instead, with your answer in the corner.`
-            : `A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it, beside your answer while it plays. Tick Full screen before uploading to have it fill the frame instead, with your answer in the corner.`,
-        ),
+        makesBroll
+          ? brollModel && h('p', { class: 'hint' }, `model: ${brollModel}`)
+          : h('p', { class: 'hint' }, `A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it, beside your answer while it plays. Tick Full screen before uploading to have it fill the frame instead, with your answer in the corner.`),
       );
       el.addEventListener('submit', (e) => {
         e.preventDefault();
@@ -2418,7 +2409,7 @@ async function managePage({ id }) {
       h(
         'div',
         { class: 'plan-col-head' },
-        h('div', {}, h('h2', {}, 'Your answer order'), h('p', { class: 'muted small' }, 'Drag to reorder. Record answers back to back: each question is played to you, you answer, then Save plays the next one. Only questions here with a recorded answer get published, in this order.')),
+        h('div', {}, h('h2', {}, 'Your answer order'), h('p', { class: 'muted small' }, 'Drag to reorder. Only questions here with a recorded answer get published, in this order.')),
         // From the top; "Answer from here" on a question starts anywhere else.
         h('button', { class: 'btn btn-primary', disabled: queue.length === 0, onclick: action(() => startSession(queue[0])) }, '● Start answering'),
       ),
@@ -2491,16 +2482,14 @@ async function managePage({ id }) {
     h(
       'div',
       { class: 'card oh-header' },
-      h('div', { class: 'row gap-sm wrap' }, topicChip(oh), statusBadge(oh)),
+      h('div', { class: 'row gap-sm wrap space-between' }, topicChip(oh), h('a', { class: 'btn btn-outline', href: `#/oh/${oh.id}` }, 'View public page')),
       h('h1', {}, oh.title),
-      h('p', { class: 'muted small' }, `Answers expected ${fmtDate(oh.answersExpectedAt)} (shown to askers; not enforced) · moderator: ${data.moderator}`),
-      h('p', { class: 'notice' }, 'Readers see nothing until you publish. Publishing is final: after that, answers can\'t be re-recorded, removed or reordered.'),
-      h(
-        'div',
-        { class: 'row gap-sm wrap' },
-        h('a', { class: 'btn btn-outline', href: `#/oh/${oh.id}` }, 'View public page'),
-        oh.status === 'open'
-          ? h(
+      h('p', { class: 'muted small' }, `Answers expected ${fmtDate(oh.answersExpectedAt)} · moderator: ${data.moderator}`),
+      oh.status === 'open'
+        ? h(
+            'div',
+            { class: 'row gap-sm wrap' },
+            h(
               'button',
               {
                 class: 'btn btn-outline',
@@ -2511,9 +2500,9 @@ async function managePage({ id }) {
                 }),
               },
               'Close questions now',
-            )
-          : null,
-      ),
+            ),
+          )
+        : null,
     ),
     seedPanel,
     h('div', { class: 'plan' }, left, right),
@@ -2717,7 +2706,7 @@ function loginPage(_, query) {
 
 // Who's logged in, their voice, and what the server can do.
 async function loadMe() {
-  ({ user: me, devLogin, speech, broll: brollOn, makesBroll, voices, voice: myVoice } = await api('GET', '/api/me'));
+  ({ user: me, devLogin, speech, broll: brollOn, makesBroll, brollModel, voices, voice: myVoice } = await api('GET', '/api/me'));
 }
 
 // Dev-only: switch between users without logging in. Shown when the server runs with --dev.

@@ -24,6 +24,10 @@ export function fmtDate(iso) {
   return new Date(iso).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 }
 
+export function fmtDay(iso) {
+  return new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
 export const plural = (n, word, many = `${word}s`) => `${n} ${n === 1 ? word : many}`;
 
 // The time left until `end` (ms), as [[2, 'd'], [5, 'h'], [9, 'm'], [30, 's']]: from the first unit

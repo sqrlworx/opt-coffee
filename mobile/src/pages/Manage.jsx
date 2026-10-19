@@ -1,7 +1,7 @@
 // The planner, where the expert seeds questions, picks the order to answer them in, records the
 // answers and publishes them. On the page the moderator's suggested order and the expert's answer
 // order sit side by side, and questions are dragged from one to the other; on a phone they're two
-// tabs, questions are added with a tap, and moved with ↑ and ↓.
+// tabs, questions are added with a tap, and moved by dragging their grips (manage/useReorder.js).
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api, sendFile } from '../api.js';
@@ -12,13 +12,14 @@ import { AnswerBox } from '../manage/AnswerBox.jsx';
 import { createSession } from '../manage/session.js';
 import { Studio } from '../manage/Studio.jsx';
 import { Suggestions } from '../manage/Suggestions.jsx';
+import { useReorder } from '../manage/useReorder.js';
 import { QuestionText } from '../media/transcript.jsx';
 import { ANSWER_CAMERA } from '../media/Video.jsx';
 import { QuestionMeta } from '../officehour/questions.jsx';
 import { go } from '../router.js';
 import { color, font, MAX_WIDTH, radius, TAB_BAR_HEIGHT, TOUCH } from '../theme.js';
 import { Icon } from '../ui/icons.jsx';
-import { Button, Chip, Empty, H1, Hint, Loading, Notice, Row, Segmented, Small, StatusBadge, TopicChip, confirmed } from '../ui/index.jsx';
+import { Button, Chip, Empty, H1, Hint, Loading, Row, Segmented, Small, TopicChip, confirmed } from '../ui/index.jsx';
 
 const MAX_BROLL_UPLOAD = 500_000_000; // bytes, as the server allows
 
@@ -263,28 +264,27 @@ function Planner({ data, reload }) {
   return (
     <View style={{ gap: 32, paddingBottom: 72 }}>
       <View style={{ gap: 14 }}>
-        <Row wrap gap={14} style={{ alignItems: 'baseline' }}>
-          <TopicChip oh={oh} accent />
-          <StatusBadge oh={oh} />
+        <Row gap={14} style={{ justifyContent: 'space-between' }}>
+          <View style={{ flexShrink: 1 }}>
+            <TopicChip oh={oh} accent />
+          </View>
+          <Button small title="View public page" onPress={() => go(`#/oh/${oh.id}`)} />
         </Row>
         <H1 style={{ fontSize: 38, lineHeight: 40, letterSpacing: -1 }}>{oh.title}</H1>
         <Small style={{ color: color.muted }}>
-          Answers expected {fmtDate(oh.answersExpectedAt)} (shown to askers; not enforced) · moderator: {data.moderator}
+          Answers expected {fmtDate(oh.answersExpectedAt)} · moderator: {data.moderator}
         </Small>
-        <Notice>Readers see nothing until you publish. Publishing is final: after that, answers can't be re-recorded, removed or reordered.</Notice>
-        <Row wrap gap={8}>
-          <Button title="View public page" onPress={() => go(`#/oh/${oh.id}`)} />
-          {oh.status === 'open' ? (
-            <Button
-              title="Close questions now"
-              onPress={async () => {
-                if (!confirmed('Stop accepting questions and votes now?')) return;
-                await api('POST', `/api/office-hours/${oh.id}/close`);
-                reload();
-              }}
-            />
-          ) : null}
-        </Row>
+        {oh.status === 'open' ? (
+          <Button
+            title="Close questions now"
+            style={{ alignSelf: 'flex-start' }}
+            onPress={async () => {
+              if (!confirmed('Stop accepting questions and votes now?')) return;
+              await api('POST', `/api/office-hours/${oh.id}/close`);
+              reload();
+            }}
+          />
+        ) : null}
       </View>
       {oh.status === 'open' ? <Suggestions oh={oh} onAdded={reload} /> : null}
       <View style={{ gap: 18 }}>
@@ -302,7 +302,7 @@ function Planner({ data, reload }) {
         </View>
         {tab === 'questions' ? suggestedOrder() : <AnswerOrder plan={plan} setQueue={setQueue} />}
       </View>
-      <View style={styles.savebar}>
+      <View id="savebar" style={styles.savebar}>
         <View style={styles.savebarInner}>
           <Small style={{ color: color.muted, flex: 1 }} numberOfLines={2}>
             {saveState}
@@ -360,52 +360,61 @@ function Planner({ data, reload }) {
   }
 }
 
-// The expert's answer order: what gets published, in this order, if it has a recorded answer.
+// The expert's answer order: what gets published, in this order, if it has a recorded answer. While
+// a card is being moved they all fold to their questions, hiding the rest without unmounting it.
 function AnswerOrder({ plan, setQueue }) {
   const { m } = plan;
   const { queue } = m;
-  const move = (i, delta) => {
-    const j = i + delta;
-    if (j < 0 || j >= queue.length) return;
-    const next = [...queue];
-    [next[i], next[j]] = [next[j], next[i]];
-    setQueue(next);
-  };
+  const { held, list, handle } = useReorder(queue, setQueue, bars);
+  const folded = held != null;
   return (
     <View style={{ gap: 14 }}>
-      <Hint>Record answers back to back: each question is played to you, you answer, then Save plays the next one. Only questions here with a recorded answer get published, in this order.</Hint>
+      <Hint>Drag to reorder. Only questions here with a recorded answer get published, in this order.</Hint>
       {/* From the top; "Answer from here" on a question starts anywhere else. */}
       <Button kind="primary" title="● Start answering" disabled={queue.length === 0} onPress={() => plan.startSession(queue[0])} />
-      {queue.length === 0 ? <Empty message="Add questions from the suggested order, or use it wholesale." /> : null}
-      {queue.map((qid, i) => {
-        const q = m.questions.get(qid);
-        return (
-          <View key={qid} style={styles.queueItem}>
-            <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
-              <Text style={styles.queueNum}>{i + 1}</Text>
-              <View style={{ flex: 1, minWidth: 0 }}>
-                <QuestionText q={q} style={{ fontSize: 18, lineHeight: 25 }} />
+      {queue.length === 0 ? (
+        <Empty message="Add questions from the suggested order, or use it wholesale." />
+      ) : (
+        <View ref={list} style={{ gap: 14 }}>
+          {queue.map((qid, i) => {
+            const q = m.questions.get(qid);
+            return (
+              <View key={qid} style={styles.queueItem}>
+                <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+                  <Text style={styles.queueNum}>{i + 1}</Text>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    {folded ? (
+                      <Text numberOfLines={2} style={styles.folded}>
+                        {q.body}
+                      </Text>
+                    ) : null}
+                    <View style={folded && styles.gone}>
+                      <QuestionText q={q} meta={<QuestionMeta q={q} />} style={{ fontSize: 18, lineHeight: 25 }} />
+                    </View>
+                  </View>
+                  <div {...handle(qid, i)}>
+                    <Icon name="grip" size={20} color={color.muted} />
+                  </div>
+                </View>
+                <View style={folded && styles.gone}>
+                  <AnswerBox qid={qid} plan={plan} aside={<IconButton name="close" label={`Remove question ${i + 1} from the answer order`} onPress={() => setQueue(queue.filter((id) => id !== qid))} />} />
+                </View>
               </View>
-              <IconButton name="close" label="Remove from answer order" onPress={() => setQueue(queue.filter((id) => id !== qid))} />
-            </View>
-            <Row wrap gap={8} style={{ justifyContent: 'space-between' }}>
-              <QuestionMeta q={q} />
-              <Row gap={4}>
-                <IconButton name="up" label={`Move question ${i + 1} up`} disabled={i === 0} onPress={() => move(i, -1)} />
-                <IconButton name="down" label={`Move question ${i + 1} down`} disabled={i === queue.length - 1} onPress={() => move(i, 1)} />
-              </Row>
-            </Row>
-            <AnswerBox qid={qid} plan={plan} />
-          </View>
-        );
-      })}
+            );
+          })}
+        </View>
+      )}
     </View>
   );
 }
 
-function IconButton({ name, label, onPress, disabled = false }) {
+// Where the top bar and the save bar end on screen: the page scrolls under them.
+const bars = () => [document.getElementById('topbar')?.getBoundingClientRect().bottom ?? 0, document.getElementById('savebar')?.getBoundingClientRect().top ?? window.innerHeight];
+
+// As tall as the small buttons beside it, and as easy to tap as any.
+function IconButton({ name, label, onPress }) {
   return (
-    <Pressable role="button" aria-label={label} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.iconBtn, pressed && { backgroundColor: color.surface2 }, disabled && { opacity: 0.3 }]}>
+    <Pressable role="button" aria-label={label} hitSlop={(TOUCH - 38) / 2} onPress={onPress} style={({ pressed }) => [styles.iconBtn, pressed && { backgroundColor: color.surface2 }]}>
       <Icon name={name} size={18} color={color.ink2} />
     </Pressable>
   );
@@ -421,7 +430,9 @@ const styles = StyleSheet.create({
   planBody: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
   queueItem: { backgroundColor: color.raised, borderRadius: radius.lg, padding: 16, gap: 12 },
   queueNum: { minWidth: 22, fontFamily: font.serif, fontSize: 20, lineHeight: 26, color: color.ink, fontVariant: ['lining-nums', 'tabular-nums'] },
-  iconBtn: { width: TOUCH, height: TOUCH, borderRadius: TOUCH / 2, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface, cursor: 'pointer' },
+  folded: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
+  gone: { display: 'none' },
+  iconBtn: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface, cursor: 'pointer' },
   savebar: { position: 'fixed', left: 0, right: 0, bottom: `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))`, zIndex: 15, backgroundColor: 'rgba(248,246,242,0.94)', backdropFilter: 'blur(14px)', borderTopWidth: 1, borderTopColor: color.line },
   savebarInner: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 10 },
 });

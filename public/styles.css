@@ -146,7 +146,6 @@ textarea { resize: vertical; }
 .byline { font-family: var(--serif); font-style: italic; font-size: 1.25rem; color: var(--muted); }
 .byline .user-link { font-style: normal; color: var(--ink); }
 .oh-header .desc { font-family: var(--serif); font-size: clamp(1.15rem, 1rem + 0.5vw, 1.4rem); line-height: 1.5; color: var(--ink-2); max-width: 36em; }
-.oh-header .notice { justify-self: start; }
 .facts { display: grid; grid-template-columns: repeat(3, minmax(0, max-content)); margin: 14px 0 6px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .facts > div { padding: 16px 40px 16px 0; }
 .facts > div + div { padding-left: 40px; border-left: 1px solid var(--line); }

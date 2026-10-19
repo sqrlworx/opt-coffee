@@ -554,13 +554,15 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   });
 
   // `voices` read typed questions aloud, each with a `sample` to preview it; `voice` is the viewer's.
-  // `broll`: experts can add b-roll to their answers, uploading it, and `makesBroll`: have it made.
+  // `broll`: experts can add b-roll to their answers, uploading it, and `makesBroll`: have it made,
+  // filmed by `brollModel`.
   route('GET', '/api/me', ({ user }) => ({
     user: user ? publicUser(user) : null,
     devLogin,
     speech: Boolean(speech),
     broll: Boolean(broll),
     makesBroll: Boolean(broll?.generate),
+    brollModel: broll?.generate ? broll.model : null,
     voices: speech ? speech.voices.map((v) => ({ ...v, sample: `/media/voices/${v.id}.m4a` })) : [],
     voice: speech ? voiceOf(user) : null,
   }));

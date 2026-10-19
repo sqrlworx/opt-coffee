@@ -61,6 +61,7 @@ export default function App() {
         speech: server.speech, // the server transcribes recordings and reads typed questions aloud
         brollOn: server.broll, // experts can add b-roll to their answers, by uploading it
         makesBroll: server.makesBroll, // and have it made from a description
+        brollModel: server.brollModel, // by this model, which films it
         voices: server.voices ?? [],
         voice: server.voice,
         setMe: (user) => setServer((s) => ({ ...s, user })),
@@ -134,7 +135,7 @@ export default function App() {
 function TopBar({ route }) {
   const { devLogin } = useApp();
   return (
-    <View style={styles.topbar}>
+    <View id="topbar" style={styles.topbar}>
       <View style={styles.topbarInner}>
         <Pressable onPress={() => go('#/')} role="link" aria-label="forum, home">
           <Text style={styles.brand}>
