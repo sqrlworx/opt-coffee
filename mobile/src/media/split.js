@@ -1,8 +1,10 @@
 // Split screen, the phone's picture in picture. Where the page shows one picture over another (the
-// asker over the joined video while their question plays, the asker over the camera while
+// asker's video over the joined video while their question plays, or over the camera while
 // recording) or beside it (the expert beside split-screen b-roll), a phone splits the player in two:
 // the expert in the top half, and the asker or the b-roll in the bottom half, each at full width.
 // This is the arithmetic for that, kept apart from React so it can be tested (test/split.test.js).
+// The fox saying a question nobody asked on camera doesn't split it: the expert keeps the whole
+// player, the fox in a bubble over them (JointPlayer.jsx).
 
 // Where a layer sits on the stage, an upright player (9:16): `top` and `bottom` are its halves, and
 // `full` is all of it, for a lone picture before or after a split. A stage wider than tall
@@ -43,7 +45,9 @@ export const partAt = (parts, t) => parts.find((p) => t < p.end) ?? parts.at(-1)
 // being played at the start of its take, up to where the answer starts, with `at`, how far into the
 // question's sound (which starts a little after the take does); or `cut`, the answer's split-screen
 // b-roll, with `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under
-// the expert, if either. Full-screen b-roll is cut into the joined video itself, so it needs no split.
+// the expert, if either: a question only when it was asked on camera, for the asker's video (the fox
+// saying any other is in a bubble over the expert instead). Full-screen b-roll is cut into the joined
+// video itself, so it needs no split.
 export function moment(parts, t, started = true) {
   const part = partAt(parts, t);
   if (!part || !started) return { part, split: null, asking: null, cut: null, at: 0, clipAt: 0 };
@@ -53,7 +57,7 @@ export function moment(parts, t, started = true) {
   const at = asking ? into - (part.questionStart ?? 0) : 0;
   const b = q.broll;
   const cut = !asking && b?.video && !b.full && b.start != null && into >= b.start && into < b.start + b.length ? b : null;
-  return { part, split: asking ? 'question' : cut ? 'broll' : null, asking, cut, at, clipAt: cut ? into - b.start : 0 };
+  return { part, split: asking?.askerVideo ? 'question' : cut ? 'broll' : null, asking, cut, at, clipAt: cut ? into - b.start : 0 };
 }
 
 // Whether one answer's own video is in its b-roll at `t` (the planner, and published answers when

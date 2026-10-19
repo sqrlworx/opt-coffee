@@ -6,6 +6,7 @@
 export const FOX = {
   src: '/fox.webp',
   view: [75, 90, 627, 470], // the part shown (x, y, width, height): all of it as drawn; the rest leaves room to sway
+  bubble: [96, 12, 588, 588], // the part the phone's round bubble shows: its head and shoulders, the circle keeping its ears in and the picture's edges out as it sways
   pivot: [389.5, 1125], // its feet, below the picture: it sways and bounces on them
   ink: '#100d0b',
   shineColor: '228, 228, 225',
@@ -17,10 +18,11 @@ export const FOX = {
   mouth: { at: [390.6, 425.4], halfWidth: 25.5, sag: 10, jaw: 21, line: 5 }, // at: the bottom of its smile
 };
 
-// The fox on `canvas`. `draw(pose, blink, t)` shows it with a pose from a question's lip sync,
-// [open, width, energy] (see src/speech/lipsync.py), its eyes `blink` (0-1) shut, `t` seconds
-// into the question, which sets its idle sway.
-export function fox(canvas) {
+// The fox on `canvas`, the `view` of its picture (FOX.view or FOX.bubble). `draw(pose, blink, t)`
+// shows it with a pose from a question's lip sync, [open, width, energy] (see
+// src/speech/lipsync.py), its eyes `blink` (0-1) shut, `t` seconds into the question, which sets
+// its idle sway.
+export function fox(canvas, view = FOX.view) {
   const ctx = canvas.getContext('2d');
   const image = new Image();
   let last = null;
@@ -97,7 +99,7 @@ export function fox(canvas) {
 
   function draw(pose, blink, t) {
     last = [pose, blink, t];
-    const [vx, vy, vw, vh] = FOX.view;
+    const [vx, vy, vw, vh] = view;
     const w = Math.round(canvas.clientWidth * devicePixelRatio);
     if (!w || !image.naturalWidth) return;
     if (canvas.width !== w) {
@@ -107,11 +109,11 @@ export function fox(canvas) {
     const [open, width, energy] = pose;
     const scale = w / vw;
     ctx.setTransform(scale, 0, 0, scale, -vx * scale, -vy * scale);
-    // A slow sway and breathing, and it rises a little on the louder parts.
+    // A slow sway and breathing, and it rises a little on the louder parts, by as much in any view.
     const wave = (period, phase = 0) => Math.sin((2 * Math.PI * t) / period + phase);
     const [px, py] = FOX.pivot;
     const breathe = 0.005 * wave(3.4);
-    ctx.translate(px, py - vh * (0.003 * wave(3.7, 0.9) + 0.014 * energy));
+    ctx.translate(px, py - FOX.view[3] * (0.003 * wave(3.7, 0.9) + 0.014 * energy));
     ctx.rotate(((wave(5.3, 0.4) + 0.4 * wave(2.9, 1.7)) * Math.PI) / 180);
     ctx.scale(1 + breathe - 0.006 * energy, 1 + breathe + 0.012 * energy);
     ctx.translate(-px, -py);

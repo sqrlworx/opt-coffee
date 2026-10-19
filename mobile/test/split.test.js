@@ -18,13 +18,25 @@ test('parts are the chapters of the answers there are', () => {
   assert.deepEqual(parts.map((p) => p.q.id), [1, 2]);
 });
 
-test('the asker takes the bottom half while their question plays', () => {
-  const m = moment(parts, 1);
+test('an asker on camera takes the bottom half while their question plays', () => {
+  const onCamera = { ...asked, askerVideo: '/media/q1.mp4' };
+  const filmed = joinedParts([onCamera, { ...withBroll, askerVideo: '/media/q2.mp4' }], chapters);
+  const m = moment(filmed, 1);
   assert.equal(m.split, 'question');
-  assert.equal(m.asking, asked);
+  assert.equal(m.asking, onCamera);
   assert.ok(Math.abs(m.at - 0.95) < 1e-9, 'timed from where the question’s sound starts');
-  assert.equal(moment(parts, 3.5).split, null, 'the answer plays alone');
-  assert.equal(moment(parts, 12).split, 'question', 'the next take starts with its question too');
+  assert.equal(moment(filmed, 3.5).split, null, 'the answer plays alone');
+  assert.equal(moment(filmed, 12).split, 'question', 'the next take starts with its question too');
+});
+
+test('a question nobody asked on camera doesn’t split: the fox says it over the expert', () => {
+  const m = moment(parts, 1);
+  assert.equal(m.split, null);
+  assert.equal(m.asking, asked);
+  assert.ok(Math.abs(m.at - 0.95) < 1e-9, 'its mouth timed from where the question’s sound starts');
+  assert.equal(moment(parts, 3.5).asking, null, 'the answer plays alone');
+  assert.equal(moment(parts, 12).asking, withBroll, 'the next take starts with its question too');
+  assert.equal(moment(parts, 12).split, null);
 });
 
 test('nothing splits before it has been played', () => {
