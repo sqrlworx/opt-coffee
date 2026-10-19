@@ -52,7 +52,7 @@ export default function ProfilePage({ params }) {
       ) : null}
       <View style={{ gap: 16 }}>
         <SectionTitle>Upcoming & open</SectionTitle>
-        {upcoming.length ? <CardList items={upcoming} /> : <Empty message="No upcoming office hours.">{data.isMe ? <Button title="Host one" onPress={() => go('#/oh/new')} /> : null}</Empty>}
+        {upcoming.length ? <CardList items={upcoming} /> : <Empty message="No upcoming off hours.">{data.isMe ? <Button title="Host one" onPress={() => go('#/oh/new')} /> : null}</Empty>}
       </View>
       {past.length ? (
         <View style={{ gap: 16 }}>

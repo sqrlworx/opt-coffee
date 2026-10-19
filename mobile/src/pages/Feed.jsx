@@ -18,8 +18,8 @@ export default function FeedPage() {
         <HostLink />
       </View>
       {data.items.length === 0 ? (
-        <Empty message="Nothing here yet. Subscribe to experts or office hours and they'll show up here.">
-          <Button title="Explore office hours" onPress={() => go('#/explore')} />
+        <Empty message="Nothing here yet. Subscribe to experts or off hours and they'll show up here.">
+          <Button title="Explore off hours" onPress={() => go('#/explore')} />
         </Empty>
       ) : (
         <View style={{ gap: 14 }}>
@@ -39,7 +39,7 @@ function FeedItem({ item }) {
   const announced = item.type === 'announced';
   let cta = ['Read the answers →', true];
   if (announced && oh.status !== 'published') {
-    if (oh.isExpert) cta = ['View office hour →', false];
+    if (oh.isExpert) cta = ['View off hour →', false];
     else if (oh.status === 'open') cta = ['Ask a question →', true];
     else cta = ['View questions →', false];
   }
@@ -51,7 +51,7 @@ function FeedItem({ item }) {
         <View style={{ flex: 1 }}>
           <T>
             <UserLink user={oh.expert} style={{ fontWeight: '600' }} />
-            {announced ? ' announced office hours' : ` answered ${plural(item.answerCount, 'question')}`}
+            {announced ? ' announced off hours' : ` answered ${plural(item.answerCount, 'question')}`}
           </T>
           <Small style={{ color: color.muted }}>{relative(item.at)}</Small>
         </View>

@@ -1482,7 +1482,7 @@ function summaryTranscript(player) {
 // For the expert while their answers are being joined into one video, which takes a few minutes.
 // The page shows the video as soon as it's ready.
 function processingNote(oh) {
-  const el = h('p', { class: 'notice' }, 'Your answers are published, and the video is being processed. It usually takes a few minutes; this page shows it as soon as it’s ready. Until then, everyone else sees this office hour as closed.');
+  const el = h('p', { class: 'notice' }, 'Your answers are published, and the video is being processed. It usually takes a few minutes; this page shows it as soon as it’s ready. Until then, everyone else sees this off hour as closed.');
   const tick = async () => {
     if (!el.isConnected) return;
     try {
@@ -1520,7 +1520,7 @@ async function feedPage() {
     {},
     h('div', { class: 'page-head' }, h('h1', {}, 'Your feed'), h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host off hours')),
     items.length === 0
-      ? empty('Nothing here yet. Subscribe to experts or office hours and they\'ll show up here.', h('a', { class: 'btn btn-outline', href: '#/explore' }, 'Explore office hours'))
+      ? empty('Nothing here yet. Subscribe to experts or off hours and they\'ll show up here.', h('a', { class: 'btn btn-outline', href: '#/explore' }, 'Explore off hours'))
       : h('div', { class: 'stack' }, items.map(feedItem)),
   );
 }
@@ -1536,7 +1536,7 @@ function feedItem(item) {
     h(
       'div',
       {},
-      h('div', {}, userLink(oh.expert), item.type === 'announced' ? ' announced office hours' : ` answered ${plural(item.answerCount, 'question')}`),
+      h('div', {}, userLink(oh.expert), item.type === 'announced' ? ' announced off hours' : ` answered ${plural(item.answerCount, 'question')}`),
       h('div', { class: 'muted small' }, relative(item.at)),
     ),
   );
@@ -1546,7 +1546,7 @@ function feedItem(item) {
   if (item.type === 'announced') {
     let action;
     if (oh.status === 'published') action = cta('Read the answers →');
-    else if (oh.isExpert) action = cta('View office hour →', false);
+    else if (oh.isExpert) action = cta('View off hour →', false);
     else if (oh.status === 'open') action = cta('Ask a question →');
     else action = cta('View questions →', false);
     return h('article', { class: 'card feed-item' }, head, title, oh.description ? h('p', { class: 'desc clamp' }, oh.description) : null, action);
@@ -1569,7 +1569,7 @@ async function explorePage() {
     'div',
     {},
     h('div', { class: 'page-head' }, h('h1', {}, 'Explore'), me ? h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host off hours') : null),
-    h('section', {}, h('h2', { class: 'section-title' }, 'Taking questions now'), open.length ? h('div', { class: 'grid' }, open.map(ohCard)) : empty('No office hours are open right now.')),
+    h('section', {}, h('h2', { class: 'section-title' }, 'Taking questions now'), open.length ? h('div', { class: 'grid' }, open.map(ohCard)) : empty('No off hours are open right now.')),
     h('section', {}, h('h2', { class: 'section-title' }, 'Recently answered'), published.length ? h('div', { class: 'grid' }, published.map(ohCard)) : empty('Nothing answered yet.')),
     h(
       'section',
@@ -1583,7 +1583,7 @@ async function explorePage() {
             'div',
             { class: 'card person' },
             h('a', { href: `#/u/${p.username}` }, h('h3', {}, p.displayName)),
-            h('p', { class: 'muted small' }, `@${p.username} · ${p.subscribers} subscriber${p.subscribers === 1 ? '' : 's'} · ${p.hosted} office hour${p.hosted === 1 ? '' : 's'}`),
+            h('p', { class: 'muted small' }, `@${p.username} · ${p.subscribers} subscriber${p.subscribers === 1 ? '' : 's'} · ${p.hosted} off hour${p.hosted === 1 ? '' : 's'}`),
             h('div', { class: 'row gap-sm wrap' }, p.expertise.map((t) => h('span', { class: 'chip' }, t))),
             me && me.id !== p.id ? subscribeButton({ type: 'expert', id: p.id, subscribed: p.subscribed }) : null,
           ),
@@ -1619,7 +1619,7 @@ async function officeHourPage({ id }) {
       { class: 'row gap-sm wrap' },
       oh.isExpert && oh.status !== 'published' ? h('a', { class: 'btn btn-primary', href: `#/oh/${oh.id}/manage` }, 'Plan & answer') : null,
       oh.isExpert && oh.status === 'published' && !oh.processing ? h('a', { class: 'btn btn-outline', href: `#/oh/new?followUp=${oh.id}` }, 'Create follow-up Q&A') : null,
-      !oh.isExpert ? subscribeButton({ type: 'office_hour', id: oh.id, subscribed: oh.subscribed, label: 'this office hour' }) : null,
+      !oh.isExpert ? subscribeButton({ type: 'office_hour', id: oh.id, subscribed: oh.subscribed, label: 'this off hour' }) : null,
     ),
   );
 
@@ -2530,7 +2530,7 @@ function suggestionPanel(oh) {
   let round = 0;
   const shown = [];
   const list = h('div', { class: 'suggestions' });
-  const addBtn = h('button', { class: 'btn btn-primary', hidden: true }, 'Add selected to office hours');
+  const addBtn = h('button', { class: 'btn btn-primary', hidden: true }, 'Add selected to off hours');
 
   const fetchMore = action(async () => {
     list.prepend(h('p', { class: 'muted small loading-line' }, 'Moderator is thinking…'));
@@ -2563,7 +2563,7 @@ function suggestionPanel(oh) {
   return h(
     'section',
     { class: 'card seed' },
-    h('div', { class: 'row space-between wrap gap-sm' }, h('div', {}, h('h2', {}, '✦ Seed your office hours'), h('p', { class: 'muted small' }, 'The moderator suggests questions from your bio, expertise and topic. Seeds appear as "Suggested by moderator" and can be +1\'d like any question.')), h('button', { class: 'btn btn-outline', onclick: fetchMore }, 'Suggest questions')),
+    h('div', { class: 'row space-between wrap gap-sm' }, h('div', {}, h('h2', {}, '✦ Seed your off hours'), h('p', { class: 'muted small' }, 'The moderator suggests questions from your bio, expertise and topic. Seeds appear as "Suggested by moderator" and can be +1\'d like any question.')), h('button', { class: 'btn btn-outline', onclick: fetchMore }, 'Suggest questions')),
     list,
     h('div', { class: 'row gap-sm' }, addBtn),
   );
@@ -2618,7 +2618,7 @@ async function newOfficeHourPage(_, query) {
     h('label', { class: 'check' }, f.anon, ' Allow anonymous questions'),
     fromDiscussion,
     me.expertise.length === 0 ? h('p', { class: 'notice' }, 'Tip: ', h('a', { href: `#/u/${me.username}` }, 'add your expertise and bio'), ' so the moderator can suggest better seed questions.') : null,
-    h('div', { class: 'row gap-sm' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Announce office hours')),
+    h('div', { class: 'row gap-sm' }, h('button', { class: 'btn btn-primary', type: 'submit' }, 'Announce off hours')),
   );
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -2660,7 +2660,7 @@ async function profilePage({ username }) {
     { class: 'stack' },
     header,
     data.isMe ? profileEditor(u) : null,
-    h('section', {}, h('h2', { class: 'section-title' }, 'Upcoming & open'), upcoming.length ? h('div', { class: 'grid' }, upcoming.map(ohCard)) : empty('No upcoming office hours.', data.isMe ? h('a', { class: 'btn btn-outline', href: '#/oh/new' }, 'Host one') : null)),
+    h('section', {}, h('h2', { class: 'section-title' }, 'Upcoming & open'), upcoming.length ? h('div', { class: 'grid' }, upcoming.map(ohCard)) : empty('No upcoming off hours.', data.isMe ? h('a', { class: 'btn btn-outline', href: '#/oh/new' }, 'Host one') : null)),
     past.length ? h('section', {}, h('h2', { class: 'section-title' }, 'Answered'), h('div', { class: 'grid' }, past.map(ohCard))) : null,
   );
 }

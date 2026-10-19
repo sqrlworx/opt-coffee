@@ -33,7 +33,7 @@ export function Suggestions({ oh, onAdded }) {
   };
   return (
     <Card style={{ gap: 14 }}>
-      <H3>✦ Seed your office hours</H3>
+      <H3>✦ Seed your off hours</H3>
       <Hint>The moderator suggests questions from your bio, expertise and topic. Seeds appear as "Suggested by moderator" and can be +1'd like any question.</Hint>
       <Button title="Suggest questions" onPress={more} />
       {thinking ? <Small style={{ color: color.muted }}>Moderator is thinking…</Small> : null}
@@ -50,7 +50,7 @@ export function Suggestions({ oh, onAdded }) {
           ))}
         </View>
       ) : null}
-      {items.length ? <Button kind="primary" title="Add selected to office hours" onPress={add} /> : null}
+      {items.length ? <Button kind="primary" title="Add selected to off hours" onPress={add} /> : null}
     </Card>
   );
 }

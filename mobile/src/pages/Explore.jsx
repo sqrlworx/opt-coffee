@@ -21,7 +21,7 @@ export default function ExplorePage() {
       </View>
       <View style={{ gap: 16 }}>
         <SectionTitle>Taking questions now</SectionTitle>
-        {open.length ? <CardList items={open} /> : <Empty message="No office hours are open right now." />}
+        {open.length ? <CardList items={open} /> : <Empty message="No off hours are open right now." />}
       </View>
       <View style={{ gap: 16 }}>
         <SectionTitle>Recently answered</SectionTitle>
@@ -36,7 +36,7 @@ export default function ExplorePage() {
                 <H3>{p.displayName}</H3>
               </Link>
               <Small style={{ color: color.muted }}>
-                @{p.username} · {plural(p.subscribers, 'subscriber')} · {plural(p.hosted, 'office hour')}
+                @{p.username} · {plural(p.subscribers, 'subscriber')} · {plural(p.hosted, 'off hour')}
               </Small>
               {p.expertise.length ? (
                 <Row wrap gap={6}>

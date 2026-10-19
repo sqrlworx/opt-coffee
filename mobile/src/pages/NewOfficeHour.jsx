@@ -91,7 +91,7 @@ function OfficeHourForm({ followUp }) {
             Tip: <Link to={`#/u/${me.username}`}>add your expertise and bio</Link> so the moderator can suggest better seed questions.
           </Notice>
         ) : null}
-        <Button kind="primary" title="Announce office hours" onPress={submit} />
+        <Button kind="primary" title="Announce off hours" onPress={submit} />
       </Card>
     </View>
   );

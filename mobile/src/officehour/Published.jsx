@@ -149,7 +149,7 @@ export function ProcessingNote({ oh, onReady }) {
       clearTimeout(timer);
     };
   }, [oh.id]);
-  return <Notice>Your answers are published, and the video is being processed. It usually takes a few minutes; this page shows it as soon as it’s ready. Until then, everyone else sees this office hour as closed.</Notice>;
+  return <Notice>Your answers are published, and the video is being processed. It usually takes a few minutes; this page shows it as soon as it’s ready. Until then, everyone else sees this off hour as closed.</Notice>;
 }
 
 const styles = StyleSheet.create({

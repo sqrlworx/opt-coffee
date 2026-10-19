@@ -348,7 +348,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
 
   function getOfficeHour(id) {
     const oh = db.prepare('SELECT * FROM office_hours WHERE id = ?').get(Number(id));
-    if (!oh) throw new HttpError(404, 'Office hour not found');
+    if (!oh) throw new HttpError(404, 'Off hour not found');
     return oh;
   }
 
@@ -358,7 +358,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
 
   // Publishing is final: after that the answers and their order can't change.
   function requireUnpublished(oh) {
-    if (oh.published_at) throw new HttpError(409, 'This office hour is published and can no longer be edited');
+    if (oh.published_at) throw new HttpError(409, 'This off hour is published and can no longer be edited');
   }
 
   /** A question whose answer the user may record or remove: they're the expert and it isn't published. */
@@ -708,7 +708,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       if (body.followUpOf != null) {
         const earlier = getOfficeHour(body.followUpOf);
         requireExpert(earlier, user);
-        if (!earlier.published_at) throw new HttpError(409, 'Only a published office hour can be followed up');
+        if (!earlier.published_at) throw new HttpError(409, 'Only a published off hour can be followed up');
         followUpOf = earlier.id;
       }
       const seeds = body.questions == null ? [] : seedTexts(body.questions);
@@ -770,7 +770,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     async ({ params, user }) => {
       const oh = getOfficeHour(params.id);
       requireExpert(oh, user);
-      if (!oh.published_at) throw new HttpError(409, 'Only a published office hour can be followed up');
+      if (!oh.published_at) throw new HttpError(409, 'Only a published off hour can be followed up');
       const discussion = publishedAnswers(loadQuestions(db, oh.id, user)).map((q) => ({
         question: q.body,
         replies: discussionOf(db, q.id, oh.expert_id, user).map((r) => ({
@@ -806,9 +806,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     // transcript is the question text.
     ({ params, user, body }) => {
       const oh = getOfficeHour(params.id);
-      if (statusOf(oh) !== 'open') throw new HttpError(409, 'This office hour is no longer taking questions');
+      if (statusOf(oh) !== 'open') throw new HttpError(409, 'This off hour is no longer taking questions');
       const anonymous = Boolean(body.anonymous);
-      if (anonymous && !oh.allow_anonymous) throw new HttpError(400, 'Anonymous questions are not enabled for this office hour');
+      if (anonymous && !oh.allow_anonymous) throw new HttpError(400, 'Anonymous questions are not enabled for this off hour');
       const recording = body.recording == null ? null : String(body.recording);
       let text;
       let fix = null;
@@ -863,7 +863,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     async ({ params, user, req }) => {
       if (!speech) throw new HttpError(503, 'Asking out loud is not available on this server');
       const oh = getOfficeHour(params.id);
-      if (statusOf(oh) !== 'open') throw new HttpError(409, 'This office hour is no longer taking questions');
+      if (statusOf(oh) !== 'open') throw new HttpError(409, 'This off hour is no longer taking questions');
       // Cross-site forms can't send an audio/* or video/* content type, so this also blocks CSRF.
       const videoExt = VIDEO_TYPES[contentType(req)];
       const ext = videoExt ?? AUDIO_TYPES[contentType(req)];
@@ -1054,7 +1054,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const seen = new Set();
       const items = body.items.map((item) => {
         const id = Number(item?.questionId);
-        if (!valid.has(id)) throw new HttpError(400, `Question ${item?.questionId} is not part of this office hour`);
+        if (!valid.has(id)) throw new HttpError(400, `Question ${item?.questionId} is not part of this off hour`);
         if (seen.has(id)) throw new HttpError(400, `Question ${id} appears twice`);
         seen.add(id);
         return id;

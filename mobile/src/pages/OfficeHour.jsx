@@ -71,7 +71,7 @@ function Masthead({ oh, followUps }) {
       <View style={{ gap: 10 }}>
         {oh.isExpert && oh.status !== 'published' ? <Button kind="primary" title="Plan & answer" onPress={() => go(`#/oh/${oh.id}/manage`)} /> : null}
         {oh.isExpert && oh.status === 'published' && !oh.processing ? <Button title="Create follow-up Q&A" onPress={() => go(`#/oh/new?followUp=${oh.id}`)} /> : null}
-        {!oh.isExpert ? <SubscribeButton type="office_hour" id={oh.id} subscribed={oh.subscribed} label="this office hour" /> : null}
+        {!oh.isExpert ? <SubscribeButton type="office_hour" id={oh.id} subscribed={oh.subscribed} label="this off hour" /> : null}
       </View>
     </View>
   );

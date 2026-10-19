@@ -76,7 +76,7 @@ question(past, 'sam', 'Do you still get to code?', { createdAt: t(-2) });
 
 // 2) Open office hour with grouped questions
 const open = officeHour('maya', {
-  title: 'Distributed databases office hours',
+  title: 'Distributed databases off hours',
   topic: 'Databases',
   description: 'Replication, consistency, picking a database for your project. Nothing is too basic.',
   deadline: t(3),
