@@ -9,7 +9,7 @@ import { api, sendFile } from '../api.js';
 import { useApp } from '../context.js';
 import { fmtDate } from '../format.js';
 import { useBump, useLeaveGuard, useLoad } from '../hooks.js';
-import { AnswerBox } from '../manage/AnswerBox.jsx';
+import { AnswerActions, AnswerBox } from '../manage/AnswerBox.jsx';
 import { createSession } from '../manage/session.js';
 import { Studio } from '../manage/Studio.jsx';
 import { Suggestions } from '../manage/Suggestions.jsx';
@@ -57,8 +57,8 @@ function Planner({ data, reload }) {
       uploading: Promise.resolve(), // takes upload one at a time, in the order they were recorded
       finishing: 0, // takes kept but still being finished by the browser, about to start saving
       local: new Map(), // question id -> object URL of its saved take, to keep playing from
-      brollDrafts: new Map(), // question id -> b-roll description being typed
-      brollFull: new Map(), // question id -> whether a video uploaded as its b-roll is to be full screen
+      brollDrafts: new Map(), // question id -> b-roll description being typed, while its box is open
+      brollChanging: new Set(), // question ids whose b-roll is being changed: making or uploading another is offered
       brollUploads: new Map(), // question id -> { name, sent (0 to 1), stop } for a video being uploaded
       // The answer order saves itself whenever it changes, so leaving or refreshing never loses it.
       edits: 0,
@@ -207,18 +207,15 @@ function Planner({ data, reload }) {
       s.brolls.set(qid, broll);
       bump();
     },
-    // Uploads a video the expert picked as a question's b-roll, with what they typed as what it
-    // shows, full screen or split screen. The server then gets it ready, in a few seconds, and
-    // places it.
-    async uploadBroll(qid, file, description, full) {
+    // Uploads a video the expert picked as a question's b-roll. The server then gets it ready, in
+    // a few seconds, and places it, by its file's name for want of a description.
+    async uploadBroll(qid, file) {
       if (file.type && !file.type.startsWith('video/')) return toast('Choose a video file.', 'error');
       if (file.size > MAX_BROLL_UPLOAD) return toast('That video is too large: b-roll can be up to 500 MB. Trim it, or export it smaller.', 'error');
       const up = { name: file.name, sent: 0, stop: new AbortController() };
       s.brollUploads.set(qid, up);
       bump();
       const query = new URLSearchParams({ name: file.name });
-      if (description.trim()) query.set('description', description.trim());
-      if (full) query.set('full', '1');
       try {
         const res = await sendFile('PUT', `/api/questions/${qid}/broll/video?${query}`, file, {
           signal: up.stop.signal,
@@ -228,7 +225,7 @@ function Planner({ data, reload }) {
           },
         });
         s.brollDrafts.delete(qid);
-        s.brollFull.delete(qid);
+        s.brollChanging.delete(qid);
         s.brolls.set(qid, res.broll);
         if (res.trimmed) toast(`Your video is ${Math.round(res.trimmed.from)} seconds long, and this answer has room for ${Math.round(res.trimmed.to)} seconds of b-roll, so its start is used.`);
       } catch (err) {
@@ -386,6 +383,7 @@ function AnswerOrder({ plan, setQueue }) {
         <View ref={list} style={{ gap: 14 }}>
           {queue.map((qid, i) => {
             const q = m.questions.get(qid);
+            const grip = handle(qid, i);
             return (
               <SwipeRow
                 key={qid}
@@ -398,12 +396,7 @@ function AnswerOrder({ plan, setQueue }) {
               >
                 <View style={styles.queueItem}>
                   <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
-                    <View style={styles.side}>
-                      <Text style={styles.queueNum}>{i + 1}</Text>
-                      <div {...handle(qid, i)}>
-                        <Icon name="grip" size={20} color={color.muted} />
-                      </div>
-                    </View>
+                    <Text style={styles.queueNum}>{i + 1}</Text>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       {folded ? (
                         <Text numberOfLines={2} style={styles.folded}>
@@ -415,9 +408,19 @@ function AnswerOrder({ plan, setQueue }) {
                       </View>
                     </View>
                   </View>
-                  <View style={folded && styles.gone}>
-                    <AnswerBox qid={qid} plan={plan} />
-                  </View>
+                  {m.videos.get(qid) || m.uploads.has(qid) ? (
+                    <View style={folded && styles.gone}>
+                      <AnswerBox qid={qid} plan={plan} />
+                    </View>
+                  ) : null}
+                  {/* The grip leads the buttons, and stays while the cards are folded. Its dots line up
+                      with the number, the rest of it out in the card's padding. */}
+                  <Row wrap gap={8}>
+                    <div {...grip} style={{ ...grip.style, marginLeft: -12 }}>
+                      <Icon name="grip" size={20} color={color.muted} />
+                    </div>
+                    {folded ? null : <AnswerActions qid={qid} plan={plan} />}
+                  </Row>
                 </View>
               </SwipeRow>
             );
@@ -440,9 +443,7 @@ const styles = StyleSheet.create({
   planVotes: { width: 40, paddingTop: 3, fontFamily: font.sans, fontSize: 13, color: color.muted, fontVariant: ['tabular-nums'] },
   planBody: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
   queueItem: { backgroundColor: color.raised, borderRadius: radius.lg, padding: 16, gap: 12 },
-  // The number, with the grip under it; the grip is wider than this, out into the card's padding.
-  side: { width: 24, alignItems: 'center' },
-  queueNum: { fontFamily: font.serif, fontSize: 20, lineHeight: 26, color: color.ink, fontVariant: ['lining-nums', 'tabular-nums'] },
+  queueNum: { minWidth: 22, fontFamily: font.serif, fontSize: 20, lineHeight: 26, color: color.ink, fontVariant: ['lining-nums', 'tabular-nums'] },
   folded: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
   gone: { display: 'none' },
   savebar: { position: 'fixed', left: 0, right: 0, bottom: `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))`, zIndex: 15, backgroundColor: 'rgba(248,246,242,0.94)', backdropFilter: 'blur(14px)', borderTopWidth: 1, borderTopColor: color.line },

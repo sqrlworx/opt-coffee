@@ -29,10 +29,11 @@ export function useReorder(queue, setQueue, edges) {
     requestAnimationFrame(() => (body.overflowAnchor = ''));
   };
 
+  // The grip stays under the finger, wherever it is on the card.
   const fold = (g) => {
     const box = list.current;
     const card = box.children[g.from];
-    keepPlace(card, () => {
+    keepPlace(g.grip, () => {
       const before = box.offsetHeight;
       flushSync(() => setHeld(g.qid));
       box.style.paddingBottom = `${before - box.offsetHeight}px`; // the page keeps its length, so the scroll back is never cut short
@@ -106,7 +107,7 @@ export function useReorder(queue, setQueue, edges) {
       if (drag.current || e.button > 0 || latest.current.queue.length < 2) return;
       e.preventDefault(); // so a mouse doesn't select text
       e.currentTarget.setPointerCapture(e.pointerId);
-      drag.current = { id: e.pointerId, qid, from: i, y0: e.clientY, y: e.clientY };
+      drag.current = { id: e.pointerId, qid, from: i, grip: e.currentTarget, y0: e.clientY, y: e.clientY };
     },
     onPointerMove(e) {
       const g = drag.current;

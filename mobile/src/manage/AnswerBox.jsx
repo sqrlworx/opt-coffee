@@ -1,5 +1,5 @@
 // A queued question's answer in the planner: the take being saved (or that failed to), or the
-// recorded answer with its transcript and b-roll, and the buttons to record it.
+// recorded answer with its transcript and b-roll; and, apart, the buttons to record it.
 import { useRef } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api } from '../api.js';
@@ -13,60 +13,65 @@ import { color, font, radius } from '../theme.js';
 import { Button, Checkbox, Disclosure, Field, Hint, Label, Row, Small, Warn } from '../ui/index.jsx';
 
 // `plan` is the planner's state (Manage.jsx): what each question has, and what can be done to it.
+// Nothing until there's an answer, or a take of one.
 export function AnswerBox({ qid, plan }) {
   const { brollOn } = useApp();
   const { m } = plan;
   const videoRef = useRef(null);
   const take = m.uploads.get(qid);
-  if (take) {
-    return (
-      <View style={{ gap: 10 }}>
-        <Video src={take.url} controls style={answerVideo} />
-        {take.failed ? (
-          <Row wrap gap={8}>
-            <Small style={{ color: color.muted }}>Couldn't save this answer.</Small>
-            <Button kind="primary" small title="Try again" onPress={() => plan.upload(qid, { ...take, failed: false })} />
-            <Button small title="Discard" onPress={() => plan.discardUpload(qid)} />
-          </Row>
-        ) : (
-          <Small style={{ color: color.muted }}>Saving…</Small>
-        )}
-      </View>
-    );
-  }
+  if (take) return <Video src={take.url} controls style={answerVideo} />;
   const url = m.videos.get(qid);
+  if (!url) return null;
   const transcript = m.transcripts.get(qid);
   const broll = m.brolls.get(qid);
   return (
     <View style={{ gap: 10 }}>
-      {url ? (
-        <>
-          {/* Takes recorded on this page keep playing from the phone's copy once saved. */}
-          <AnswerVideo src={m.local.get(qid) ?? url} captions={transcript?.captions} broll={broll?.status === 'ready' && broll.start != null ? broll : null} videoRef={videoRef} />
-          <AnswerTranscript videoRef={videoRef} transcript={transcript} questionId={qid} pick={(q) => q.answerTranscript} onUpdate={(t) => (m.transcripts.set(qid, t), plan.bump())} editable />
-          {brollOn ? <BrollPanel qid={qid} plan={plan} /> : null}
-        </>
-      ) : null}
-      <Row wrap gap={8}>
-        <Button kind={url ? 'soft' : 'primary'} small title={url ? 'Re-record from here' : 'Answer from here'} onPress={() => plan.startSession(qid)} />
-        {url ? <Button small title="Remove" onPress={() => plan.removeAnswer(qid)} /> : null}
-      </Row>
+      {/* Takes recorded on this page keep playing from the phone's copy once saved. */}
+      <AnswerVideo src={m.local.get(qid) ?? url} captions={transcript?.captions} broll={broll?.status === 'ready' && broll.start != null ? broll : null} videoRef={videoRef} />
+      <AnswerTranscript videoRef={videoRef} transcript={transcript} questionId={qid} pick={(q) => q.answerTranscript} onUpdate={(t) => (m.transcripts.set(qid, t), plan.bump())} editable />
+      {brollOn ? <BrollPanel qid={qid} plan={plan} /> : null}
     </View>
   );
 }
 
-// Under a recorded answer, the expert describes a shot to cut away to while they talk, or uploads a
-// video of their own (from the phone's camera roll), split screen or, if they tick Full screen first,
-// full screen. The server makes the shot, which takes a few minutes, or gets the video ready, and
-// places it where it fits what they're saying; the answer's video above then plays with it cut in.
-// What they've typed, and ticked, is kept while the planner redraws.
+// The buttons under an answer, for a row of the planner's: to record it, or the take being saved.
+export function AnswerActions({ qid, plan }) {
+  const { m } = plan;
+  const take = m.uploads.get(qid);
+  if (take) {
+    if (!take.failed) return <Small style={{ color: color.muted }}>Saving…</Small>;
+    return (
+      <>
+        <Small style={{ color: color.muted }}>Couldn't save this answer.</Small>
+        <Button kind="primary" small title="Try again" onPress={() => plan.upload(qid, { ...take, failed: false })} />
+        <Button small title="Discard" onPress={() => plan.discardUpload(qid)} />
+      </>
+    );
+  }
+  const url = m.videos.get(qid);
+  return (
+    <>
+      <Button kind={url ? 'soft' : 'primary'} small title={url ? 'Re-record' : 'Answer from here'} onPress={() => plan.startSession(qid)} />
+      {url ? <Button small title="Remove" onPress={() => plan.removeAnswer(qid)} /> : null}
+    </>
+  );
+}
+
+// Under a recorded answer, the expert makes b-roll to cut away to while they talk, describing it
+// once Make b-roll opens the box for that, or uploads a video of their own from the phone's camera
+// roll. The server makes the shot, which takes a few minutes, or gets the video ready, and places it
+// where it fits what they're saying; the answer's video above then plays with it cut in. An uploaded
+// video can then go full screen. What they've typed is kept while the planner redraws.
 function BrollPanel({ qid, plan }) {
-  const { makesBroll, brollModel } = useApp();
+  const { makesBroll, brollModel, fail } = useApp();
   const { m } = plan;
   const broll = m.brolls.get(qid);
   const file = useRef(null);
   useWatchQuestion(qid, broll?.status === 'pending', (q) => q.broll?.status !== 'pending', (q) => m.brolls.get(qid)?.status === 'pending' && plan.setBroll(qid, q.broll));
   const remove = async () => plan.setBroll(qid, (await api('DELETE', `/api/questions/${qid}/broll`)).broll);
+  const draft = m.brollDrafts.get(qid); // what's typed in the box, while it's open
+  const changing = m.brollChanging.has(qid);
+  const model = makesBroll && brollModel ? <Hint>model: {brollModel}</Hint> : null;
   const head = (
     <Row wrap gap={10} style={{ alignItems: 'baseline' }}>
       <Label>B-roll</Label>
@@ -75,59 +80,30 @@ function BrollPanel({ qid, plan }) {
     </Row>
   );
 
-  const form = (again = false) => {
-    const draft = m.brollDrafts.get(qid) ?? (again ? (broll?.prompt ?? '') : '');
-    const full = m.brollFull.get(qid) ?? (again && Boolean(broll?.full));
-    return (
-      <View style={{ gap: 8 }}>
-        <Field
-          value={draft}
-          onChangeText={(text) => (m.brollDrafts.set(qid, text), plan.bump())}
-          multiline
-          rows={2}
-          maxLength={500}
-          aria-label={makesBroll ? 'Describe the b-roll' : 'What your video shows'}
-          placeholder={makesBroll ? 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"' : 'What your video shows, e.g. "Hands sketching a wireframe on paper"'}
-        />
-        {/* Before the buttons: picking a video starts uploading it. */}
-        <Checkbox checked={full} onChange={(on) => (m.brollFull.set(qid, on), plan.bump())} label="Full screen" />
-        <Row wrap gap={8}>
-          {makesBroll ? (
-            <Button
-              kind="primary"
-              small
-              title={broll ? 'Make new b-roll' : 'Make b-roll'}
-              onPress={async () => {
-                const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: draft });
-                m.brollDrafts.delete(qid);
-                m.brollFull.delete(qid);
-                plan.setBroll(qid, res.broll);
-              }}
-            />
-          ) : null}
-          <Button kind={makesBroll ? 'ring' : 'primary'} small title="Upload a video" onPress={() => file.current.click()} />
-          {broll ? <Button kind="ring" small title="Remove b-roll" onPress={remove} /> : null}
-          {broll?.status === 'ready' ? <Button kind="link" small title="Cancel" onPress={() => (m.brollDrafts.delete(qid), m.brollFull.delete(qid), plan.bump())} /> : null}
-        </Row>
-        <input
-          ref={file}
-          type="file"
-          accept="video/*"
-          hidden
-          onChange={(e) => {
-            const picked = e.target.files[0];
-            e.target.value = ''; // so picking the same file again still counts
-            if (picked) plan.uploadBroll(qid, picked, draft, full);
-          }}
-        />
-        {makesBroll ? (
-          brollModel ? <Hint>model: {brollModel}</Hint> : null
-        ) : (
-          <Hint>{"A video of your own, shorter than your answer. Say above what it shows, and it's cut in where you talk about it; while it plays your answer moves to the top half of the screen. Tick Full screen before uploading to have it take the whole screen instead, with your voice over it."}</Hint>
-        )}
-      </View>
-    );
-  };
+  // Make b-roll opens the box, with what was asked for last if it's being changed or failed;
+  // Upload a video picks one and sends it.
+  const choose = (
+    <View style={{ gap: 8 }}>
+      <Row wrap gap={8}>
+        {makesBroll ? <Button kind="primary" small title="Make b-roll" onPress={() => (m.brollDrafts.set(qid, broll && !broll.upload ? (broll.prompt ?? '') : ''), plan.bump())} /> : null}
+        <Button kind={makesBroll ? 'ring' : 'primary'} small title="Upload a video" onPress={() => file.current.click()} />
+        {broll?.status === 'failed' ? <Button kind="ring" small title="Remove b-roll" onPress={remove} /> : null}
+        {changing ? <Button kind="link" small title="Cancel" onPress={() => (m.brollChanging.delete(qid), plan.bump())} /> : null}
+      </Row>
+      <input
+        ref={file}
+        type="file"
+        accept="video/*"
+        hidden
+        onChange={(e) => {
+          const picked = e.target.files[0];
+          e.target.value = ''; // so picking the same file again still counts
+          if (picked) plan.uploadBroll(qid, picked);
+        }}
+      />
+      {makesBroll ? model : <Hint>{"A video of your own, shorter than your answer. It's cut in where you talk about it, and while it plays your answer moves to the top half of the screen."}</Hint>}
+    </View>
+  );
 
   let body;
   const up = m.brollUploads.get(qid);
@@ -148,14 +124,7 @@ function BrollPanel({ qid, plan }) {
         </Row>
       </>
     );
-  } else if (!broll) {
-    body = (
-      <>
-        {head}
-        {form()}
-      </>
-    );
-  } else if (broll.status === 'pending') {
+  } else if (broll?.status === 'pending') {
     body = (
       <>
         {head}
@@ -163,19 +132,46 @@ function BrollPanel({ qid, plan }) {
         <Button kind="link" small title="Cancel" onPress={remove} style={{ alignSelf: 'flex-start' }} />
       </>
     );
-  } else if (broll.status === 'failed') {
+  } else if (draft != null) {
     body = (
       <>
         {head}
-        <Warn>{broll.upload ? "Your video couldn't be used. Upload it again, or try another." : "This b-roll couldn't be made. Try again, or describe it differently."}</Warn>
-        {form(true)}
+        <View style={{ gap: 8 }}>
+          <Field
+            value={draft}
+            onChangeText={(text) => (m.brollDrafts.set(qid, text), plan.bump())}
+            multiline
+            rows={2}
+            maxLength={500}
+            autoFocus
+            aria-label="Describe the b-roll"
+            placeholder='What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"'
+          />
+          <Row wrap gap={8}>
+            <Button
+              kind="primary"
+              small
+              title="Make b-roll"
+              disabled={!draft.trim()}
+              onPress={async () => {
+                const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: draft });
+                m.brollDrafts.delete(qid);
+                m.brollChanging.delete(qid);
+                plan.setBroll(qid, res.broll);
+              }}
+            />
+            <Button kind="link" small title="Cancel" onPress={() => (m.brollDrafts.delete(qid), plan.bump())} />
+          </Row>
+          {model}
+        </View>
       </>
     );
-  } else if (m.brollDrafts.has(qid)) {
+  } else if (!broll || broll.status === 'failed' || changing) {
     body = (
       <>
         {head}
-        {form(true)}
+        {broll?.status === 'failed' ? <Warn>{broll.upload ? "Your video couldn't be used. Upload it again, or try another." : "This b-roll couldn't be made. Try again, or describe it differently."}</Warn> : null}
+        {choose}
       </>
     );
   } else {
@@ -189,6 +185,8 @@ function BrollPanel({ qid, plan }) {
         ) : (
           <Warn>This answer is too short for its b-roll, so it’s left out. Re-record a longer answer{broll.upload ? '' : ', or make new b-roll to fit this one'}.</Warn>
         )}
+        {/* An uploaded video can fill the screen instead; it's placed again to suit. */}
+        {broll.upload ? <Checkbox checked={broll.full} onChange={(full) => api('PATCH', `/api/questions/${qid}/broll`, { full }).then((res) => plan.setBroll(qid, res.broll), fail)} label="Full screen" /> : null}
         {/* What was filmed, which may be a scene standing for the idea they described. */}
         {broll.shot && broll.shot !== broll.prompt ? (
           <Disclosure title={<Small style={{ color: color.muted }}>What was filmed</Small>}>
@@ -196,7 +194,7 @@ function BrollPanel({ qid, plan }) {
           </Disclosure>
         ) : null}
         <Row wrap gap={8}>
-          <Button kind="ring" small title="Change" onPress={() => (m.brollDrafts.set(qid, broll.prompt ?? ''), m.brollFull.set(qid, broll.full), plan.bump())} />
+          <Button kind="ring" small title="Change" onPress={() => (m.brollChanging.add(qid), plan.bump())} />
           <Button kind="ring" small title="Remove" onPress={remove} />
         </Row>
       </>

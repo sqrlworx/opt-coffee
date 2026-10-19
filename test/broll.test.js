@@ -406,6 +406,31 @@ test('an uploaded video can be full screen instead of split screen, through re-r
   assert.equal(answers[0].broll.full, true);
 });
 
+test('an uploaded video switches to full screen and back without uploading it again, placed again each time', async () => {
+  const expert = await register('switch_host');
+  const asker = await register('switch_asker');
+  const { qid } = await answered(expert, asker, 20, 2);
+  const switchTo = (full) => expert('PATCH', `/api/questions/${qid}/broll`, { full });
+  assert.deepEqual(await switchTo(true), { status: 400, error: 'Only a video you upload can be full screen' });
+
+  assert.equal((await expert('PUT', `/api/questions/${qid}/broll/video?name=whisking.mov`, take('whisking', 4), 'video/quicktime')).status, 200);
+  await app.idle();
+  const clip = row(qid).broll_video;
+  const res = await switchTo(true);
+  assert.deepEqual([res.status, res.broll.full, res.broll.status], [200, true, 'pending']);
+  await app.idle();
+  assert.deepEqual([row(qid).broll_status, row(qid).broll_full, row(qid).broll_video], ['ready', 1, clip], 'the same clip, placed again');
+  assert.equal((await switchTo(true)).broll.status, 'ready', 'as it was, so not placed again');
+  assert.deepEqual([(await switchTo(false)).broll.full, row(qid).broll_full], [false, 0]);
+  await app.idle();
+  assert.deepEqual(await expert('PATCH', `/api/questions/${qid}/broll`, {}), { status: 400, error: 'Say full: true or false' });
+
+  // B-roll that's made can't be full screen.
+  await expert('POST', `/api/questions/${qid}/broll`, { prompt: 'A whisk beating eggs' });
+  await app.idle();
+  assert.deepEqual(await switchTo(true), { status: 400, error: 'Only a video you upload can be full screen' });
+});
+
 test('on startup, an uploaded video being placed is placed, and one that has gone is marked failed, not made', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_broll_resume_upload_'));
   try {

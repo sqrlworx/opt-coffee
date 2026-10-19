@@ -102,7 +102,8 @@ const styles = StyleSheet.create({
   slot: { borderRadius: radius.lg },
   // Inset a little, so its edge doesn't show around the card's corners.
   behind: { position: 'absolute', top: 2, bottom: 2, right: 2, width: WIDTH + radius.lg, borderRadius: radius.lg - 2, backgroundColor: color.accent, alignItems: 'flex-end' },
-  // Its words near the top, where the question is: a card with an answer is taller than the screen.
+  // Its words near the top, and kept on screen under the top bar: a card with an answer is taller
+  // than the screen, and slid from anywhere on it.
   action: { width: WIDTH - 2, flex: 1, alignItems: 'center', paddingTop: 24, cursor: 'pointer' },
-  actionText: { fontFamily: font.sans, fontSize: 15, fontWeight: '600', color: color.accentInk },
+  actionText: { position: 'sticky', top: 'calc(76px + env(safe-area-inset-top))', fontFamily: font.sans, fontSize: 15, fontWeight: '600', color: color.accentInk },
 });

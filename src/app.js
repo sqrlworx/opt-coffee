@@ -1203,6 +1203,25 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     { auth: true, raw: true },
   );
 
+  // A clip the expert uploaded goes full screen, with `full: true`, or back to split screen, without
+  // uploading it again. It's placed again, since where it fits depends on how it looks.
+  route(
+    'PATCH',
+    '/api/questions/:id/broll',
+    ({ params, user, body }) => {
+      if (!brollJobs) throw new HttpError(503, 'B-roll is not available on this server');
+      const q = editableQuestion(params.id, user);
+      if (typeof body.full !== 'boolean') throw new HttpError(400, 'Say full: true or false');
+      if (!q.broll_upload) throw new HttpError(400, 'Only a video you upload can be full screen');
+      if (Boolean(q.broll_full) !== body.full) {
+        db.prepare('UPDATE questions SET broll_full = ? WHERE id = ?').run(body.full ? 1 : 0, q.id);
+        brollJobs.place(q.id);
+      }
+      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+    },
+    { auth: true },
+  );
+
   route(
     'DELETE',
     '/api/questions/:id/broll',
