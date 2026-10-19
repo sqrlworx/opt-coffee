@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { openDb } from '../src/db.js';
 import { createApp } from '../src/app.js';
 import { createModerator } from '../src/moderator/index.js';
-import { createVideoJoiner } from '../src/video.js';
+import { createVideoJoiner, pipBox } from '../src/video.js';
 
 // Stands in for ffmpeg: a "video" says how long it is ("take: <label> <seconds>s"), and joining
 // writes them one after another. A question with audio is found 0.06 seconds into its part, and
@@ -131,8 +131,8 @@ test('publishing joins the answers into one public video, in the published order
   // The expert sees it's published and being processed.
   page = await expert('GET', `/api/office-hours/${ohId}`);
   assert.deepEqual([page.officeHour.status, page.officeHour.processing], ['published', true]);
-  assert.deepEqual(page.video, { status: 'pending', src: null, chapters: [] });
-  assert.deepEqual((await expert('GET', `/api/office-hours/${ohId}/video`)).video, { status: 'pending', src: null, chapters: [] });
+  assert.deepEqual(page.video, { status: 'pending', src: null, mobileSrc: null, chapters: [] });
+  assert.deepEqual((await expert('GET', `/api/office-hours/${ohId}/video`)).video, { status: 'pending', src: null, mobileSrc: null, chapters: [] });
   release();
   await app.idle();
 
@@ -184,7 +184,7 @@ test("a join that fails is marked failed and leaves no file behind; the answers 
   await expert('POST', `/api/office-hours/${ohId}/publish`);
   await app.idle();
   const page = await client()('GET', `/api/office-hours/${ohId}`);
-  assert.deepEqual(page.video, { status: 'failed', src: null, chapters: [] });
+  assert.deepEqual(page.video, { status: 'failed', src: null, mobileSrc: null, chapters: [] });
   assert.equal(page.answers.length, 1); // still there, one by one
   assert.deepEqual(readdirSync(mediaDir).filter((f) => !before.has(f)), []);
 });
@@ -294,17 +294,20 @@ test("ffmpeg finds where a question's sound starts in a joined video", { skip: !
 });
 
 // A joiner that finishes takes, as with src/finish: it records what it's given, and its captions
-// are burned in for every take with a transcript. `gate` holds it until released.
+// are burned in for every take with a transcript, with a copy for phones. `gate` holds it until released.
 function finishingJoiner() {
   const joiner = {
     calls: [],
     gate: null,
     finishing: true,
-    async join(takes, out) {
+    async join(takes, out, mobileOut) {
       await joiner.gate;
       joiner.calls.push(takes.map(({ file, ...rest }) => ({ video: readFileSync(file, 'utf8'), ...rest })));
       writeFileSync(out, `finished, version ${joiner.calls.length}`);
-      return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)) };
+      const captioned = takes.map((t) => Boolean(t.cues?.length));
+      const mobile = Boolean(mobileOut && captioned.some(Boolean));
+      if (mobile) writeFileSync(mobileOut, `finished for phones, version ${joiner.calls.length}`);
+      return { durations: takes.map(() => 5), captioned, mobile };
     },
     locate: async (video, questions) => questions.map(() => 0),
   };
@@ -367,6 +370,9 @@ test('finished joins wait for transcripts being made, and their chapters say whi
   const { video } = await asker('GET', `/api/office-hours/${officeHour.id}`);
   assert.equal(video.status, 'ready');
   assert.deepEqual(video.chapters, [{ questionId: ids[0], start: 0, end: 5, captions: true, questionStart: 0 }, { questionId: ids[1], start: 5, end: 10, captions: false, questionStart: 0 }]);
+  // The mobile app's copy, with the captions placed for its split screen, is as public as the video.
+  assert.notEqual(video.mobileSrc, video.src);
+  assert.equal(await (await client(f.base).media(video.mobileSrc)).text(), 'finished for phones, version 1');
 });
 
 test('correcting a published transcript remakes a finished video, and readers keep the old one until then', async (t) => {
@@ -378,9 +384,9 @@ test('correcting a published transcript remakes a finished video, and readers ke
   setTranscript(f.db, answerVideo(f.db, ids[0]), 'ready', [[0, 2, 'Does a fix reach the captions?'], [2, 4, 'It does, eventualy.']]);
   await expert('POST', `/api/office-hours/${ohId}/publish`);
   await f.app.idle();
-  const before = (await reader('GET', `/api/office-hours/${ohId}`)).video.src;
-  const oldFile = join(f.dir, before.split('/').pop());
-  assert.ok(existsSync(oldFile));
+  const { src: before, mobileSrc: mobileBefore } = (await reader('GET', `/api/office-hours/${ohId}`)).video;
+  const [oldFile, oldMobile] = [before, mobileBefore].map((src) => join(f.dir, src.split('/').pop()));
+  assert.ok(existsSync(oldFile) && existsSync(oldMobile));
 
   let release;
   f.joiner.gate = new Promise((resolve) => (release = resolve));
@@ -399,7 +405,8 @@ test('correcting a published transcript remakes a finished video, and readers ke
   page = await reader('GET', `/api/office-hours/${ohId}`);
   assert.notEqual(page.video.src, before);
   assert.equal(await (await reader.media(page.video.src)).text(), 'finished, version 2');
-  assert.ok(!existsSync(oldFile)); // replaced
+  assert.equal(await (await reader.media(page.video.mobileSrc)).text(), 'finished for phones, version 2');
+  assert.ok(!existsSync(oldFile) && !existsSync(oldMobile)); // replaced
 });
 
 test('a joiner with a finisher joins the finished parts, or the takes as recorded if finishing fails', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
@@ -410,25 +417,35 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=440:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=1', '-f', 'lavfi', '-i', 'sine=f=660:duration=1', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'b.mp4'));
     const takes = [{ file: join(dir, 'a.mp4'), answerStart: 0.5, cues: [[0, 1, 'Hello there.']], words: null }, { file: join(dir, 'b.mp4') }];
-    // Stands in for src/finish: renders each take at 1080p, as the real one does.
+    // Stands in for src/finish: renders each take at 1080p, as the real one does, and its copy for phones where asked.
     let given = null;
     const finisher = {
       async finish(jobs) {
         given = jobs;
-        for (const job of jobs) ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.output);
+        for (const job of jobs) {
+          for (const output of [job.output, job.mobile_output].filter(Boolean)) ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', output);
+        }
         return {};
       },
     };
-    const finished = await createVideoJoiner({ finisher }).join(takes, join(dir, 'finished.mp4'));
+    const finished = await createVideoJoiner({ finisher }).join(takes, join(dir, 'finished.mp4'), join(dir, 'mobile.mp4'));
     assert.deepEqual(given.map((j) => [j.answer_start, j.cues]), [[0.5, [[0, 1, 'Hello there.']]], [null, null]]);
-    assert.deepEqual(finished.captioned, [true, false]);
-    assert.deepEqual(probe(join(dir, 'finished.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1920,1080']);
-    assert.ok(Math.abs(Number(probe(join(dir, 'finished.mp4'), 'format=duration')) - 3) < 0.1);
+    assert.deepEqual(given.map((j) => Boolean(j.mobile_output)), [true, false]); // only a take with captions differs
+    assert.deepEqual([finished.captioned, finished.mobile], [[true, false], true]);
+    for (const file of ['finished.mp4', 'mobile.mp4']) {
+      assert.deepEqual(probe(join(dir, file), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1920,1080']);
+      assert.ok(Math.abs(Number(probe(join(dir, file), 'format=duration')) - 3) < 0.1, file);
+    }
+    // Without a transcript there's nothing to place differently, so no copy.
+    const uncaptioned = await createVideoJoiner({ finisher }).join([takes[1]], join(dir, 'uncaptioned.mp4'), join(dir, 'uncaptioned_mobile.mp4'));
+    assert.equal(uncaptioned.mobile, false);
+    assert.ok(!existsSync(join(dir, 'uncaptioned_mobile.mp4')));
 
     const logs = [];
     const failing = { finish: async () => Promise.reject(new Error('the models could not be downloaded')) };
-    const plain = await createVideoJoiner({ finisher: failing, log: (msg) => logs.push(msg) }).join(takes, join(dir, 'plain.mp4'));
-    assert.deepEqual(plain.captioned, [false, false]); // the player draws them instead
+    const plain = await createVideoJoiner({ finisher: failing, log: (msg) => logs.push(msg) }).join(takes, join(dir, 'plain.mp4'), join(dir, 'plain_mobile.mp4'));
+    assert.deepEqual([plain.captioned, plain.mobile], [[false, false], false]); // the player draws them instead
+    assert.ok(!existsSync(join(dir, 'plain_mobile.mp4')));
     assert.deepEqual(probe(join(dir, 'plain.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     assert.match(logs.join('\n'), /finishing failed, so the takes are joined as recorded: the models could not be downloaded/);
   } finally {
@@ -478,6 +495,8 @@ test('a finisher is given the b-roll and the filter that cuts it in over its pic
       async finish(jobs) {
         for (const { input, output, cutaway } of jobs) {
           assert.equal(cutaway.input, join(dir, 'b.mp4'));
+          // When it plays and where the expert is then, for the phone's captions.
+          assert.deepEqual([cutaway.start, cutaway.length, cutaway.pip], [1, 1.8, pipBox(1920)]);
           ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', `[0:v]scale=1920:1080,fps=30[pic];${cutaway.filter};[cut]format=yuv420p[v]`, '-map', '[v]', '-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac', output);
         }
         return {};
@@ -486,7 +505,8 @@ test('a finisher is given the b-roll and the filter that cuts it in over its pic
     const out = join(dir, 'finished.mp4');
     await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1, length: 1.8 } }], out);
     assert.ok(near(pixel(out, 2, 0.5, 0.5), [0, 0, 255]));
-    assert.ok(near(pixel(out, 2, 0.12, 0.17), [255, 0, 0]));
+    const [x, y, w, h] = pipBox(1920);
+    assert.ok(near(pixel(out, 2, (x + w / 2) / 1920, (y + h / 2) / 1080), [255, 0, 0])); // the expert's picture is where pipBox says
     assert.ok(near(pixel(out, 3.5, 0.5, 0.5), [255, 0, 0]));
   } finally {
     rmSync(dir, { recursive: true, force: true });

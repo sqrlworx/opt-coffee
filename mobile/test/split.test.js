@@ -1,7 +1,7 @@
 // The split screen's arithmetic (src/media/split.js): which half shows what, when.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIP as SERVER_PIP } from '../../src/video.js';
+import { pipBox, PIP as SERVER_PIP } from '../../src/video.js';
 import { brollAt, contain, cutCue, joinedCues, joinedParts, moment, PIP, pipRect, slot } from '../src/media/split.js';
 
 const asked = { id: 1, answerStart: 3, questionCues: [[0, 2.5, 'How do I start?']], transcript: { status: 'ready', cues: [[3.2, 6, 'Start small.']] } };
@@ -64,6 +64,11 @@ test('the expert is cropped from where the server draws them', () => {
   assert.deepEqual(pipRect(1280), [45, 45, 218, 162]);
   const [x, y, w, h] = pipRect(1920);
   assert.ok(x > 0.03 * 1920 && w < 0.176 * 1920 && h / w > 0.73 && h / w < 0.76 && y === x);
+  // The phone's copy burns captions into the expert's picture where the server says it is: the crop
+  // is that picture less its rounded corners, centred on it.
+  const [bx, by, bw, bh] = pipBox(1920);
+  assert.ok(x - bx < 10 && y - by < 10 && x + w <= bx + bw && y + h <= by + bh);
+  assert.equal(x + w / 2, bx + bw / 2);
 });
 
 test('a picture is fitted inside its half, centred', () => {

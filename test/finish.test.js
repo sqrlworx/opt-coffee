@@ -100,6 +100,36 @@ print('{}')
   }
 });
 
+test("the phone's captions are placed for its split screen: the question at the top, the answer in the middle, in the expert's picture over b-roll", { skip }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_finish_mobile_ass_'));
+  try {
+    py(`
+import captions
+from pathlib import Path
+ws = [W(0, 0.4, 'Is'), W(0.4, 1.0, 'it?'), W(2, 2.4, 'Yes'), W(2.4, 3.0, 'indeed.'), W(4.6, 5.0, 'Look'), W(5.0, 5.4, 'here,'), W(6, 6.5, 'see'), W(6.5, 7, 'this.')]
+ps = captions.phrases(ws, 1.5)
+# B-roll from 5s for 3s, with the expert's picture at 62,62, 338x254, as src/video.js puts it at 1080p.
+captions.write_mobile_ass(ps, Path(${JSON.stringify(join(dir, 'mobile.ass'))}), 1920, 1080, (5.0, 3.0, (62, 62, 338, 254)))
+print('{}')
+`);
+    const events = readFileSync(join(dir, 'mobile.ass'), 'utf8').split('\n').filter((l) => l.startsWith('Dialogue:'));
+    assert.match(readFileSync(join(dir, 'mobile.ass'), 'utf8'), /^Style: expert,Montserrat,81,/m); // bigger than the desktop's 60
+    const at = (e) => [e.split(',').slice(1, 4).join(','), /\\pos\((\d+),(\d+)\)/.exec(e).slice(1).map(Number), Number(/\\fs(\d+)/.exec(e)[1])];
+    assert.deepEqual(events.map(at), [
+      ['0:00:00.00,0:00:01.50,asker', [960, 43], 81], // the question, at the top edge: just under the split
+      ['0:00:01.95,0:00:03.50,expert', [960, 540], 81], // the answer, in the middle
+      ['0:00:04.55,0:00:05.00,expert', [960, 540], 81], // until the b-roll starts...
+      ['0:00:05.00,0:00:05.90,expert', [231, 301], 19], // ...then at the bottom of the expert's picture, at its scale
+      ['0:00:05.95,0:00:07.50,expert', [231, 301], 19],
+    ]);
+    assert.match(events[0], /\\an8/);
+    assert.match(events[1], /\\an5/);
+    assert.ok(events[2].includes('\\fad(') && !events[3].includes('\\fad(')); // a phrase pops in once, not again at the cut
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the voice is matched towards natural speech: dull microphones brought up, missing bands left alone', { skip }, () => {
   const gains = py(`
 import numpy as np, sound

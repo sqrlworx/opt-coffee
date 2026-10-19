@@ -27,20 +27,31 @@ const MIN_MATCH = 0.4; // correlation below which it isn't taken as found
 export const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022, blur: 0.009, drop: 0.005 };
 const CUT_FADE = 0.3; // seconds the cut to b-roll and back takes
 
+// The expert's picture while b-roll plays in a frame `width` wide, in pixels: its size, the white
+// frame around it, and where that frame's top left corner is.
+function pipSize(width) {
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const pw = even(PIP.width * width);
+  const ring = Math.max(1, Math.round(PIP.ring * width));
+  return { pw, ph: even((pw * 3) / 4), ring, x: Math.round(PIP.inset * width), y: Math.round(PIP.inset * width) };
+}
+
+/** Where the expert's picture is while b-roll plays in a frame `width` wide: [x, y, width, height], inside its white frame. */
+export function pipBox(width) {
+  const { pw, ph, ring, x, y } = pipSize(width);
+  return [x + ring, y + ring, pw, ph];
+}
+
 /**
  * An ffmpeg filter graph that cuts away to b-roll: from `start` for `length` seconds, the b-roll
  * ([`broll`], any size or frame rate) fills the frame, and the picture ([`pic`], `width`x`height`
  * at 30 fps) moves to the top left. They fade in and out. Its output, [`out`], is timed like [`pic`].
  */
 export function cutawayFilter({ width, height, start, length, pic = 'pic', broll = 'broll', out = 'cut' }) {
-  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
-  const pw = even(PIP.width * width);
-  const ph = even((pw * 3) / 4);
-  const ring = Math.max(1, Math.round(PIP.ring * width));
+  const { pw, ph, ring, x, y } = pipSize(width);
   const [cw, ch] = [pw + 2 * ring, ph + 2 * ring];
   const radius = Math.round(PIP.radius * width);
   const blur = Math.max(1, Math.round(PIP.blur * width));
-  const [x, y] = [Math.round(PIP.inset * width), Math.round(PIP.inset * width)];
   const t = (secs) => String(Math.round(secs * 1000) / 1000);
   const fade = Math.min(CUT_FADE, length / 2);
   const at = `setpts=PTS-STARTPTS+${t(start)}/TB`;
@@ -68,8 +79,9 @@ export function cutawayFilter({ width, height, start, length, pic = 'pic', broll
  * without re-encoding again.
  *
  * With a `finisher` (src/finish), each take is finished instead of just re-encoded: lit and graded
- * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. If that
- * fails, the takes are joined as recorded.
+ * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. The phone
+ * gets a copy of its own, with the captions placed for its split screen. If finishing fails, the
+ * takes are joined as recorded.
  *
  * A take with b-roll cuts away to it (see cutawayFilter), under the captions.
  *
@@ -142,17 +154,33 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
     return best.at;
   }
 
-  // The takes finished, or null if that failed.
-  async function finish(takes, dir) {
+  // The takes finished, or null if that failed: `parts`, and `mobile`, the phone's copies if asked
+  // for, which differ only where a take has captions.
+  async function finish(takes, dir, withMobile) {
     const parts = takes.map((_, i) => join(dir, `finished_${i}.mp4`));
+    const mobile = takes.map((t, i) => (withMobile && t.cues?.length ? join(dir, `finished_${i}_mobile.mp4`) : parts[i]));
     try {
       // The b-roll is cut in over the finished picture, as input 2 (see src/finish/finish.py).
-      const cutaway = ({ file, start, length }) => ({ input: file, filter: cutawayFilter({ width: FINISHED[0], height: FINISHED[1], start, length, broll: '2:v' }) });
+      const cutaway = ({ file, start, length }) => ({
+        input: file,
+        filter: cutawayFilter({ width: FINISHED[0], height: FINISHED[1], start, length, broll: '2:v' }),
+        start,
+        length,
+        pip: pipBox(FINISHED[0]),
+      });
       await finisher.finish(
-        takes.map((t, i) => ({ input: t.file, output: parts[i], answer_start: t.answerStart ?? null, cues: t.cues ?? null, words: t.words ?? null, cutaway: t.broll ? cutaway(t.broll) : null })),
+        takes.map((t, i) => ({
+          input: t.file,
+          output: parts[i],
+          mobile_output: mobile[i] === parts[i] ? null : mobile[i],
+          answer_start: t.answerStart ?? null,
+          cues: t.cues ?? null,
+          words: t.words ?? null,
+          cutaway: t.broll ? cutaway(t.broll) : null,
+        })),
         dir,
       );
-      return parts;
+      return { parts, mobile };
     } catch (err) {
       log(`[video] finishing failed, so the takes are joined as recorded: ${err.message}`);
       return null;
@@ -164,29 +192,38 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
     finishing: Boolean(finisher),
 
     /**
-     * Writes the takes, in order, into one MP4 at `out`. A take is a file name, or
-     * {file, answerStart, cues, words, broll} with what finishing uses: where the answer starts after the
-     * question, and the transcript's cues and word timings; and b-roll to cut away to, {file, start, length}.
-     * @returns {Promise<{durations: number[], captioned: boolean[]}>} how long each part is in the
-     *   result, in seconds, and whether its captions are burned in
+     * Writes the takes, in order, into one MP4 at `out`, and the phone's copy at `mobileOut` when
+     * captions are burned in. A take is a file name, or {file, answerStart, cues, words, broll} with
+     * what finishing uses: where the answer starts after the question, and the transcript's cues and
+     * word timings; and b-roll to cut away to, {file, start, length}.
+     * @returns {Promise<{durations: number[], captioned: boolean[], mobile: boolean}>} how long each
+     *   part is in the result, in seconds, whether its captions are burned in, and whether the
+     *   phone's copy was written (the same parts, so the same durations)
      */
-    async join(takes, out) {
+    async join(takes, out, mobileOut = null) {
       const dir = mkdtempSync(join(tmpdir(), 'forum_join_'));
-      try {
-        takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
-        const finished = finisher ? await finish(takes, dir) : null;
-        const parts = finished ?? (await reencode(takes, dir));
-        // The concat demuxer starts each part where the previous one ends, by its duration.
-        const durations = [];
-        for (const part of parts) durations.push(Number(await probe(part, 'format=duration')));
+      // The concat demuxer starts each part where the previous one ends, by its duration.
+      const concat = async (parts, file) => {
         const list = join(dir, 'parts.txt');
         writeFileSync(list, parts.map((p) => `file '${p}'\n`).join(''));
-        await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', `${out}.part`]);
-        await rename(`${out}.part`, out);
-        return { durations, captioned: takes.map((t) => Boolean(finished && t.cues?.length)) };
+        await ffmpeg(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', `${file}.part`]);
+        await rename(`${file}.part`, file);
+      };
+      try {
+        takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
+        const finished = finisher ? await finish(takes, dir, Boolean(mobileOut)) : null;
+        const parts = finished?.parts ?? (await reencode(takes, dir));
+        const durations = [];
+        for (const part of parts) durations.push(Number(await probe(part, 'format=duration')));
+        const captioned = takes.map((t) => Boolean(finished && t.cues?.length));
+        const mobile = Boolean(mobileOut && captioned.some(Boolean));
+        await concat(parts, out);
+        if (mobile) await concat(finished.mobile, mobileOut);
+        return { durations, captioned, mobile };
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(`${out}.part`, { force: true });
+        if (mobileOut) rmSync(`${mobileOut}.part`, { force: true });
       }
     },
 
@@ -273,6 +310,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
       )
       .all(officeHourId);
     const name = `${randomBytes(16).toString('hex')}.mp4`;
+    const mobileName = `${randomBytes(16).toString('hex')}.mp4`; // the phone's copy, when captions are burned in
     try {
       if (!answers.length) throw new Error('nothing was published');
       // The question at the start of each take is captioned as it was asked: a spoken one from its own transcript.
@@ -284,18 +322,18 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
         const broll = a.broll ? { file: join(mediaDir, a.broll), start: a.brollStart, length: a.brollLength } : null;
         return { file: join(mediaDir, a.video), answerStart: a.answerStart, broll, ...(take && takeCaptions(asked, take, a.answerStart)) };
       });
-      const { durations, captioned } = await joiner.join(takes, join(mediaDir, name));
+      const { durations, captioned, mobile } = await joiner.join(takes, join(mediaDir, name), join(mediaDir, mobileName));
       // Where each answer starts and ends in the joined video, and where its question's sound
       // starts in it: [question id, start, end, captions burned in, question start] in seconds.
       let at = 0;
       const spans = durations.map((d) => [at, (at += d)]);
       const heard = await joiner.locate(join(mediaDir, name), questionsIn(answers, spans));
       const chapters = answers.map((a, i) => [a.id, round(spans[i][0]), round(spans[i][1]), captioned[i] ? 1 : 0, round(heard[i])]);
-      const old = db.prepare('SELECT video FROM office_hours WHERE id = ?').get(officeHourId)?.video;
-      db.prepare("UPDATE office_hours SET video = ?, video_status = 'ready', video_chapters = ? WHERE id = ?").run(name, JSON.stringify(chapters), officeHourId);
-      if (old) rmSync(join(mediaDir, old), { force: true });
+      const old = db.prepare('SELECT video, video_mobile FROM office_hours WHERE id = ?').get(officeHourId);
+      db.prepare("UPDATE office_hours SET video = ?, video_mobile = ?, video_status = 'ready', video_chapters = ? WHERE id = ?").run(name, mobile ? mobileName : null, JSON.stringify(chapters), officeHourId);
+      for (const file of [old?.video, old?.video_mobile]) if (file) rmSync(join(mediaDir, file), { force: true });
     } catch (err) {
-      rmSync(join(mediaDir, name), { force: true });
+      for (const file of [name, mobileName]) rmSync(join(mediaDir, file), { force: true });
       if (!remake) db.prepare("UPDATE office_hours SET video_status = 'failed' WHERE id = ?").run(officeHourId);
       log(`[video] ${remake ? 'remaking the video' : 'joining the answers'} of office hour ${officeHourId} failed: ${err.message}`);
     }

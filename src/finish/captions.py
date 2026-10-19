@@ -1,7 +1,8 @@
 """Captions burned into the picture, in the style of podcast clips.
 
 A few words at a time, low and centred, with no box behind them: white for the expert, yellow for
-the asker's question. Louder words are set bigger. A key word in a phrase is set heavier
+the asker's question. The phone's copy of the video places them for its split screen instead (see
+write_mobile_ass). Louder words are set bigger. A key word in a phrase is set heavier
 (Montserrat Black), and a stressed little word (not, never, really...) in italics.
 
 The text is the transcript as the expert corrected it. Word timings come from speech-to-text;
@@ -10,6 +11,7 @@ where a line was corrected, its words are spread over the line's time instead.
 
 from __future__ import annotations
 
+import itertools
 import re
 from dataclasses import dataclass, field
 
@@ -22,6 +24,8 @@ LEAD = 0.05  # a phrase appears just before it's said...
 HOLD = 0.5  # ...and stays up this long after, unless the next one starts sooner
 SIZE = 0.056  # base font size, as a fraction of the frame height
 BOTTOM = 0.06  # captions sit this far above the bottom edge
+MOBILE_SIZE = 0.075  # on a phone the frame is a few hundred pixels tall, so its copy's are bigger
+MOBILE_TOP = 0.04  # the phone's copy puts the question this far below the top edge
 EMPHASIS_SHARE = 0.4  # at most this share of phrases gets an emphasised word
 
 EXPERT = "&H00FFFFFF"  # ASS colours are &HAABBGGRR
@@ -226,11 +230,11 @@ def caption_top(height: int) -> float:
     return height * (1 - BOTTOM) - 1.3 * 1.12 * SIZE * height
 
 
-def write_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: bool = False) -> int:
-    """Writes the captions as an ASS script for libass, low in the frame, or at the top when the
-    speaker's mouth would be behind them. Returns how many phrases were written."""
-    base = round(SIZE * height)
-    lines = [
+def _script(width: int, height: int, base: int) -> list[str]:
+    """The start of an ASS script for libass, with a style for each speaker at `base` size."""
+    # No box: a soft dark edge and shadow keep the words readable on light and dark alike.
+    edge = f"{_px(base / 30)},{_px(base / 24)}"  # outline and shadow, 2 and 2.5 at 1080p
+    return [
         "[Script Info]",
         "ScriptType: v4.00+",
         f"PlayResX: {width}",
@@ -240,21 +244,83 @@ def write_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: boo
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        # No box: a soft dark edge and shadow keep the words readable on light and dark alike.
-        f"Style: expert,Montserrat,{base},{EXPERT},{EXPERT},&H70000000,&H80000000,-1,0,0,0,100,100,0,0,1,2,2.5,2,40,40,0,1",
-        f"Style: asker,Montserrat SemiBold,{base},{ASKER},{ASKER},&H70000000,&H80000000,0,-1,0,0,100,100,0,0,1,2,2.5,2,40,40,0,1",
+        f"Style: expert,Montserrat,{base},{EXPERT},{EXPERT},&H70000000,&H80000000,-1,0,0,0,100,100,0,0,1,{edge},2,40,40,0,1",
+        f"Style: asker,Montserrat SemiBold,{base},{ASKER},{ASKER},&H70000000,&H80000000,0,-1,0,0,100,100,0,0,1,{edge},2,40,40,0,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
+
+
+def _px(n: float) -> str:
+    return f"{round(n, 2):g}"
+
+
+def _pop(base: int) -> str:
+    """Each phrase pops in."""
+    return rf"\fad(60,0)\fscx90\fscy90\t(0,100,\fscx100\fscy100)\blur{_px(base / 30)}"
+
+
+def write_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: bool = False) -> int:
+    """Writes the captions as an ASS script for libass, low in the frame, or at the top when the
+    speaker's mouth would be behind them. Returns how many phrases were written."""
+    base = round(SIZE * height)
+    lines = _script(width, height, base)
     # One place for the whole take: captions that jump around are hard to follow.
     pos = rf"\an8\pos({width // 2},{int(height * BOTTOM)})" if at_top else rf"\an2\pos({width // 2},{int(height * (1 - BOTTOM))})"
-    pop = r"\fad(60,0)\fscx90\fscy90\t(0,100,\fscx100\fscy100)\blur2"  # each phrase pops in
     for p in phrases_:
         text = " ".join(_word_tags(w, base) + _escape(_display(w.text)) for w in p.words)
-        lines.append(f"Dialogue: 0,{_time(p.start)},{_time(p.end)},{p.speaker},,0,0,0,,{{{pos}{pop}}}{text}")
+        lines.append(f"Dialogue: 0,{_time(p.start)},{_time(p.end)},{p.speaker},,0,0,0,,{{{pos}{_pop(base)}}}{text}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(phrases_)
+
+
+def write_mobile_ass(phrases_: list[Phrase], path, width: int, height: int, broll: tuple | None = None) -> int:
+    """Writes the captions for the phone's copy of the video, placed for its split screen
+    (mobile/src/media/JointPlayer.jsx), where the frame is in the middle of the player, or its
+    bottom half while the asker or the expert has the top half. The question goes at the top edge,
+    just under the split, as the asker is above it. The answer goes in the middle. While b-roll
+    plays, the phone crops the expert's picture out of the frame into the top half, so the answer
+    goes at the bottom of that picture, at its scale, and comes out just above the split.
+
+    `broll` is (start, length, (x, y, w, h)): when the b-roll plays in the take, in seconds, and
+    where the expert's picture is in the frame. Returns how many phrases were written."""
+    base = round(MOBILE_SIZE * height)
+    lines = _script(width, height, base)
+    top = rf"\an8\pos({width // 2},{int(height * MOBILE_TOP)})"
+    middle = rf"\an5\pos({width // 2},{height // 2})"
+    window = (broll[0], broll[0] + broll[1]) if broll else None
+    if broll:
+        bx, by, bw, bh = broll[2]
+        small = round(MOBILE_SIZE * bh)  # the picture fills the top half as the frame fills the middle
+        inset = round(BOTTOM * bh)
+        corner = rf"\an2\pos({bx + bw // 2},{by + bh - inset})\bord{_px(small / 30)}\shad{_px(small / 24)}"
+    for p in phrases_:
+        for i, (start, end, cut) in enumerate(_spans(p.start, p.end, window if p.speaker == "expert" else None)):
+            size, pos = (small, corner) if cut else (base, top if p.speaker == "asker" else middle)
+            words = [_word_tags(w, size) + _escape(_display(w.text)) for w in p.words]
+            text = _wrap(words, p.words, size, bw - 2 * inset) if cut else " ".join(words)
+            pop = _pop(size) if i == 0 else rf"\blur{_px(size / 30)}"  # a phrase going on over the cut doesn't pop in again
+            lines.append(f"Dialogue: 0,{_time(start)},{_time(end)},{p.speaker},,0,0,0,,{{{pos}{pop}}}{text}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(phrases_)
+
+
+def _spans(start: float, end: float, window: tuple | None) -> list[tuple[float, float, bool]]:
+    """A phrase's time split where b-roll starts and ends: (start, end, during the b-roll)."""
+    if not window:
+        return [(start, end, False)]
+    cuts = sorted({start, end, *(t for t in window if start < t < end)})
+    return [(a, b, window[0] <= a and b <= window[1]) for a, b in itertools.pairwise(cuts)]
+
+
+def _wrap(tagged: list[str], words: list[Word], base: int, width: float) -> str:
+    """A phrase on one line, or broken over two near the middle if it would be wider than `width`."""
+    lengths = [(len(_display(w.text)) + 1) * 0.6 * base * w.size for w in words]  # Montserrat is wide
+    if sum(lengths) <= width or len(words) < 2:
+        return " ".join(tagged)
+    split = min(range(1, len(words)), key=lambda i: abs(sum(lengths[:i]) - sum(lengths[i:])))
+    return " ".join(tagged[:split]) + r"\N" + " ".join(tagged[split:])
 
 
 def _display(text: str) -> str:

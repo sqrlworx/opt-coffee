@@ -9,8 +9,12 @@
 // in step. The rest of the time the joined video plays alone, between the halves.
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
-// until the stage is tapped. Captions are drawn at the bottom of the main picture, except for
-// answers whose captions are burned into the video, and those too while their b-roll covers them.
+// until the stage is tapped. It plays the joined video's copy for phones where there is one: its
+// burned-in captions are placed for the split (see write_mobile_ass in src/finish/captions.py),
+// over b-roll too, in the expert's picture that's cropped into the top half. Captions that aren't
+// burned in are drawn just above the split, under whoever is talking in the top half, or on the
+// middle of the joined video while it plays alone. So are burned-in ones while b-roll covers them,
+// in a video joined before there were copies for phones.
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { blinkAt, fox } from '../../../public/fox.js';
 import { api } from '../api.js';
@@ -36,7 +40,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   const clipSlot = useRef(null);
   const fillRef = useRef(null);
   const latest = useRef(null);
-  latest.current = { parts, cues, total, onCurrent };
+  latest.current = { parts, cues, total, onCurrent, mobileCopy: Boolean(video.mobileSrc) };
   const [view, setView] = useState(INITIAL);
   const [captionsOn, setCaptionsOn] = useState(true);
   const [controls, setControls] = useState(true);
@@ -48,11 +52,11 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     const r = rt.current;
     const v = videoRef.current;
     if (!r || !v) return;
-    const { parts, cues, total, onCurrent } = latest.current;
+    const { parts, cues, total, onCurrent, mobileCopy } = latest.current;
     const t = v.currentTime;
     const m = moment(parts, t, r.started);
     let cue = r.started && r.captionsOn ? cueAt(cues, t) : null;
-    if (!cue && m.cut && r.captionsOn && m.part.captions) cue = cutCue(m.part, t);
+    if (!cue && m.cut && r.captionsOn && m.part.captions && !mobileCopy) cue = cutCue(m.part, t);
     // Each asker's video, clip and lip sync loads while the answer before it plays.
     const i = parts.indexOf(m.part);
     for (const p of [parts[i], parts[i + 1]]) {
@@ -248,8 +252,10 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
 
   const ccHidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
   const mainSlot = view.split ? 'bottom' : 'center';
-  // Captions sit above the controls where the main picture reaches down to them.
-  const captionLift = controlsShown && (view.split || wide) ? 92 : 12;
+  // Captions sit just above the split, or on the middle of a lone picture, rising clear of the play
+  // button while it's shown. Sideways, a split's go at the bottom of the left half, above the controls.
+  const captionSideways = wide && Boolean(view.split);
+  const captionShift = captionSideways ? `${controlsShown ? -92 : -12}px` : controlsShown ? '-46px' : view.split ? '-10px' : '50%';
   const scrubPart = scrub != null ? partAt(parts, scrub) : null;
 
   return (
@@ -262,7 +268,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
         setControls(!controlsShown);
       }}
     >
-      <video ref={videoRef} src={video.src} preload="metadata" playsInline style={layer(mainSlot, wide)} />
+      <video ref={videoRef} src={video.mobileSrc ?? video.src} preload="metadata" playsInline style={layer(mainSlot, wide)} />
       <div ref={clipSlot} style={layer('bottom', wide, { shown: view.split === 'broll', z: 1, extra: { background: '#000' } })} />
       <div style={layer('top', wide, { shown: Boolean(view.split), z: 2, extra: { background: view.split === 'broll' ? '#000' : '#f3f3f3', overflow: 'hidden' } })} aria-hidden="true">
         <div style={{ position: 'absolute', inset: 0, display: view.split === 'broll' ? 'none' : 'block' }}>
@@ -272,8 +278,8 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
         <canvas ref={cropCanvas} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: view.split === 'broll' ? 'block' : 'none' }} />
         {view.split !== 'broll' && view.asker ? <span style={askerPill}>{view.asker}</span> : null}
       </div>
-      <div style={layer(mainSlot, wide, { z: 3, extra: { display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box', padding: `0 6% ${captionLift}px` } })} aria-hidden="true">
-        {view.caption ? <span style={{ ...captionStyle, fontStyle: view.isQuestion ? 'italic' : 'normal' }}>{view.caption}</span> : null}
+      <div style={layer('top', captionSideways, { z: 3, extra: { display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box', padding: '0 6%' } })} aria-hidden="true">
+        {view.caption ? <span style={{ ...captionStyle, fontStyle: view.isQuestion ? 'italic' : 'normal', transform: `translateY(${captionShift})` }}>{view.caption}</span> : null}
       </div>
       {!view.started ? <BigPlay label="Play" onPress={() => play()} /> : controlsShown ? <BigPlay playing={view.playing} onPress={toggle} /> : null}
       <div style={{ ...controlsBar, opacity: controlsShown ? 1 : 0, pointerEvents: controlsShown ? 'auto' : 'none' }} onClick={(e) => e.stopPropagation()}>
@@ -323,8 +329,8 @@ function sideVideo(src, fit, background) {
   return el;
 }
 
-const askerPill = { position: 'absolute', left: 10, bottom: 10, padding: '3px 11px', borderRadius: 999, background: 'rgba(0,0,0,0.5)', color: '#fff', font: "600 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", whiteSpace: 'nowrap' };
-const captionStyle = { padding: '2px 9px', borderRadius: 5, background: 'rgba(0,0,0,0.62)', color: '#fff', font: "600 15px/1.35 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", textAlign: 'center', textWrap: 'balance', transition: 'none' };
+const askerPill = { position: 'absolute', left: 10, top: 10, padding: '3px 11px', borderRadius: 999, background: 'rgba(0,0,0,0.5)', color: '#fff', font: "600 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", whiteSpace: 'nowrap' };
+const captionStyle = { padding: '2px 9px', borderRadius: 5, background: 'rgba(0,0,0,0.62)', color: '#fff', font: "600 15px/1.35 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", textAlign: 'center', textWrap: 'balance', transition: 'transform 0.3s' };
 const controlsBar = { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 5, paddingTop: 28, paddingBottom: 2, background: 'linear-gradient(transparent, rgba(0,0,0,0.7))', transition: 'opacity 0.25s' };
 const timeStyle = { color: '#fff', fontSize: 13, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', fontFamily: 'ui-sans-serif, system-ui, -apple-system, sans-serif' };
 const tip = { margin: '0 12px 2px', padding: '4px 9px', borderRadius: 6, background: 'rgba(0,0,0,0.85)', color: '#fff', fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'ui-sans-serif, system-ui, -apple-system, sans-serif' };

@@ -27,9 +27,9 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
 
     uv run finish.py job.json
 
-    {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "answer_start": 4.95,
-                "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
-                "cutaway": {"input": "media/b.mp4", "filter": "..."} or null}],
+    {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null,
+                "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
+                "cutaway": {"input": "media/b.mp4", "filter": "...", "start": 2.5, "length": 6, "pip": [x, y, w, h]} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -38,10 +38,12 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
 - sound (sound.py): the voice restored to studio quality (or, as "natural", only cleaned up),
   then a broadcast voice chain, with question and answer each at -16 LUFS;
 - captions (captions.py), when the take has a transcript: a few words at a time, a colour per
-  speaker, louder words bigger and key words heavier or in italics;
+  speaker, louder words bigger and key words heavier or in italics. With a `mobile_output`, the
+  take is also written there with its captions placed for the phone's split screen;
 - b-roll, when the take has a cutaway: its clip, and the ffmpeg filter graph that cuts away to it
   (made by src/video.js), from [pic], the finished picture, and [2:v], the clip, to [cut]. It goes
-  under the grain and the captions.
+  under the grain and the captions. `start` and `length` are when it plays, and `pip` is where the
+  expert's picture is in the frame then, for the phone's captions.
 
 The takes are cut into pieces of a few seconds that render in parallel. Logs go to stderr; the
 last line on stdout is a JSON report. Exits non-zero on failure.
@@ -266,28 +268,35 @@ def placement(size: tuple[int, int]) -> tuple[float, float, float]:
     return s, (OUT_W - w * s) / 2, (OUT_H - h * s) / 2
 
 
-def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, fonts: Path, tmp: Path) -> None:
+def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, mobile_ass: Path | None, fonts: Path, tmp: Path) -> None:
+    """Encodes the take to `output`, and with `mobile_ass` also to `mobile_output`: the same picture
+    with the captions placed for the phone. One pass makes both."""
     listing = tmp / f"take{index}.txt"
     listing.write_text("".join(f"file '{p}'\n" for p in pieces))
     picture = f"[0:v]setpts=N/{FPS}/TB,{fit_filter(info['size'])},cas=strength=0.4:planes=1"  # sharpen the detail the upscale softened (luma only)
-    finishing = [
-        "noise=c0s=3:c0f=t",  # a fine moving grain, as from a camera sensor
-        *([f"ass={_escape(ass)}:fontsdir={_escape(fonts)}"] if ass else []),
-        "format=yuv420p",
-    ]
+    grain = "noise=c0s=3:c0f=t"  # a fine moving grain, as from a camera sensor
+
+    def burn(script: Path | None) -> str:
+        return ",".join([*([f"ass={_escape(script)}:fontsdir={_escape(fonts)}"] if script else []), "format=yuv420p"])
+
     cutaway = take.get("cutaway")
-    if cutaway:
-        graph = f"{picture}[pic];{cutaway['filter']};[cut]{','.join(finishing)}[v]"
+    graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain}" if cutaway else f"{picture},{grain}"
+    if mobile_ass:
+        graph += f",split=2[desktop][phone];[desktop]{burn(ass)}[v];[phone]{burn(mobile_ass)}[vm]"
     else:
-        graph = f"{picture},{','.join(finishing)}[v]"
+        graph += f",{burn(ass)}[v]"
+    settings = [
+        "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
+        "-c:a", "aac", "-b:a", "192k", "-ar", str(SR), "-ac", "2",
+    ]
     ffmpeg(
         "-f", "concat", "-safe", "0", "-i", str(listing),
         "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", str(audio),
         *(["-i", cutaway["input"]] if cutaway else []),
-        "-filter_complex", graph, "-map", "[v]", "-map", "1:a",
-        "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
-        "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-        "-c:a", "aac", "-b:a", "192k", "-ar", str(SR), "-ac", "2", take["output"],
+        "-filter_complex", graph,
+        "-map", "[v]", "-map", "1:a", *settings, take["output"],
+        *(["-map", "[vm]", "-map", "1:a", *settings, take["mobile_output"]] if mobile_ass else []),
     )  # fmt: skip
 
 
@@ -327,7 +336,7 @@ def main() -> None:
             dialogue, clean, audio_report = sound.finish(read_audio(take["input"], info["audio"], samples), take.get("answer_start"), voice)
             audio_path = tmp / f"take{i}.f32"
             np.ascontiguousarray(dialogue, np.float32).tofile(audio_path)
-            ass, phrases = None, 0
+            ass, mobile_ass, phrases = None, None, 0
             if take.get("cues"):
                 built = captions.build(take["cues"], take.get("words"), take.get("answer_start"), clean, SR)
                 # Captions go at the top for a take where the mouth often comes down to where they'd be.
@@ -338,6 +347,10 @@ def main() -> None:
                     at_top = mouth + 0.02 * OUT_H > captions.caption_top(OUT_H)
                 ass = tmp / f"take{i}.ass"
                 phrases = captions.write_ass(built, ass, OUT_W, OUT_H, at_top)
+                if take.get("mobile_output"):
+                    cut = take.get("cutaway")
+                    mobile_ass = tmp / f"take{i}_mobile.ass"
+                    captions.write_mobile_ass(built, mobile_ass, OUT_W, OUT_H, cut and (cut["start"], cut["length"], cut["pip"]))
             entry = {
                 "input": take["input"],
                 "frames": frames,
@@ -350,9 +363,9 @@ def main() -> None:
             }
             report["takes"].append(entry)
 
-            def finish_take(i=i, take=take, info=info, pieces=pieces, audio_path=audio_path, ass=ass):
+            def finish_take(i=i, take=take, info=info, pieces=pieces, audio_path=audio_path, ass=ass, mobile_ass=mobile_ass):
                 done = [p.result() for p in pieces]
-                encode(i, take, info, done, audio_path, ass, fonts, tmp)
+                encode(i, take, info, done, audio_path, ass, mobile_ass, fonts, tmp)
                 log(f"take {i + 1} finished: {take['output']}")
 
             pending.append(encoders.submit(finish_take))

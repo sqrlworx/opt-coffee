@@ -256,8 +256,10 @@ function publishedAnswers(questions) {
 }
 
 /**
- * The published answers as one video, or null without ffmpeg. `chapters` place each answer in it;
- * `captions` is true where its captions are burned into the picture, so players don't draw them again.
+ * The published answers as one video, or null without ffmpeg. `mobileSrc` is its copy for the mobile
+ * app, with burned-in captions placed for its split screen (null without burned-in captions, or for
+ * a video joined before there were copies). `chapters` place each answer in it; `captions` is true
+ * where its captions are burned into the picture, so players don't draw them again.
  * `questionStart` is how far into the answer its question's sound starts, until found 0.
  */
 function joinedVideo(oh) {
@@ -266,7 +268,7 @@ function joinedVideo(oh) {
   const chapters = ready
     ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned, questionStart = 0]) => ({ questionId, start, end, captions: Boolean(captioned), questionStart }))
     : [];
-  return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, chapters };
+  return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, mobileSrc: ready && oh.video_mobile ? mediaUrl(oh.video_mobile) : null, chapters };
 }
 
 /**
@@ -419,7 +421,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
    */
   function canSeeMedia(name, user) {
     if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ?').get(name, name)) return true;
-    if (db.prepare('SELECT 1 FROM office_hours WHERE video = ?').get(name)) return true; // only set once published
+    if (db.prepare('SELECT 1 FROM office_hours WHERE video = ? OR video_mobile = ?').get(name, name)) return true; // only set once published
     const owner = db
       .prepare(
         `SELECT q.published_answer_video, q.published_broll, oh.expert_id FROM questions q JOIN office_hours oh ON oh.id = q.office_hour_id

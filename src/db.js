@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   closed_at           TEXT,                 -- expert closed questions early
   published_at        TEXT,
   video               TEXT,                 -- the published answers joined into one video (file in the media dir)
+  video_mobile         TEXT,                 -- its copy for the mobile app, with burned-in captions placed for its split screen; NULL without burned-in captions
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
   follow_up_of        INTEGER REFERENCES office_hours(id) ON DELETE SET NULL,  -- picks up the discussion of this (published) office hour
   video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late)
@@ -208,6 +209,8 @@ function migrate(db) {
       ALTER TABLE office_hours ADD COLUMN video_chapters TEXT;
     `);
   }
+  // The mobile app gets its own copy of the joined video, with captions placed for its split screen.
+  if (!officeHourColumns.has('video_mobile')) db.exec('ALTER TABLE office_hours ADD COLUMN video_mobile TEXT');
   // Office hours can follow up on an earlier one's discussion.
   if (!officeHourColumns.has('follow_up_of')) db.exec('ALTER TABLE office_hours ADD COLUMN follow_up_of INTEGER REFERENCES office_hours(id) ON DELETE SET NULL');
   const transcriptColumns = new Set(db.prepare('PRAGMA table_info(transcripts)').all().map((c) => c.name));
