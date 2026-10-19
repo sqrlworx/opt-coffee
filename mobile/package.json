@@ -1,8 +1,8 @@
 {
-  "name": "forum-mobile",
+  "name": "off-hours-mobile",
   "version": "0.1.0",
   "private": true,
-  "description": "forum for phones: a React Native Web app, served by the forum server at /m/.",
+  "description": "off hours for phones: a React Native Web app, served by the off hours server at /m/.",
   "type": "module",
   "scripts": {
     "dev": "vite",

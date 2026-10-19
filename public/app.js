@@ -1,4 +1,4 @@
-// forum — single-page client. No framework: a tiny h() helper and hash routing.
+// off hours — single-page client. No framework: a tiny h() helper and hash routing.
 
 import { fox, blinkAt } from './fox.js';
 
@@ -2699,7 +2699,7 @@ function loginPage(_, query) {
       go(next);
     })({ currentTarget: submit });
   });
-  return h('div', { class: 'narrow' }, h('h1', {}, 'Welcome to forum'), h('p', { class: 'muted' }, 'Ask experts questions. Host your own office hours.'), form);
+  return h('div', { class: 'narrow' }, h('h1', {}, 'Welcome to off hours'), h('p', { class: 'muted' }, 'Ask experts questions. Host your own office hours.'), form);
 }
 
 // ---------- shell & routing ----------
@@ -2740,7 +2740,7 @@ function userSwitcher() {
 function renderNav() {
   const link = (href, label) => h('a', { href, class: location.hash.split('?')[0] === href || (href === '#/' && !location.hash) ? 'active' : '' }, label);
   setChildren($nav,
-    h('a', { href: '#/', class: 'brand' }, 'forum'),
+    h('a', { href: '#/', class: 'brand' }, 'off hours'),
     h('div', { class: 'nav-links' }, me ? link('#/', 'Feed') : null, link('#/explore', 'Explore')),
     h(
       'div',

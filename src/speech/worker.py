@@ -19,7 +19,7 @@
 # url = "https://download.pytorch.org/whl/cpu"
 # explicit = true
 # ///
-"""Speech worker for the forum server: transcribes recordings and reads text aloud.
+"""Speech worker for the off hours server: transcribes recordings and reads text aloud.
 
 The server (src/speech/index.js) runs this as a long-lived process and talks to it over
 stdin/stdout, one JSON object per line:

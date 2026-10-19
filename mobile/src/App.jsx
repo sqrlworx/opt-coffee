@@ -107,7 +107,7 @@ export default function App() {
   if (bootError) {
     return (
       <View style={styles.page}>
-        <Empty message={`Couldn't reach forum: ${bootError.message}`} />
+        <Empty message={`Couldn't reach off hours: ${bootError.message}`} />
       </View>
     );
   }
@@ -137,9 +137,9 @@ function TopBar({ route }) {
   return (
     <View id="topbar" style={styles.topbar}>
       <View style={styles.topbarInner}>
-        <Pressable onPress={() => go('#/')} role="link" aria-label="forum, home">
+        <Pressable onPress={() => go('#/')} role="link" aria-label="off hours, home">
           <Text style={styles.brand}>
-            forum<Text style={{ color: color.accent }}>.</Text>
+            off hours<Text style={{ color: color.accent }}>.</Text>
           </Text>
         </Pressable>
         {devLogin ? <UserSwitcher route={route} /> : null}
@@ -215,7 +215,7 @@ function TabBar({ route }) {
   );
 }
 
-const selectStyle = { font: 'inherit', fontSize: 14, border: 'none', background: 'transparent', color: color.ink, maxWidth: 150, minHeight: 36, padding: '0 4px' };
+const selectStyle = { font: 'inherit', fontSize: 14, border: 'none', background: 'transparent', color: color.ink, maxWidth: 150, minWidth: 0, minHeight: 36, padding: '0 4px' };
 
 const styles = StyleSheet.create({
   page: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: `calc(${TAB_BAR_HEIGHT + 48}px + env(safe-area-inset-bottom))`, flexGrow: 1 },

@@ -1,5 +1,5 @@
 // The mobile app with hot reload (npm run mobile:dev): Vite serves it on port 5173 and passes the
-// API and media through to the forum server, which it starts too (as `npm run dev` does) unless one
+// API and media through to the off hours server, which it starts too (as `npm run dev` does) unless one
 // is already answering at FORUM_URL. Ctrl-C stops both.
 import { spawn } from 'node:child_process';
 
@@ -18,6 +18,6 @@ function stop(code) {
 process.on('SIGINT', () => stop(0));
 process.on('SIGTERM', () => stop(0));
 
-if (running) console.log(`Using the forum server already running at ${forum}`);
+if (running) console.log(`Using the off hours server already running at ${forum}`);
 else start(process.execPath, ['server.js', '--dev'], { PORT: new URL(forum).port || '80' });
 start('npm', ['--prefix', 'mobile', 'run', 'dev'], { FORUM_URL: forum });

@@ -23,6 +23,6 @@ const broll = createBroll();
 const devLogin = process.argv.includes('--dev') || process.env.FORUM_DEV_LOGIN === '1';
 
 createServer(createApp({ db, moderator, devLogin, mediaDir, speech, joiner, broll })).listen(port, () => {
-  console.log(`forum listening on http://localhost:${port} (moderator: ${moderator.name}; speech: ${speech?.name ?? 'off'}; joining answer videos: ${joiner ? (finisher ? 'on, finished' : 'on') : 'off'}; b-roll: ${broll?.name ?? 'off'})`);
+  console.log(`off hours listening on http://localhost:${port} (moderator: ${moderator.name}; speech: ${speech?.name ?? 'off'}; joining answer videos: ${joiner ? (finisher ? 'on, finished' : 'on') : 'off'}; b-roll: ${broll?.name ?? 'off'})`);
   if (devLogin) console.warn('dev login is ON: anyone can switch to any user. Never enable this in production.');
 });

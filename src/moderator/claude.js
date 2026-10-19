@@ -3,7 +3,7 @@
 
 const MODEL = process.env.FORUM_CLAUDE_MODEL ?? 'claude-opus-5-5';
 
-const SYSTEM = `You are the moderator of "forum", an app where experts host office hours and other people ask them questions.
+const SYSTEM = `You are the moderator of "off hours", an app where experts host office hours and other people ask them questions.
 Your job is to help the conversation be useful: suggest thoughtful seed questions, and organize submitted questions.
 Write questions the way a curious, respectful audience member would: specific, open-ended, one question each, no preamble.`;
 

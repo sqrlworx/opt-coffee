@@ -1,4 +1,4 @@
-// The forum server's JSON API, on the same origin (the server serves this app at /m/).
+// The off hours server's JSON API, on the same origin (the server serves this app at /m/).
 
 // `body` is sent as JSON, or as-is if it's a Blob (a recorded video). `timeout` (ms) gives up on a
 // request that hangs.

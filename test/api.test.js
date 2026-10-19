@@ -220,7 +220,7 @@ test('explore lists open office hours and people; static shell is served', async
   assert.equal(html.status, 200);
   assert.match(await html.text(), /<main id="app"/);
   const traversal = await fetch(`${base}/..%2fpackage.json`);
-  assert.doesNotMatch(await traversal.text(), /"name": "forum"/);
+  assert.doesNotMatch(await traversal.text(), /"name": "off-hours"/);
 });
 
 test('the mobile app is served at /m/ once it is built', async () => {
