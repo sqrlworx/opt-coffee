@@ -553,12 +553,14 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     return { ok: true };
   });
 
+  // `devSession`: the dev user switcher logged this user in, rather than their password.
   // `voices` read typed questions aloud, each with a `sample` to preview it; `voice` is the viewer's.
   // `broll`: experts can add b-roll to their answers, uploading it, and `makesBroll`: have it made,
   // filmed by `brollModel`.
   route('GET', '/api/me', ({ user }) => ({
     user: user ? publicUser(user) : null,
     devLogin,
+    devSession: Boolean(user?.dev_session),
     speech: Boolean(speech),
     broll: Boolean(broll),
     makesBroll: Boolean(broll?.generate),
@@ -576,7 +578,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     route('POST', '/api/dev/login', ({ body, setSession }) => {
       const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(body.username ?? ''));
       if (!user) throw new HttpError(404, 'User not found');
-      setSession(user.id);
+      setSession(user.id, { dev: true });
       return { user: publicUser(user) };
     });
   }
@@ -1512,8 +1514,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         user,
         body,
         params: match.m.groups ?? {},
-        setSession(userId) {
-          const { token, maxAge } = createSession(db, userId);
+        setSession(userId, options) {
+          const { token, maxAge } = createSession(db, userId, options);
           headers['Set-Cookie'] = `sid=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
         },
         clearSession() {

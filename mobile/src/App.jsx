@@ -58,6 +58,7 @@ export default function App() {
       server && {
         me: server.user,
         devLogin: server.devLogin,
+        devSession: server.devSession, // it logged them in, not their password
         speech: server.speech, // the server transcribes recordings and reads typed questions aloud
         brollOn: server.broll, // experts can add b-roll to their answers, by uploading it
         makesBroll: server.makesBroll, // and have it made from a description
@@ -133,7 +134,7 @@ export default function App() {
 }
 
 function TopBar({ route }) {
-  const { devLogin } = useApp();
+  const { me, devLogin, devSession } = useApp();
   return (
     <View id="topbar" style={styles.topbar}>
       <View style={styles.topbarInner}>
@@ -142,13 +143,14 @@ function TopBar({ route }) {
             off hours<Text style={{ color: color.accent }}>.</Text>
           </Text>
         </Pressable>
-        {devLogin ? <UserSwitcher route={route} /> : null}
+        {devLogin && (!me || devSession) ? <UserSwitcher route={route} /> : null}
       </View>
     </View>
   );
 }
 
-// Dev only: switch between users without logging in. Shown when the server runs with --dev.
+// Dev only: switch between users without logging in. Shown when the server runs with --dev, until
+// someone logs in with their password.
 function UserSwitcher({ route }) {
   const { me, loadMe, setMe, toast, fail } = useApp();
   const [users, setUsers] = useState(null);

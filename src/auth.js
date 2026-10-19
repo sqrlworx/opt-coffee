@@ -16,19 +16,20 @@ export function verifyPassword(password, stored) {
   return timingSafeEqual(expected, actual);
 }
 
-export function createSession(db, userId) {
+export function createSession(db, userId, { dev = false } = {}) {
   const token = randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_DAYS * 86400_000).toISOString();
-  db.prepare('INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)').run(token, userId, expires);
+  db.prepare('INSERT INTO sessions (token, user_id, expires_at, dev) VALUES (?, ?, ?, ?)').run(token, userId, expires, dev ? 1 : 0);
   return { token, maxAge: SESSION_DAYS * 86400 };
 }
 
+// The user, with `dev_session` set when the dev user switcher logged them in.
 export function userForSession(db, token) {
   if (!token) return null;
   return (
     db
       .prepare(
-        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+        `SELECT u.*, s.dev AS dev_session FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.token = ? AND s.expires_at > ?`,
       )
       .get(token, new Date().toISOString()) ?? null

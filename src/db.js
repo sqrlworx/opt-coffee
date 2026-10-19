@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (
   token      TEXT PRIMARY KEY,
   user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL
+  expires_at TEXT NOT NULL,
+  dev        INTEGER NOT NULL DEFAULT 0   -- 1 = made by the dev user switcher, not a password
 );
 
 CREATE TABLE IF NOT EXISTS office_hours (
@@ -207,6 +208,9 @@ function migrate(db) {
   }
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
+  // The dev user switcher is shown only to sessions it made.
+  const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name));
+  if (!sessionColumns.has('dev')) db.exec('ALTER TABLE sessions ADD COLUMN dev INTEGER NOT NULL DEFAULT 0');
   const recordingColumns = new Set(db.prepare('PRAGMA table_info(recordings)').all().map((c) => c.name));
   if (!recordingColumns.has('video')) db.exec('ALTER TABLE recordings ADD COLUMN video TEXT');
   const officeHourColumns = new Set(db.prepare('PRAGMA table_info(office_hours)').all().map((c) => c.name));

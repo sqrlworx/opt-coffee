@@ -6,6 +6,7 @@ const $app = document.getElementById('app');
 const $nav = document.getElementById('nav');
 let me = null;
 let devLogin = false; // server has the dev user switcher enabled
+let devSession = false; // and it logged `me` in, not their password
 let speech = false; // server can transcribe recordings and read text aloud
 let brollOn = false; // experts can add b-roll to their answers: upload it
 let makesBroll = false; // and have it made from a description
@@ -2695,6 +2696,7 @@ function loginPage(_, query) {
     e.preventDefault();
     action(async () => {
       await api('POST', `/api/auth/${mode}`, { username: f.username.value, password: f.password.value, displayName: f.displayName.value });
+      if (mode === 'register') devUsers = null; // the switcher lists them next time
       await loadMe();
       go(next);
     })({ currentTarget: submit });
@@ -2706,10 +2708,11 @@ function loginPage(_, query) {
 
 // Who's logged in, their voice, and what the server can do.
 async function loadMe() {
-  ({ user: me, devLogin, speech, broll: brollOn, makesBroll, brollModel, voices, voice: myVoice } = await api('GET', '/api/me'));
+  ({ user: me, devLogin, devSession, speech, broll: brollOn, makesBroll, brollModel, voices, voice: myVoice } = await api('GET', '/api/me'));
 }
 
-// Dev-only: switch between users without logging in. Shown when the server runs with --dev.
+// Dev-only: switch between users without logging in. Shown when the server runs with --dev, until
+// someone logs in with their password.
 function userSwitcher() {
   const select = h('select', { class: 'dev-switcher', title: 'Dev mode: switch user without logging in' }, h('option', { value: '' }, '— logged out —'));
   const fill = () => {
@@ -2745,7 +2748,7 @@ function renderNav() {
     h(
       'div',
       { class: 'nav-right' },
-      devLogin ? userSwitcher() : null,
+      devLogin && (!me || devSession) ? userSwitcher() : null,
       me
         ? [
             h('a', { href: '#/oh/new', class: 'btn btn-primary btn-small' }, '+ Host'),

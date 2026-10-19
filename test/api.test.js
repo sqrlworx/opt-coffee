@@ -286,10 +286,21 @@ test('dev user switcher lists users and logs in without a password when enabled'
     assert.ok(users.every((u) => !('password_hash' in u) && !('passwordHash' in u)));
 
     assert.equal((await call('POST', '/api/dev/login', { username: 'expert' })).user.username, 'expert');
-    assert.equal((await call('GET', '/api/me')).user.username, 'expert');
+    let me = await call('GET', '/api/me');
+    assert.equal(me.user.username, 'expert');
+    assert.equal(me.devSession, true);
     assert.equal((await call('POST', '/api/dev/login', { username: 'asker' })).status, 200);
     assert.equal((await call('GET', '/api/me')).user.username, 'asker');
     assert.equal((await call('POST', '/api/dev/login', { username: 'nobody' })).status, 404);
+
+    // Someone who logs in with a password isn't shown the switcher.
+    assert.equal((await call('POST', '/api/auth/register', { username: 'newcomer', password: 'password123' })).status, 200);
+    me = await call('GET', '/api/me');
+    assert.equal(me.user.username, 'newcomer');
+    assert.equal(me.devSession, false);
+    await call('POST', '/api/dev/login', { username: 'expert' });
+    assert.equal((await call('POST', '/api/auth/login', { username: 'expert', password: 'password123' })).status, 200);
+    assert.equal((await call('GET', '/api/me')).devSession, false);
   } finally {
     devServer.close();
   }

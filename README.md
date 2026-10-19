@@ -9,7 +9,7 @@ Questions can be typed, spoken, or asked on camera. Typed questions are read alo
 ```bash
 cd opt-coffee
 npm run seed      # optional: demo data (users maya, leo, sam, priya, jo; password "password123")
-npm run dev       # http://localhost:3000, with the "Acting as" user switcher in the nav bar
+npm run dev       # http://localhost:3000, with the "Acting as" user switcher in the nav bar (until you log in with a password)
 npm start         # same, without the switcher
 npm test
 ```
