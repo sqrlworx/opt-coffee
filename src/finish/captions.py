@@ -28,7 +28,8 @@ BOTTOM = 0.06  # captions sit this far above the bottom edge
 STAGE, HALF = 9 / 16, 9 / 8
 TALLEST = 9 / 20  # a tall phone's screen, in fullscreen
 MOBILE_SIZE = 0.06  # as a share of as much of the copy's width as the whole player shows
-MOBILE_MARGIN = 1 / 30  # how far inside what a half shows of the copy's height they sit
+MOBILE_MARGIN = 1 / 30  # how far above the bottom of the expert's half they sit, as a share of the copy's height
+FOCUS = 0.6  # how far down a picture a half's crop sits without a face to go by (see half_focus)
 EMPHASIS_SHARE = 0.4  # at most this share of phrases gets an emphasised word
 
 EXPERT = "&H00FFFFFF"  # ASS colours are &HAABBGGRR
@@ -233,20 +234,35 @@ def caption_top(height: int) -> float:
     return height * (1 - BOTTOM) - 1.3 * 1.12 * SIZE * height
 
 
-def mobile_caption_top(width: int, height: int) -> float:
-    """The same for the phone's copy, where the answer sits higher."""
-    base, _, low, _ = _mobile_layout(width, height)
-    return low - 1.3 * 1.12 * base
+def half_focus(face: tuple | None, aspect: float) -> float:
+    """How far down a picture of shape `aspect` (width / height) the crop sits that fills a half of
+    the phone's player with it, to frame `face` (YuNet's box, x, y, w, h, as fractions of the
+    picture): as CSS's object-position, 0 at the top and 1 at the bottom. The chin always stays in;
+    then the top of the head too, if there's room, with the eyes a third of the way down if there's
+    room for that. Without a face it's FOCUS, a little lower than the middle, as faces are."""
+    shown = aspect / HALF  # how much of the picture's height a half shows
+    if shown >= 1:
+        return 0.5
+    if face is None:
+        return FOCUS
+    _, y, _, h = face
+    # YuNet's box runs from the brows to the chin: the eyes are about a third of the way down it,
+    # and the top of the head about a third of its height above it.
+    lowest = y + 0.93 * h + 0.03 - shown  # the chin in, a little above the bottom
+    highest = y - 0.3 * h  # the head in
+    top = max(lowest, min(highest, y + 0.35 * h - shown / 3))
+    return round(float(np.clip(top / (1 - shown), 0, 1)), 3)
 
 
-def _mobile_layout(width: int, height: int) -> tuple[int, int, int, float]:
-    """Where captions go on the phone's copy, `width` x `height`: their size; how far down the
-    question's top is, just under the split, inside what the bottom half shows; how far down the
-    answer's foot is, just above the split, inside what the top half shows, which is low on the whole
-    player too; and how wide a line can be for the whole player to show it, even on a tall phone."""
+def _mobile_layout(width: int, height: int, focus: float) -> tuple[int, int, float]:
+    """Where captions go on the phone's copy, `width` x `height`, whose top half crops it `focus` of
+    the way down (as CSS's object-position): their size; how far down their foot is, at the bottom of
+    what the top half shows, just above the split, which is low on the whole player too; and how wide
+    a line can be for the whole player to show it, even on a tall phone."""
     aspect = width / height
-    inset = (1 - min(1.0, aspect / HALF)) / 2 + MOBILE_MARGIN
-    return round(MOBILE_SIZE * min(1.0, STAGE / aspect) * width), round(inset * height), round((1 - inset) * height), min(1.0, TALLEST / aspect) * width
+    shown = min(1.0, aspect / HALF)  # how much of its height a half shows
+    bottom = focus * (1 - shown) + shown - MOBILE_MARGIN
+    return round(MOBILE_SIZE * min(1.0, STAGE / aspect) * width), round(bottom * height), min(1.0, TALLEST / aspect) * width
 
 
 def _script(width: int, height: int, base: int) -> list[str]:
@@ -294,19 +310,18 @@ def write_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: boo
     return len(phrases_)
 
 
-def write_mobile_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: bool = False) -> int:
-    """Writes the captions for the phone's copy of the video, where all of the ways the phone shows
-    it show them (mobile/src/media/JointPlayer.jsx): in the middle of its width, and within the part
-    of its height a half shows. The question goes at the top of that, just under the split, as the
-    asker is above it. The answer goes at the bottom: low on the whole player, and just above the
-    split while b-roll plays in the bottom half, with the expert cropped into the top half. With
-    `at_top`, where the speaker's mouth would be behind it, the answer goes at the top too. Returns
-    how many phrases were written."""
-    base, top, low, line = _mobile_layout(width, height)
+def write_mobile_ass(phrases_: list[Phrase], path, width: int, height: int, focus: float) -> int:
+    """Writes the captions for the phone's copy of the video (mobile/src/media/JointPlayer.jsx). The
+    expert has the top half whenever the player splits, the question's asker or the b-roll below,
+    and the top half crops the copy `focus` of the way down (as CSS's object-position). The question
+    and the answer both go at the bottom of that, under the expert and just above the split, which is
+    low on the whole player too, and within as much of the copy's width as it shows. Returns how many
+    phrases were written."""
+    base, low, line = _mobile_layout(width, height, focus)
     lines = _script(width, height, base)
+    pos = rf"\an2\pos({width // 2},{low})"
     for p in phrases_:
         words = [_word_tags(w, base) + _escape(_display(w.text)) for w in p.words]
-        pos = rf"\an8\pos({width // 2},{top})" if p.speaker == "asker" or at_top else rf"\an2\pos({width // 2},{low})"
         lines.append(f"Dialogue: 0,{_time(p.start)},{_time(p.end)},{p.speaker},,0,0,0,,{{{pos}{_pop(base)}}}{_wrap(words, p.words, base, line)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(phrases_)

@@ -28,6 +28,7 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
     uv run finish.py job.json
 
     {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null, "mobile_size": [1080, 1440],
+                "asker_video": "media/q.mp4" or null,
                 "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
                 "cutaway": {"input": "media/b.mp4", "filter": "...", "start": 2.5, "length": 6} or null}],
      "voice": "studio" or "natural", "workers": 0}
@@ -47,7 +48,10 @@ With a `mobile_output`, the take is also written there for the mobile app, in th
 same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
 take is 9:16), filled and cropped, so that the phone can fill its upright player with it, or either
 half of it (mobile/src/media/split.js). It has no b-roll cut in, since the phone plays the clip in
-the other half, and its captions are placed where all of those show them.
+the bottom half. The expert has the top half whenever the player splits, cropped to frame their
+face (see half_focus in captions.py), and the captions go at the bottom of that, just above the
+split. The report says where that crop is for each take (`expert_focus`), and where the crop that
+frames the asker's face in their `asker_video` is (`asker_focus`, null without a face).
 
 The takes are cut into pieces of a few seconds that render in parallel. Logs go to stderr; the
 last line on stdout is a JSON report. Exits non-zero on failure.
@@ -204,6 +208,23 @@ def _analyse(index: int, take: dict, tmp: str) -> dict:
     return {"conformed": str(conformed), "frames": frames, "size": size, "track": track, "grade": asdict(grade), "facts": facts, "audio": info["audio"]}
 
 
+def _face(path: str) -> tuple[tuple | None, float]:
+    """The face in a short video (an asker's): its median box in frames half a second apart, as
+    fractions of the picture (x, y, w, h), or None without a face in most of them; and the picture's
+    shape, width / height."""
+    info = probe(path)
+    aspect = info["width"] / info["height"]
+    small = (320, max(16, round(320 / aspect / 2) * 2))
+    finder = FaceFinder(_worker["yunet"], small)
+    out = ffmpeg("-i", path, "-vf", f"fps=2,scale={small[0]}:{small[1]}:flags=area,format=rgb24", "-frames:v", "40", "-f", "rawvideo", "-", capture_output=True).stdout
+    frames = np.frombuffer(out, np.uint8).reshape(-1, small[1], small[0], 3)
+    boxes = [box for box in map(finder, frames) if box is not None]
+    if not boxes or len(boxes) < len(frames) / 2:
+        return None, aspect
+    x, y, w, h = np.median(np.array(boxes), axis=0)
+    return (x / small[0], y / small[1], w / small[0], h / small[1]), aspect
+
+
 def _render(task: dict) -> str:
     """Renders frames [start, start + count) of a take into a near-lossless piece."""
     w, h = task["size"]
@@ -326,6 +347,7 @@ def main() -> None:
     ):
         tmp = Path(tmpdir)
         analyses = [pool.submit(_analyse, i, take, tmpdir) for i, take in enumerate(takes)]
+        faces = [take.get("asker_video") and pool.submit(_face, take["asker_video"]) for take in takes]
         pending = []
         for i, take in enumerate(takes):
             info = analyses[i].result()
@@ -342,25 +364,37 @@ def main() -> None:
             dialogue, clean, audio_report = sound.finish(read_audio(take["input"], info["audio"], samples), take.get("answer_start"), voice)
             audio_path = tmp / f"take{i}.f32"
             np.ascontiguousarray(dialogue, np.float32).tofile(audio_path)
+            # The expert's face where the phone's copy has it, for where its half crops it.
+            phone = take.get("mobile_output") and tuple(take["mobile_size"])
+            expert_focus = None
+            if phone:
+                face = None
+                if track is not None:
+                    s, ox, oy = placement(size, phone, fill=True)
+                    x, y, w, h = np.median(track, axis=0)
+                    face = ((x * s + ox) / phone[0], (y * s + oy) / phone[1], w * s / phone[0], h * s / phone[1])
+                expert_focus = captions.half_focus(face, phone[0] / phone[1])
+            asker_focus = None
+            if faces[i]:
+                try:
+                    face, aspect = faces[i].result()
+                    asker_focus = captions.half_focus(face, aspect) if face else None
+                except Exception as err:  # noqa: BLE001 - the player crops the asker's video by default instead
+                    log(f"take {i + 1}: couldn't find the asker's face: {err!r}")
             ass, mobile_ass, phrases = None, None, 0
             if take.get("cues"):
                 built = captions.build(take["cues"], take.get("words"), take.get("answer_start"), clean, SR)
-                # Captions go at the top for a take where the mouth often comes down to where they'd be,
-                # in either copy: filling the phone's enlarges a take of another shape.
-                at_top = mobile_at_top = False
-                phone = take.get("mobile_output") and tuple(take["mobile_size"])
+                # Captions go at the top for a take where the mouth often comes down to where they'd be.
+                at_top = False
                 if track is not None:
                     mouth = float(np.percentile(track[:, 1] + 0.75 * track[:, 3], 90))
                     s, _, oy = placement(size)
                     at_top = mouth * s + oy + 0.02 * OUT_H > captions.caption_top(OUT_H)
-                    if phone:
-                        s, _, oy = placement(size, phone, fill=True)
-                        mobile_at_top = mouth * s + oy + 0.02 * phone[1] > captions.mobile_caption_top(*phone)
                 ass = tmp / f"take{i}.ass"
                 phrases = captions.write_ass(built, ass, OUT_W, OUT_H, at_top)
                 if phone:
                     mobile_ass = tmp / f"take{i}_mobile.ass"
-                    captions.write_mobile_ass(built, mobile_ass, *phone, mobile_at_top)
+                    captions.write_mobile_ass(built, mobile_ass, *phone, expert_focus)
             entry = {
                 "input": take["input"],
                 "frames": frames,
@@ -370,6 +404,8 @@ def main() -> None:
                 "measured": info["facts"],
                 "audio": audio_report,
                 "caption_phrases": phrases,
+                "expert_focus": expert_focus,
+                "asker_focus": asker_focus,
             }
             report["takes"].append(entry)
 

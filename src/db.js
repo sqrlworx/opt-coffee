@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS office_hours (
   video_mobile         TEXT,                 -- its copy for the mobile app: upright (3:4, or 9:16 when every take is), without the b-roll, burned-in captions placed for its split screen; NULL if joined before there were copies
   video_status        TEXT,                 -- joining them: 'pending' | 'ready' | 'failed'; NULL before publishing, or without ffmpeg
   follow_up_of        INTEGER REFERENCES office_hours(id) ON DELETE SET NULL,  -- picks up the discussion of this (published) office hour
-  video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late)
+  video_chapters      TEXT                  -- JSON [[question_id, start, end, captioned, question_start, expert_focus, asker_focus], ...]: where each answer is in the video, in seconds; captioned = 1 when its captions are burned into the picture; question_start: how far into the answer its question's sound starts (a take records it a little late); expert_focus, asker_focus: where the phone's halves crop the expert in its copy and the asker's video to frame their faces (CSS object-position, 0-1 down), or null
 );
 
 CREATE TABLE IF NOT EXISTS questions (

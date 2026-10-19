@@ -151,7 +151,10 @@ test('publishing joins the answers into one public video, in the published order
   const { video } = await reader('GET', `/api/office-hours/${ohId}`);
   assert.equal(video.status, 'ready');
   assert.match(video.src, /^\/media\/[0-9a-f]{32}\.mp4$/);
-  assert.deepEqual(video.chapters, [{ questionId: ids[2], start: 0, end: 4, captions: false, questionStart: 0 }, { questionId: ids[0], start: 4, end: 11.5, captions: false, questionStart: 0 }]);
+  assert.deepEqual(video.chapters, [
+    { questionId: ids[2], start: 0, end: 4, captions: false, questionStart: 0, expertFocus: null, askerFocus: null },
+    { questionId: ids[0], start: 4, end: 11.5, captions: false, questionStart: 0, expertFocus: null, askerFocus: null },
+  ]);
   assert.deepEqual((await reader('GET', `/api/office-hours/${ohId}/video`)).video, video);
   // Anyone can watch it, like the published answers.
   const res = await reader.media(video.src);
@@ -209,7 +212,7 @@ test('on startup, office hours published before joining existed, or mid-join, ar
     await resumed.idle();
     const rows = oldDb.prepare('SELECT id, video, video_status, video_chapters FROM office_hours ORDER BY id').all();
     assert.equal(rows[0].video_status, 'ready');
-    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9, 0, 0]]);
+    assert.deepEqual(JSON.parse(rows[0].video_chapters), [[1, 0, 9, 0, 0, null, null]]);
     assert.ok(existsSync(join(dir, rows[0].video)));
     assert.equal(rows[1].video_status, null);
     // Not joined again: its question is found in the video it has.
@@ -220,7 +223,7 @@ test('on startup, office hours published before joining existed, or mid-join, ar
   }
 });
 
-test("on startup, videos whose copy for phones isn't upright, or that have none, are joined again", async () => {
+test("on startup, videos whose copy for phones isn't upright, has none, or has captions from before they went under the expert are joined again", async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_upright_'));
   try {
     const oldDb = openDb(':memory:');
@@ -230,33 +233,37 @@ test("on startup, videos whose copy for phones isn't upright, or that have none,
       INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at, published_at, video, video_mobile, video_status, video_chapters) VALUES
         (1, 1, 'Landscape copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('d')}', '${landscape}', 'ready', '[[1, 0, 5, 0, 0]]'),
         (2, 1, 'No copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('e')}', NULL, 'ready', '[[2, 0, 5, 0, 0]]'),
-        (3, 1, 'Upright copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('f')}', '${upright}', 'ready', '[[3, 0, 5, 0, 0]]');
+        (3, 1, 'Upright copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('f')}', '${upright}', 'ready', '[[3, 0, 5, 0, 0]]'),
+        (4, 1, 'Captions above the expert', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('9')}', '${upright}', 'ready', '[[4, 0, 5, 1, 0]]');
       INSERT INTO questions (id, office_hour_id, author_id, body, created_at, published_position, published_answer_video) VALUES
         (1, 1, 1, 'One?', '2026-01-01', 1, '${'1'.repeat(32)}.webm'),
         (2, 2, 1, 'Two?', '2026-01-01', 1, '${'2'.repeat(32)}.webm'),
-        (3, 3, 1, 'Three?', '2026-01-01', 1, '${'3'.repeat(32)}.webm');
+        (3, 3, 1, 'Three?', '2026-01-01', 1, '${'3'.repeat(32)}.webm'),
+        (4, 4, 1, 'Four?', '2026-01-01', 1, '${'4'.repeat(32)}.webm');
     `);
-    for (const n of ['1', '2', '3']) writeFileSync(join(dir, `${n.repeat(32)}.webm`), take(n, 5));
-    for (const c of ['d', 'e', 'f']) writeFileSync(join(dir, video(c)), 'joined');
+    for (const n of ['1', '2', '3', '4']) writeFileSync(join(dir, `${n.repeat(32)}.webm`), take(n, 5));
+    for (const c of ['d', 'e', 'f', '9']) writeFileSync(join(dir, video(c)), 'joined');
     writeFileSync(join(dir, landscape), 'landscape');
     writeFileSync(join(dir, upright), 'upright');
-    // Joins as the real one does now, with an upright copy for phones.
+    // Finishes, as the real one does now, with an upright copy for phones, framed to the faces.
     const joined = [];
     const joiner = {
+      finishing: true,
       async join(takes, out, mobileOut) {
         joined.push(takes.map((t) => readFileSync(t.file, 'utf8')));
         writeFileSync(out, 'joined again');
         writeFileSync(mobileOut, 'upright');
-        return { durations: takes.map(() => 5), captioned: takes.map(() => false), mobile: true };
+        return { durations: takes.map(() => 5), captioned: takes.map(() => true), mobile: true, focus: takes.map(() => [0.7, null]) };
       },
       locate: async (v, questions) => questions.map(() => 0),
       upright: async (file) => existsSync(file) && readFileSync(file, 'utf8') === 'upright',
     };
     const resumed = createApp({ db: oldDb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, joiner });
     await resumed.idle();
-    assert.deepEqual(joined, [['take: 1 5s'], ['take: 2 5s']]);
-    const rows = oldDb.prepare('SELECT id, video, video_mobile FROM office_hours ORDER BY id').all();
-    for (const row of rows.slice(0, 2)) assert.equal(readFileSync(join(dir, row.video_mobile), 'utf8'), 'upright');
+    assert.deepEqual(joined, [['take: 1 5s'], ['take: 2 5s'], ['take: 4 5s']]);
+    const rows = oldDb.prepare('SELECT id, video, video_mobile, video_chapters FROM office_hours ORDER BY id').all();
+    for (const row of [rows[0], rows[1], rows[3]]) assert.equal(readFileSync(join(dir, row.video_mobile), 'utf8'), 'upright');
+    assert.deepEqual(JSON.parse(rows[3].video_chapters), [[4, 0, 5, 1, 0, 0.7, null]]);
     assert.ok(!existsSync(join(dir, landscape)) && !existsSync(join(dir, video('d'))) && !existsSync(join(dir, video('e')))); // replaced
     assert.deepEqual([rows[2].video, rows[2].video_mobile], [video('f'), upright]); // already upright
   } finally {
@@ -352,7 +359,7 @@ function finishingJoiner() {
       joiner.calls.push(takes.map(({ file, ...rest }) => ({ video: readFileSync(file, 'utf8'), ...rest })));
       writeFileSync(out, `finished, version ${joiner.calls.length}`);
       if (mobileOut) writeFileSync(mobileOut, `finished for phones, version ${joiner.calls.length}`);
-      return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)), mobile: Boolean(mobileOut) };
+      return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)), mobile: Boolean(mobileOut), focus: takes.map((t) => [0.7, t.askerVideo ? 0.65 : null]) };
     },
     locate: async (video, questions) => questions.map(() => 0),
   };
@@ -414,7 +421,10 @@ test('finished joins wait for transcripts being made, and their chapters say whi
   assert.deepEqual([second.video, second.cues], ['take: And this one? 5s', undefined]);
   const { video } = await asker('GET', `/api/office-hours/${officeHour.id}`);
   assert.equal(video.status, 'ready');
-  assert.deepEqual(video.chapters, [{ questionId: ids[0], start: 0, end: 5, captions: true, questionStart: 0 }, { questionId: ids[1], start: 5, end: 10, captions: false, questionStart: 0 }]);
+  assert.deepEqual(video.chapters, [
+    { questionId: ids[0], start: 0, end: 5, captions: true, questionStart: 0, expertFocus: 0.7, askerFocus: null },
+    { questionId: ids[1], start: 5, end: 10, captions: false, questionStart: 0, expertFocus: 0.7, askerFocus: null },
+  ]);
   // The mobile app's copy, with the captions placed for its split screen, is as public as the video.
   assert.notEqual(video.mobileSrc, video.src);
   assert.equal(await (await client(f.base).media(video.mobileSrc)).text(), 'finished for phones, version 1');
@@ -461,8 +471,10 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
   try {
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=440:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=1', '-f', 'lavfi', '-i', 'sine=f=660:duration=1', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'b.mp4'));
-    const takes = [{ file: join(dir, 'a.mp4'), answerStart: 0.5, cues: [[0, 1, 'Hello there.']], words: null }, { file: join(dir, 'b.mp4') }];
-    // Stands in for src/finish: renders each take at 1080p, as the real one does, and its upright copy for phones.
+    // The first question was asked on camera.
+    const takes = [{ file: join(dir, 'a.mp4'), answerStart: 0.5, cues: [[0, 1, 'Hello there.']], words: null, askerVideo: join(dir, 'b.mp4') }, { file: join(dir, 'b.mp4') }];
+    // Stands in for src/finish: renders each take at 1080p, as the real one does, and its upright copy for phones, and
+    // reports where the phone's halves crop the expert and the asker to frame their faces.
     let given = null;
     const finisher = {
       async finish(jobs) {
@@ -471,11 +483,12 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
           ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.output);
           if (job.mobile_output) ffmpeg('-i', job.input, '-vf', `scale=${job.mobile_size.join(':')}`, '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.mobile_output);
         }
-        return {};
+        return { takes: jobs.map((j) => ({ expert_focus: 0.7, asker_focus: j.asker_video ? 0.65 : null })) };
       },
     };
     const finished = await createVideoJoiner({ finisher }).join(takes, join(dir, 'finished.mp4'), join(dir, 'mobile.mp4'));
-    assert.deepEqual(given.map((j) => [j.answer_start, j.cues]), [[0.5, [[0, 1, 'Hello there.']]], [null, null]]);
+    assert.deepEqual(given.map((j) => [j.answer_start, j.cues, j.asker_video]), [[0.5, [[0, 1, 'Hello there.']], join(dir, 'b.mp4')], [null, null, null]]);
+    assert.deepEqual(finished.focus, [[0.7, 0.65], [0.7, null]]);
     assert.deepEqual(given.map((j) => [Boolean(j.mobile_output), j.mobile_size]), [[true, [1080, 1440]], [true, [1080, 1440]]]); // upright, so every take differs
     assert.deepEqual([finished.captioned, finished.mobile], [[true, false], true]);
     for (const [file, size] of [['finished.mp4', '1920,1080'], ['mobile.mp4', '1080,1440']]) {
@@ -490,7 +503,7 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
     const logs = [];
     const failing = { finish: async () => Promise.reject(new Error('the models could not be downloaded')) };
     const plain = await createVideoJoiner({ finisher: failing, log: (msg) => logs.push(msg) }).join(takes, join(dir, 'plain.mp4'), join(dir, 'plain_mobile.mp4'));
-    assert.deepEqual([plain.captioned, plain.mobile], [[false, false], true]); // the player draws them instead
+    assert.deepEqual([plain.captioned, plain.mobile, plain.focus], [[false, false], true, [[null, null], [null, null]]]); // the player draws them, and crops by default
     assert.deepEqual(probe(join(dir, 'plain.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     assert.deepEqual(probe(join(dir, 'plain_mobile.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,720,960']);
     assert.match(logs.join('\n'), /finishing failed, so the takes are joined as recorded: the models could not be downloaded/);

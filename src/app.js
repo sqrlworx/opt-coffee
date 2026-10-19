@@ -262,12 +262,23 @@ function publishedAnswers(questions) {
  * until it's joined again). `chapters` place each answer in it; `captions` is true where its
  * captions are burned into the picture, so players don't draw them again.
  * `questionStart` is how far into the answer its question's sound starts, until found 0.
+ * `expertFocus` and `askerFocus` are where the phone's halves crop the expert's picture in its copy
+ * and the asker's video to frame their faces, as CSS's object-position (0-1 down); null when the
+ * video wasn't finished, or no face was found.
  */
 function joinedVideo(oh) {
   if (!oh.video_status) return null;
   const ready = oh.video_status === 'ready';
   const chapters = ready
-    ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned, questionStart = 0]) => ({ questionId, start, end, captions: Boolean(captioned), questionStart }))
+    ? JSON.parse(oh.video_chapters).map(([questionId, start, end, captioned, questionStart = 0, expertFocus = null, askerFocus = null]) => ({
+        questionId,
+        start,
+        end,
+        captions: Boolean(captioned),
+        questionStart,
+        expertFocus,
+        askerFocus,
+      }))
     : [];
   return { status: oh.video_status, src: ready ? mediaUrl(oh.video) : null, mobileSrc: ready && oh.video_mobile ? mediaUrl(oh.video_mobile) : null, chapters };
 }

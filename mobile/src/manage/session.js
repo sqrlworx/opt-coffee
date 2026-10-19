@@ -4,6 +4,7 @@
 // take as the question's answer and plays the next question. Each take is its own recording, so it
 // uploads while they carry on. This is the session itself; Studio.jsx shows it, split screen.
 import { askerLabel } from '../format.js';
+import { focusPosition } from '../media/split.js';
 import { MAX_RECORDING_SECS, RECORDING_TYPES } from '../media/Video.jsx';
 
 // `order` is the question ids to answer, from the one they started at; `questions` maps ids to
@@ -32,7 +33,7 @@ export function createSession({ order, camera, questions, keep, finishing, toast
   // question asked on camera plays, `clipShown` once it has a picture (one slow to load would be
   // an empty black box until then).
   const state = { order, index: 0, take: null, answered: new Set(), clip: null, clipShown: false, closed: false, label: '' };
-  let slot = null; // where the asker's video goes: the top half of the split screen
+  let slot = null; // where the asker's video goes: the bottom half of the split screen
 
   // Questions' audio, downloaded and decoded before their take starts recording, so the question
   // plays the moment recording begins instead of after a pause while it downloads.
@@ -50,7 +51,7 @@ export function createSession({ order, camera, questions, keep, finishing, toast
     return sounds.get(url);
   }
 
-  // A question asked on camera also plays its video, muted, in the top half while its sound plays.
+  // A question asked on camera also plays its video, muted, in the bottom half while its sound plays.
   // It loads ahead like the sound; one that's slow to load shows up when it can.
   const clips = new Map(); // video URL -> Promise<HTMLVideoElement | null>
   function questionClip(qid) {
@@ -63,7 +64,7 @@ export function createSession({ order, camera, questions, keep, finishing, toast
       clip.setAttribute('playsinline', '');
       clip.preload = 'auto';
       clip.src = url;
-      Object.assign(clip.style, { display: 'block', width: '100%', height: '100%', objectFit: 'cover', background: '#111' });
+      Object.assign(clip.style, { display: 'block', width: '100%', height: '100%', objectFit: 'cover', objectPosition: focusPosition(), background: '#111' });
       clip.addEventListener('playing', () => {
         if (state.clip !== clip) return;
         state.clipShown = true;
@@ -205,7 +206,7 @@ export function createSession({ order, camera, questions, keep, finishing, toast
   return {
     state,
     camera,
-    // Starts recording, with `el` as the top half for askers' videos.
+    // Starts recording, with `el` as the bottom half for askers' videos.
     start(el) {
       slot = el;
       startTake();

@@ -1,13 +1,14 @@
 // The split screen's arithmetic (src/media/split.js): which half shows what, when.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { pipBox, PIP as SERVER_PIP } from '../../src/video.js';
-import { brollAt, cover, cutCue, joinedCues, joinedParts, moment, PIP, pipRect, slot } from '../src/media/split.js';
+import { brollAt, cover, cutCue, FOCUS, focusPosition, joinedCues, joinedParts, moment, PIP, pipRect, slot } from '../src/media/split.js';
 
 const asked = { id: 1, answerStart: 3, questionCues: [[0, 2.5, 'How do I start?']], transcript: { status: 'ready', cues: [[3.2, 6, 'Start small.']] } };
 const withBroll = { id: 2, answerStart: 4, broll: { video: '/media/b.mp4', start: 6, length: 3 }, transcript: { status: 'ready', cues: [[6.5, 8, 'Like this.']] } };
 const chapters = [
-  { questionId: 1, start: 0, end: 10, captions: false, questionStart: 0.05 },
+  { questionId: 1, start: 0, end: 10, captions: false, questionStart: 0.05, expertFocus: 0.74, askerFocus: 0.638 },
   { questionId: 2, start: 10, end: 22, captions: true, questionStart: 0 },
   { questionId: 99, start: 22, end: 30, captions: false, questionStart: 0 }, // not published any more
 ];
@@ -17,7 +18,7 @@ test('parts are the chapters of the answers there are', () => {
   assert.deepEqual(parts.map((p) => p.q.id), [1, 2]);
 });
 
-test('the asker takes the top half while their question plays', () => {
+test('the asker takes the bottom half while their question plays', () => {
   const m = moment(parts, 1);
   assert.equal(m.split, 'question');
   assert.equal(m.asking, asked);
@@ -76,4 +77,12 @@ test('a picture fills its place, cropped to its middle', () => {
   // two-thirds of its height.
   assert.deepEqual(cover(810, 1080, 9, 16), [101.25, 0, 607.5, 1080]);
   assert.deepEqual(cover(810, 1080, 9, 8), [0, 180, 810, 720]);
+});
+
+test('the halves crop to frame the faces the server found, and otherwise more off the top', () => {
+  assert.deepEqual([parts[0].expertFocus, parts[0].askerFocus], [0.74, 0.638]);
+  assert.equal(focusPosition(parts[0].askerFocus), '50% 63.8%');
+  assert.equal(focusPosition(parts[1].expertFocus), '50% 60%');
+  const python = readFileSync(new URL('../../src/finish/captions.py', import.meta.url), 'utf8');
+  assert.equal(Number(/^FOCUS = ([\d.]+)/m.exec(python)[1]), FOCUS, 'FOCUS matches src/finish/captions.py');
 });

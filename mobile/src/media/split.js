@@ -1,8 +1,8 @@
 // Split screen, the phone's picture in picture. Where the page shows one picture over another (the
 // asker over the joined video while their question plays, the expert over their b-roll, the asker
-// over the camera while recording), a phone splits the player in two instead: the picture that would
-// be in the corner goes in the top half and the main one in the bottom half, each at full width.
-// This is the arithmetic for that, kept apart from React so it can be tested (test/split.test.js).
+// over the camera while recording), a phone splits the player in two instead: the expert in the top
+// half, and the asker or the b-roll in the bottom half, each at full width. This is the arithmetic
+// for that, kept apart from React so it can be tested (test/split.test.js).
 
 // Where a layer sits on the stage, an upright player (9:16): `top` and `bottom` are its halves, and
 // `full` is all of it, for a lone picture before or after a split. A stage wider than tall
@@ -22,8 +22,16 @@ export function slot(name, wide = false) {
 // The cut to b-roll and back, and a split opening or closing, take this long (as in src/video.js).
 export const CUT_FADE = 0.3;
 
+// How far down a picture a half crops it, as CSS's object-position (0 at the top, 1 at the bottom).
+// For a published video the server frames the expert's and the asker's faces (half_focus in
+// src/finish/captions.py, given in the chapters). Otherwise it's FOCUS, a little lower than the
+// middle, as faces are: as much as can go, it's the top that's cropped off.
+export const FOCUS = 0.6;
+export const focusPosition = (focus) => `50% ${Math.round(1000 * (focus ?? FOCUS)) / 10}%`;
+
 // The parts of the joined video, one per answer, in order: where each starts and ends in it, its
-// question, and whether its captions are burned into the picture.
+// question, whether its captions are burned into the picture, and how its halves crop the expert
+// and the asker.
 export function joinedParts(answers, chapters) {
   const byId = new Map(answers.map((q) => [q.id, q]));
   return chapters.filter((c) => byId.has(c.questionId)).map((c) => ({ ...c, q: byId.get(c.questionId) }));
@@ -34,7 +42,8 @@ export const partAt = (parts, t) => parts.find((p) => t < p.end) ?? parts.at(-1)
 // What's on screen `t` seconds into the joined video (once it's `started`): `asking`, the question
 // being played at the start of its take, up to where the answer starts, with `at`, how far into the
 // question's sound (which starts a little after the take does); or `cut`, the answer's b-roll, with
-// `clipAt`, how far into the clip. `split` is which of them takes the top half, if either.
+// `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under the expert,
+// if either.
 export function moment(parts, t, started = true) {
   const part = partAt(parts, t);
   if (!part || !started) return { part, split: null, asking: null, cut: null, at: 0, clipAt: 0 };

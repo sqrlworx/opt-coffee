@@ -188,7 +188,8 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
   }
 
   // The takes finished, or null if that failed: `parts`, and with `phone`, the size of the phone's
-  // copy, also `mobile`, those copies, from the same pass.
+  // copy, also `mobile`, those copies, from the same pass; and `focus`, for each take, where the
+  // phone's halves crop the expert's picture and the asker's video to frame their faces.
   async function finish(takes, dir, phone) {
     const parts = takes.map((_, i) => join(dir, `finished_${i}.mp4`));
     const mobile = phone ? takes.map((_, i) => join(dir, `finished_${i}_mobile.mp4`)) : null;
@@ -200,12 +201,13 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         start,
         length,
       });
-      await finisher.finish(
+      const report = await finisher.finish(
         takes.map((t, i) => ({
           input: t.file,
           output: parts[i],
           mobile_output: mobile?.[i] ?? null,
           mobile_size: phone,
+          asker_video: t.askerVideo ?? null,
           answer_start: t.answerStart ?? null,
           cues: t.cues ?? null,
           words: t.words ?? null,
@@ -213,7 +215,7 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         })),
         dir,
       );
-      return { parts, mobile };
+      return { parts, mobile, focus: takes.map((_, i) => [report?.takes?.[i]?.expert_focus ?? null, report?.takes?.[i]?.asker_focus ?? null]) };
     } catch (err) {
       log(`[video] finishing failed, so the takes are joined as recorded: ${err.message}`);
       return null;
@@ -226,12 +228,14 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
 
     /**
      * Writes the takes, in order, into one MP4 at `out`, and the phone's copy at `mobileOut` if
-     * given. A take is a file name, or {file, answerStart, cues, words, broll} with what finishing
-     * uses: where the answer starts after the question, and the transcript's cues and word timings;
-     * and b-roll to cut away to, {file, start, length}.
-     * @returns {Promise<{durations: number[], captioned: boolean[], mobile: boolean}>} how long each
-     *   part is in the result, in seconds, whether its captions are burned in, and whether the
-     *   phone's copy was written (the same parts, so the same durations)
+     * given. A take is a file name, or {file, answerStart, cues, words, broll, askerVideo} with what
+     * finishing uses: where the answer starts after the question, and the transcript's cues and word
+     * timings; b-roll to cut away to, {file, start, length}; and the asker's video, to find their face.
+     * @returns {Promise<{durations: number[], captioned: boolean[], mobile: boolean, focus: (number|null)[][]}>}
+     *   how long each part is in the result, in seconds, whether its captions are burned in, whether
+     *   the phone's copy was written (the same parts, so the same durations), and for each part,
+     *   [expert, asker]: where the phone's halves crop the expert's picture in that copy and the
+     *   asker's video to frame their faces, as CSS's object-position (0-1 down), when finished
      */
     async join(takes, out, mobileOut = null) {
       const dir = mkdtempSync(join(tmpdir(), 'forum_join_'));
@@ -246,13 +250,13 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
         const aspect = mobileOut ? await phoneAspect(takes) : null;
         const finished = finisher ? await finish(takes, dir, aspect && phoneSize(1080, aspect)) : null;
-        const { parts, mobile } = finished ?? (await reencode(takes, dir, aspect && phoneSize(720, aspect)));
+        const { parts, mobile, focus = takes.map(() => [null, null]) } = finished ?? (await reencode(takes, dir, aspect && phoneSize(720, aspect)));
         const durations = [];
         for (const part of parts) durations.push(Number(await probe(part, 'format=duration')));
         const captioned = takes.map((t) => Boolean(finished && t.cues?.length));
         await concat(parts, out);
         if (mobile) await concat(mobile, mobileOut);
-        return { durations, captioned, mobile: Boolean(mobile) };
+        return { durations, captioned, mobile: Boolean(mobile), focus };
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(`${out}.part`, { force: true });
@@ -321,8 +325,8 @@ function correlation(a, b, offset) {
  * Background work joining each published office hour's answers into one video, one at a time.
  * Progress lives in the database (office_hours.video_status), so `resume()` at startup picks up
  * anything pending, or published before joining existed. It also finds the questions in videos
- * joined before that was done (see joiner.locate), and joins again those whose phone's copy isn't
- * upright, from before it was (see joiner.upright).
+ * joined before that was done (see joiner.locate), and joins again those whose phone's copy is from
+ * before it was upright (see joiner.upright), or framed the expert's face.
  *
  * When the joiner finishes takes, joining waits for transcripts still being made, so captions can
  * be burned in, and `refresh()` makes the video again after a transcript is corrected.
@@ -348,7 +352,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
   async function render(officeHourId, { remake = false } = {}) {
     const answers = db
       .prepare(
-        `SELECT id, body, asked_with AS askedWith, audio, published_answer_video AS video, published_answer_start AS answerStart,
+        `SELECT id, body, asked_with AS askedWith, audio, asker_video AS askerVideo, published_answer_video AS video, published_answer_start AS answerStart,
                 published_broll AS broll, published_broll_start AS brollStart, published_broll_length AS brollLength
          FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position`,
       )
@@ -364,15 +368,18 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
         const take = texts.get(a.video);
         const asked = { body: a.body, ...(a.askedWith === 'audio' ? texts.get(a.audio) : null) };
         const broll = a.broll ? { file: join(mediaDir, a.broll), start: a.brollStart, length: a.brollLength } : null;
-        return { file: join(mediaDir, a.video), answerStart: a.answerStart, broll, ...(take && takeCaptions(asked, take, a.answerStart)) };
+        const askerVideo = a.askerVideo && join(mediaDir, a.askerVideo);
+        return { file: join(mediaDir, a.video), answerStart: a.answerStart, broll, askerVideo, ...(take && takeCaptions(asked, take, a.answerStart)) };
       });
-      const { durations, captioned, mobile } = await joiner.join(takes, join(mediaDir, name), join(mediaDir, mobileName));
-      // Where each answer starts and ends in the joined video, and where its question's sound
-      // starts in it: [question id, start, end, captions burned in, question start] in seconds.
+      const { durations, captioned, mobile, focus = [] } = await joiner.join(takes, join(mediaDir, name), join(mediaDir, mobileName));
+      // Where each answer starts and ends in the joined video, where its question's sound starts in
+      // it, and where the phone's halves crop the expert and the asker to frame their faces:
+      // [question id, start, end, captions burned in, question start, expert, asker], in seconds,
+      // then as CSS's object-position (0-1 down), or null.
       let at = 0;
       const spans = durations.map((d) => [at, (at += d)]);
       const heard = await joiner.locate(join(mediaDir, name), questionsIn(answers, spans));
-      const chapters = answers.map((a, i) => [a.id, round(spans[i][0]), round(spans[i][1]), captioned[i] ? 1 : 0, round(heard[i])]);
+      const chapters = answers.map((a, i) => [a.id, round(spans[i][0]), round(spans[i][1]), captioned[i] ? 1 : 0, round(heard[i]), focus[i]?.[0] ?? null, focus[i]?.[1] ?? null]);
       const old = db.prepare('SELECT video, video_mobile FROM office_hours WHERE id = ?').get(officeHourId);
       db.prepare("UPDATE office_hours SET video = ?, video_mobile = ?, video_status = 'ready', video_chapters = ? WHERE id = ?").run(name, mobile ? mobileName : null, JSON.stringify(chapters), officeHourId);
       for (const file of [old?.video, old?.video_mobile]) if (file) rmSync(join(mediaDir, file), { force: true });
@@ -394,7 +401,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
       const chapters = JSON.parse(oh.video_chapters);
       const answers = new Map(db.prepare('SELECT id, audio, published_answer_start AS answerStart FROM questions WHERE office_hour_id = ?').all(officeHourId).map((a) => [a.id, a]));
       const heard = await joiner.locate(join(mediaDir, oh.video), questionsIn(chapters.map(([id]) => answers.get(id) ?? {}), chapters.map(([, start, end]) => [start, end])));
-      const located = chapters.map((c, i) => [...c.slice(0, 4), round(heard[i])]);
+      const located = chapters.map((c, i) => [...c.slice(0, 4), round(heard[i]), ...c.slice(5)]);
       db.prepare('UPDATE office_hours SET video_chapters = ? WHERE id = ? AND video = ?').run(JSON.stringify(located), officeHourId, oh.video);
     });
   }
@@ -421,13 +428,16 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
   }
 
   /**
-   * Queues making a published office hour's video again if its copy for phones isn't upright (or it
-   * has none): it was joined before the phone's copy was. Until then, readers keep the current one.
+   * Queues making a published office hour's video again if its copy for phones is out of date: not
+   * upright (or missing), from before it was, or with captions burned in before they went under the
+   * expert, framed to their face. Until then, readers keep the current one.
    */
-  function uprightForPhones(officeHourId) {
+  function refreshPhoneCopy(officeHourId) {
     enqueue(async () => {
-      const oh = db.prepare("SELECT video_mobile FROM office_hours WHERE id = ? AND video_status = 'ready'").get(officeHourId);
-      if (oh && !(oh.video_mobile && (await joiner.upright(join(mediaDir, oh.video_mobile))))) await render(officeHourId, { remake: true });
+      const oh = db.prepare("SELECT video_mobile, video_chapters FROM office_hours WHERE id = ? AND video_status = 'ready'").get(officeHourId);
+      if (!oh) return;
+      const unframed = joiner.finishing && JSON.parse(oh.video_chapters).some((c) => c[3] && c.length < 7);
+      if (unframed || !(oh.video_mobile && (await joiner.upright(join(mediaDir, oh.video_mobile))))) await render(officeHourId, { remake: true });
     });
   }
 
@@ -436,7 +446,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
     waiting.forEach((oh) => joinAnswers(oh.id));
     const joined = db.prepare("SELECT id, video_chapters FROM office_hours WHERE video_status = 'ready'").all();
     joined.filter((oh) => JSON.parse(oh.video_chapters).some((c) => c.length < 5)).forEach((oh) => relocate(oh.id));
-    if (joiner.upright) joined.forEach((oh) => uprightForPhones(oh.id));
+    if (joiner.upright) joined.forEach((oh) => refreshPhoneCopy(oh.id));
   }
 
   return {

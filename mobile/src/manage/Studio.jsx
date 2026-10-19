@@ -1,12 +1,14 @@
 // The recording session (session.js) on a phone: full screen, the camera above and the question
 // and its controls below. The camera's frame is the player's stage (9:16), filled as the players
 // fill it, so the expert sees themselves as readers will. Where the page plays the asker's video as a
-// small picture over the camera preview, this splits the frame: the asker's video in the top half
-// while their question plays, the camera in the bottom half. The rest of the time the camera has all
-// of it. The camera records more than either shows (3:4, see ANSWER_CAMERA), so both can be filled.
+// small picture over the camera preview, this splits the frame as the player does: the camera in the
+// top half while their question plays, the asker's video in the bottom half. The rest of the time
+// the camera has all of it. The camera records more than either shows (3:4, see ANSWER_CAMERA), so
+// both can be filled. With no faces found yet, the halves crop more off the top than the bottom.
 import { useEffect, useReducer, useRef } from 'react';
 import { Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { fmtDuration } from '../format.js';
+import { focusPosition } from '../media/split.js';
 import { layer, STAGE, useStage } from '../media/Video.jsx';
 import { QuestionMeta } from '../officehour/questions.jsx';
 import { color, font, MAX_WIDTH, radius } from '../theme.js';
@@ -51,12 +53,12 @@ export function Studio({ session, questions, queue, hasAnswer, saving }) {
     <Modal visible animationType="slide" onRequestClose={back}>
       <View style={styles.screen} role="dialog" aria-label="Recording answers">
         <div ref={stageRef} style={stage}>
-          <video ref={preview} autoPlay playsInline muted style={layer(split ? 'bottom' : 'full', wide, { extra: { transform: 'scaleX(-1)' } })} />
-          <div ref={pipSlot} style={layer('top', wide, { shown: split, z: 1, extra: { background: '#111', overflow: 'hidden' } })} />
-          <div style={layer('top', wide, { shown: split, z: 2 })}>
+          <video ref={preview} autoPlay playsInline muted style={layer(split ? 'top' : 'full', wide, { extra: { transform: 'scaleX(-1)', objectPosition: split ? focusPosition() : 'center' } })} />
+          <div ref={pipSlot} style={layer('bottom', wide, { shown: split, z: 1, extra: { background: '#111', overflow: 'hidden' } })} />
+          <div style={layer('bottom', wide, { shown: split, z: 2 })}>
             <span style={pill}>{state.label}</span>
           </div>
-          <div style={layer(split ? 'bottom' : 'full', wide, { z: 2 })}>
+          <div style={layer(split ? 'top' : 'full', wide, { z: 2 })}>
             <span style={{ ...recBadge, background: take.exiting ? color.ink2 : color.accent }}>{badge}</span>
           </div>
         </div>
