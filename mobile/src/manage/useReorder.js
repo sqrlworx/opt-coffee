@@ -102,6 +102,7 @@ export function useReorder(queue, setQueue, edges) {
     title: 'Drag to reorder',
     style: grip,
     onPointerDown(e) {
+      e.stopPropagation(); // a press on the grip moves the card, never slides it (SwipeRow.jsx)
       if (drag.current || e.button > 0 || latest.current.queue.length < 2) return;
       e.preventDefault(); // so a mouse doesn't select text
       e.currentTarget.setPointerCapture(e.pointerId);

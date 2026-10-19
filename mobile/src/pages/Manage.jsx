@@ -1,9 +1,10 @@
 // The planner, where the expert seeds questions, picks the order to answer them in, records the
 // answers and publishes them. On the page the moderator's suggested order and the expert's answer
 // order sit side by side, and questions are dragged from one to the other; on a phone they're two
-// tabs, questions are added with a tap, and moved by dragging their grips (manage/useReorder.js).
+// tabs, questions are added with a tap, moved by dragging their grips (manage/useReorder.js), and
+// taken out by sliding them left (manage/SwipeRow.jsx).
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import { api, sendFile } from '../api.js';
 import { useApp } from '../context.js';
 import { fmtDate } from '../format.js';
@@ -12,12 +13,13 @@ import { AnswerBox } from '../manage/AnswerBox.jsx';
 import { createSession } from '../manage/session.js';
 import { Studio } from '../manage/Studio.jsx';
 import { Suggestions } from '../manage/Suggestions.jsx';
+import { SwipeRow } from '../manage/SwipeRow.jsx';
 import { useReorder } from '../manage/useReorder.js';
 import { QuestionText } from '../media/transcript.jsx';
 import { ANSWER_CAMERA } from '../media/Video.jsx';
 import { QuestionMeta } from '../officehour/questions.jsx';
 import { go } from '../router.js';
-import { color, font, MAX_WIDTH, radius, TAB_BAR_HEIGHT, TOUCH } from '../theme.js';
+import { color, font, MAX_WIDTH, radius, TAB_BAR_HEIGHT } from '../theme.js';
 import { Icon } from '../ui/icons.jsx';
 import { Button, Chip, Empty, H1, Hint, Loading, Row, Segmented, Small, TopicChip, confirmed } from '../ui/index.jsx';
 
@@ -361,12 +363,18 @@ function Planner({ data, reload }) {
 }
 
 // The expert's answer order: what gets published, in this order, if it has a recorded answer. While
-// a card is being moved they all fold to their questions, hiding the rest without unmounting it.
+// a card is being moved they all fold to their questions, hiding the rest without unmounting it. A
+// card slid left shows Remove, which takes it out of the answer order.
 function AnswerOrder({ plan, setQueue }) {
   const { m } = plan;
   const { queue } = m;
   const { held, list, handle } = useReorder(queue, setQueue, bars);
   const folded = held != null;
+  const [open, setOpen] = useState(null); // the card slid open
+  useEffect(() => {
+    if (folded) setOpen(null);
+  }, [folded]);
+  const shown = folded ? null : open;
   return (
     <View style={{ gap: 14 }}>
       <Hint>Drag to reorder. Only questions here with a recorded answer get published, in this order.</Hint>
@@ -379,27 +387,39 @@ function AnswerOrder({ plan, setQueue }) {
           {queue.map((qid, i) => {
             const q = m.questions.get(qid);
             return (
-              <View key={qid} style={styles.queueItem}>
-                <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
-                  <Text style={styles.queueNum}>{i + 1}</Text>
-                  <View style={{ flex: 1, minWidth: 0 }}>
-                    {folded ? (
-                      <Text numberOfLines={2} style={styles.folded}>
-                        {q.body}
-                      </Text>
-                    ) : null}
-                    <View style={folded && styles.gone}>
-                      <QuestionText q={q} meta={<QuestionMeta q={q} />} style={{ fontSize: 18, lineHeight: 25 }} />
+              <SwipeRow
+                key={qid}
+                open={shown === qid}
+                others={shown != null && shown !== qid}
+                setOpen={(on) => setOpen(on ? qid : null)}
+                title="Remove"
+                label={`Remove question ${i + 1} from the answer order`}
+                onAction={() => (setOpen(null), setQueue(queue.filter((id) => id !== qid)))}
+              >
+                <View style={styles.queueItem}>
+                  <View style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+                    <View style={styles.side}>
+                      <Text style={styles.queueNum}>{i + 1}</Text>
+                      <div {...handle(qid, i)}>
+                        <Icon name="grip" size={20} color={color.muted} />
+                      </div>
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      {folded ? (
+                        <Text numberOfLines={2} style={styles.folded}>
+                          {q.body}
+                        </Text>
+                      ) : null}
+                      <View style={folded && styles.gone}>
+                        <QuestionText q={q} meta={<QuestionMeta q={q} />} style={{ fontSize: 18, lineHeight: 25 }} />
+                      </View>
                     </View>
                   </View>
-                  <div {...handle(qid, i)}>
-                    <Icon name="grip" size={20} color={color.muted} />
-                  </div>
+                  <View style={folded && styles.gone}>
+                    <AnswerBox qid={qid} plan={plan} />
+                  </View>
                 </View>
-                <View style={folded && styles.gone}>
-                  <AnswerBox qid={qid} plan={plan} aside={<IconButton name="close" label={`Remove question ${i + 1} from the answer order`} onPress={() => setQueue(queue.filter((id) => id !== qid))} />} />
-                </View>
-              </View>
+              </SwipeRow>
             );
           })}
         </View>
@@ -411,15 +431,6 @@ function AnswerOrder({ plan, setQueue }) {
 // Where the top bar and the save bar end on screen: the page scrolls under them.
 const bars = () => [document.getElementById('topbar')?.getBoundingClientRect().bottom ?? 0, document.getElementById('savebar')?.getBoundingClientRect().top ?? window.innerHeight];
 
-// As tall as the small buttons beside it, and as easy to tap as any.
-function IconButton({ name, label, onPress }) {
-  return (
-    <Pressable role="button" aria-label={label} hitSlop={(TOUCH - 38) / 2} onPress={onPress} style={({ pressed }) => [styles.iconBtn, pressed && { backgroundColor: color.surface2 }]}>
-      <Icon name={name} size={18} color={color.ink2} />
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create({
   tabs: { paddingBottom: 14, borderBottomWidth: 1, borderBottomColor: color.ink },
   group: { backgroundColor: color.raised, borderRadius: radius.lg, padding: 18, gap: 6 },
@@ -429,10 +440,11 @@ const styles = StyleSheet.create({
   planVotes: { width: 40, paddingTop: 3, fontFamily: font.sans, fontSize: 13, color: color.muted, fontVariant: ['tabular-nums'] },
   planBody: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
   queueItem: { backgroundColor: color.raised, borderRadius: radius.lg, padding: 16, gap: 12 },
-  queueNum: { minWidth: 22, fontFamily: font.serif, fontSize: 20, lineHeight: 26, color: color.ink, fontVariant: ['lining-nums', 'tabular-nums'] },
+  // The number, with the grip under it; the grip is wider than this, out into the card's padding.
+  side: { width: 24, alignItems: 'center' },
+  queueNum: { fontFamily: font.serif, fontSize: 20, lineHeight: 26, color: color.ink, fontVariant: ['lining-nums', 'tabular-nums'] },
   folded: { fontFamily: font.serif, fontSize: 18, lineHeight: 25, color: color.ink },
   gone: { display: 'none' },
-  iconBtn: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: color.surface, cursor: 'pointer' },
   savebar: { position: 'fixed', left: 0, right: 0, bottom: `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))`, zIndex: 15, backgroundColor: 'rgba(248,246,242,0.94)', backdropFilter: 'blur(14px)', borderTopWidth: 1, borderTopColor: color.line },
   savebarInner: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 20, paddingVertical: 10 },
 });

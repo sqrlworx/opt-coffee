@@ -13,29 +13,24 @@ import { color, font, radius } from '../theme.js';
 import { Button, Checkbox, Disclosure, Field, Hint, Label, Row, Small, Warn } from '../ui/index.jsx';
 
 // `plan` is the planner's state (Manage.jsx): what each question has, and what can be done to it.
-// `aside` goes at the right end of the buttons.
-export function AnswerBox({ qid, plan, aside = null }) {
+export function AnswerBox({ qid, plan }) {
   const { brollOn } = useApp();
   const { m } = plan;
   const videoRef = useRef(null);
-  const end = aside ? <View style={{ marginLeft: 'auto' }}>{aside}</View> : null;
   const take = m.uploads.get(qid);
   if (take) {
     return (
       <View style={{ gap: 10 }}>
         <Video src={take.url} controls style={answerVideo} />
-        <Row wrap gap={8}>
-          {take.failed ? (
-            <>
-              <Small style={{ color: color.muted }}>Couldn't save this answer.</Small>
-              <Button kind="primary" small title="Try again" onPress={() => plan.upload(qid, { ...take, failed: false })} />
-              <Button small title="Discard" onPress={() => plan.discardUpload(qid)} />
-            </>
-          ) : (
-            <Small style={{ color: color.muted }}>Saving…</Small>
-          )}
-          {end}
-        </Row>
+        {take.failed ? (
+          <Row wrap gap={8}>
+            <Small style={{ color: color.muted }}>Couldn't save this answer.</Small>
+            <Button kind="primary" small title="Try again" onPress={() => plan.upload(qid, { ...take, failed: false })} />
+            <Button small title="Discard" onPress={() => plan.discardUpload(qid)} />
+          </Row>
+        ) : (
+          <Small style={{ color: color.muted }}>Saving…</Small>
+        )}
       </View>
     );
   }
@@ -53,9 +48,8 @@ export function AnswerBox({ qid, plan, aside = null }) {
         </>
       ) : null}
       <Row wrap gap={8}>
-        <Button kind={url ? 'soft' : 'primary'} small title={url ? 'Re-record from here' : '● Answer from here'} onPress={() => plan.startSession(qid)} />
+        <Button kind={url ? 'soft' : 'primary'} small title={url ? 'Re-record from here' : 'Answer from here'} onPress={() => plan.startSession(qid)} />
         {url ? <Button small title="Remove" onPress={() => plan.removeAnswer(qid)} /> : null}
-        {end}
       </Row>
     </View>
   );
