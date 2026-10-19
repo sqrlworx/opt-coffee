@@ -100,31 +100,46 @@ print('{}')
   }
 });
 
-test("the phone's captions are placed for its split screen: the question at the top, the answer in the middle, in the expert's picture over b-roll", { skip }, () => {
+test("the phone's captions are where its upright player and both halves show them: the question near the top, the answer near the bottom", { skip }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_finish_mobile_ass_'));
   try {
-    py(`
+    const answerTop = py(`
 import captions
 from pathlib import Path
-ws = [W(0, 0.4, 'Is'), W(0.4, 1.0, 'it?'), W(2, 2.4, 'Yes'), W(2.4, 3.0, 'indeed.'), W(4.6, 5.0, 'Look'), W(5.0, 5.4, 'here,'), W(6, 6.5, 'see'), W(6.5, 7, 'this.')]
+ws = [W(0, 0.4, 'Is'), W(0.4, 1.0, 'it?'), W(2, 2.4, 'Yes'), W(2.4, 3.0, 'indeed.'), W(4.6, 5.0, 'Look'), W(5.0, 5.4, 'here,'), W(6, 6.5, 'see'), W(6.5, 7, 'this.'),
+      W(8, 8.6, 'Consistency'), W(8.6, 9.0, 'matters.')]
 ps = captions.phrases(ws, 1.5)
-# B-roll from 5s for 3s, with the expert's picture at 62,62, 338x254, as src/video.js puts it at 1080p.
-captions.write_mobile_ass(ps, Path(${JSON.stringify(join(dir, 'mobile.ass'))}), 1920, 1080, (5.0, 3.0, (62, 62, 338, 254)))
-print('{}')
+ps[-1].words[1].size = 1.456  # said louder, and the key word: too wide for one line
+captions.write_mobile_ass(ps, Path(${JSON.stringify(join(dir, 'mobile.ass'))}), 1080, 1440)
+captions.write_mobile_ass(ps, Path(${JSON.stringify(join(dir, 'mobile_top.ass'))}), 1080, 1440, at_top=True)
+captions.write_mobile_ass(ps, Path(${JSON.stringify(join(dir, 'mobile_tall.ass'))}), 1080, 1920)
+print(json.dumps(round(captions.mobile_caption_top(1080, 1440))))
 `);
-    const events = readFileSync(join(dir, 'mobile.ass'), 'utf8').split('\n').filter((l) => l.startsWith('Dialogue:'));
-    assert.match(readFileSync(join(dir, 'mobile.ass'), 'utf8'), /^Style: expert,Montserrat,81,/m); // bigger than the desktop's 60
+    const read = (file) => readFileSync(join(dir, file), 'utf8').split('\n').filter((l) => l.startsWith('Dialogue:'));
+    const events = read('mobile.ass');
+    assert.match(readFileSync(join(dir, 'mobile.ass'), 'utf8'), /^Style: expert,Montserrat,49,/m); // sized by as much of the copy's width as the whole player shows
     const at = (e) => [e.split(',').slice(1, 4).join(','), /\\pos\((\d+),(\d+)\)/.exec(e).slice(1).map(Number), Number(/\\fs(\d+)/.exec(e)[1])];
     assert.deepEqual(events.map(at), [
-      ['0:00:00.00,0:00:01.50,asker', [960, 43], 81], // the question, at the top edge: just under the split
-      ['0:00:01.95,0:00:03.50,expert', [960, 540], 81], // the answer, in the middle
-      ['0:00:04.55,0:00:05.00,expert', [960, 540], 81], // until the b-roll starts...
-      ['0:00:05.00,0:00:05.90,expert', [231, 301], 19], // ...then at the bottom of the expert's picture, at its scale
-      ['0:00:05.95,0:00:07.50,expert', [231, 301], 19],
+      ['0:00:00.00,0:00:01.50,asker', [540, 288], 49], // the question, a fifth of the way down: just under the split
+      ['0:00:01.95,0:00:03.50,expert', [540, 1152], 49], // the answer, a fifth of the way up: low on the whole player...
+      ['0:00:04.55,0:00:05.90,expert', [540, 1152], 49], // ...and just above the split while b-roll has the expert in the top half
+      ['0:00:05.95,0:00:07.50,expert', [540, 1152], 49],
+      ['0:00:07.95,0:00:09.50,expert', [540, 1152], 49],
     ]);
     assert.match(events[0], /\\an8/);
-    assert.match(events[1], /\\an5/);
-    assert.ok(events[2].includes('\\fad(') && !events[3].includes('\\fad(')); // a phrase pops in once, not again at the cut
+    assert.match(events[1], /\\an2/);
+    assert.ok(!events[3].includes('\\N'));
+    assert.match(events[4], /Consistency\\N\{/); // two lines, so the whole player shows it
+    // Where the speaker's mouth would come down to the answer (its biggest words reach up to 1081px),
+    // it goes at the top too.
+    assert.equal(answerTop, 1081);
+    assert.deepEqual(read('mobile_top.ass').map((e) => /\\pos\((\d+),(\d+)\)/.exec(e).slice(1).map(Number)), Array(5).fill([540, 288]));
+    // A 9:16 copy shows all of its width on the whole player, and only the middle half of its height
+    // in a half: the captions are bigger, and further in.
+    assert.deepEqual(read('mobile_tall.ass').slice(0, 2).map(at), [
+      ['0:00:00.00,0:00:01.50,asker', [540, 544], 65],
+      ['0:00:01.95,0:00:03.50,expert', [540, 1376], 65],
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

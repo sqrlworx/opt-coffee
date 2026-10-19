@@ -220,6 +220,50 @@ test('on startup, office hours published before joining existed, or mid-join, ar
   }
 });
 
+test("on startup, videos whose copy for phones isn't upright, or that have none, are joined again", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_upright_'));
+  try {
+    const oldDb = openDb(':memory:');
+    const [video, landscape, upright] = [(c) => `${c.repeat(32)}.mp4`, `${'b'.repeat(32)}.mp4`, `${'c'.repeat(32)}.mp4`];
+    oldDb.exec(`
+      INSERT INTO users (id, username, display_name, password_hash, created_at) VALUES (1, 'old', 'Old', 'x', '2026-01-01');
+      INSERT INTO office_hours (id, expert_id, title, questions_deadline, answers_expected_at, created_at, published_at, video, video_mobile, video_status, video_chapters) VALUES
+        (1, 1, 'Landscape copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('d')}', '${landscape}', 'ready', '[[1, 0, 5, 0, 0]]'),
+        (2, 1, 'No copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('e')}', NULL, 'ready', '[[2, 0, 5, 0, 0]]'),
+        (3, 1, 'Upright copy', '2026-01-02', '2026-01-03', '2026-01-01', '2026-01-04', '${video('f')}', '${upright}', 'ready', '[[3, 0, 5, 0, 0]]');
+      INSERT INTO questions (id, office_hour_id, author_id, body, created_at, published_position, published_answer_video) VALUES
+        (1, 1, 1, 'One?', '2026-01-01', 1, '${'1'.repeat(32)}.webm'),
+        (2, 2, 1, 'Two?', '2026-01-01', 1, '${'2'.repeat(32)}.webm'),
+        (3, 3, 1, 'Three?', '2026-01-01', 1, '${'3'.repeat(32)}.webm');
+    `);
+    for (const n of ['1', '2', '3']) writeFileSync(join(dir, `${n.repeat(32)}.webm`), take(n, 5));
+    for (const c of ['d', 'e', 'f']) writeFileSync(join(dir, video(c)), 'joined');
+    writeFileSync(join(dir, landscape), 'landscape');
+    writeFileSync(join(dir, upright), 'upright');
+    // Joins as the real one does now, with an upright copy for phones.
+    const joined = [];
+    const joiner = {
+      async join(takes, out, mobileOut) {
+        joined.push(takes.map((t) => readFileSync(t.file, 'utf8')));
+        writeFileSync(out, 'joined again');
+        writeFileSync(mobileOut, 'upright');
+        return { durations: takes.map(() => 5), captioned: takes.map(() => false), mobile: true };
+      },
+      locate: async (v, questions) => questions.map(() => 0),
+      upright: async (file) => existsSync(file) && readFileSync(file, 'utf8') === 'upright',
+    };
+    const resumed = createApp({ db: oldDb, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir, joiner });
+    await resumed.idle();
+    assert.deepEqual(joined, [['take: 1 5s'], ['take: 2 5s']]);
+    const rows = oldDb.prepare('SELECT id, video, video_mobile FROM office_hours ORDER BY id').all();
+    for (const row of rows.slice(0, 2)) assert.equal(readFileSync(join(dir, row.video_mobile), 'utf8'), 'upright');
+    assert.ok(!existsSync(join(dir, landscape)) && !existsSync(join(dir, video('d'))) && !existsSync(join(dir, video('e')))); // replaced
+    assert.deepEqual([rows[2].video, rows[2].video_mobile], [video('f'), upright]); // already upright
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('without ffmpeg, published answers have no joined video', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_off_'));
   const offServer = createServer(createApp({ db: openDb(':memory:'), moderator: await createModerator({ mode: 'heuristic' }), mediaDir: dir }));
@@ -252,15 +296,18 @@ test('ffmpeg joins takes of different formats, sizes and frame rates', { skip: !
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=1.5', '-f', 'lavfi', '-i', 'sine=f=660:duration=1.5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'b.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=360x640:rate=25:duration=1', '-c:v', 'libx264', join(dir, 'c.mp4'));
     const joiner = createVideoJoiner();
-    const out = join(dir, 'joined.mp4');
-    const { durations, captioned } = await joiner.join(['a.webm', 'b.mp4', 'c.mp4'].map((f) => join(dir, f)), out);
-    assert.deepEqual(captioned, [false, false, false]);
+    const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
+    const { durations, captioned, mobile } = await joiner.join(['a.webm', 'b.mp4', 'c.mp4'].map((f) => join(dir, f)), out, phone);
+    assert.deepEqual([captioned, mobile], [[false, false, false], true]);
     assert.equal(durations.length, 3);
     [2, 1.5, 1].forEach((secs, i) => assert.ok(Math.abs(durations[i] - secs) < 0.1, `part ${i}: ${durations[i]}s`));
     const total = Number(probe(out, 'format=duration'));
     assert.ok(Math.abs(total - durations.reduce((a, b) => a + b)) < 0.1, `joined: ${total}s`);
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
-    assert.deepEqual(readdirSync(dir).sort(), ['a.webm', 'b.mp4', 'c.mp4', 'joined.mp4']); // nothing left over
+    // The phone's copy: the same parts, upright.
+    assert.deepEqual(probe(phone, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,720,960']);
+    assert.ok(Math.abs(Number(probe(phone, 'format=duration')) - total) < 0.1);
+    assert.deepEqual(readdirSync(dir).sort(), ['a.webm', 'b.mp4', 'c.mp4', 'joined.mp4', 'phone.mp4']); // nothing left over
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -304,10 +351,8 @@ function finishingJoiner() {
       await joiner.gate;
       joiner.calls.push(takes.map(({ file, ...rest }) => ({ video: readFileSync(file, 'utf8'), ...rest })));
       writeFileSync(out, `finished, version ${joiner.calls.length}`);
-      const captioned = takes.map((t) => Boolean(t.cues?.length));
-      const mobile = Boolean(mobileOut && captioned.some(Boolean));
-      if (mobile) writeFileSync(mobileOut, `finished for phones, version ${joiner.calls.length}`);
-      return { durations: takes.map(() => 5), captioned, mobile };
+      if (mobileOut) writeFileSync(mobileOut, `finished for phones, version ${joiner.calls.length}`);
+      return { durations: takes.map(() => 5), captioned: takes.map((t) => Boolean(t.cues?.length)), mobile: Boolean(mobileOut) };
     },
     locate: async (video, questions) => questions.map(() => 0),
   };
@@ -417,36 +462,37 @@ test('a joiner with a finisher joins the finished parts, or the takes as recorde
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=440:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=1280x720:rate=30:duration=1', '-f', 'lavfi', '-i', 'sine=f=660:duration=1', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'b.mp4'));
     const takes = [{ file: join(dir, 'a.mp4'), answerStart: 0.5, cues: [[0, 1, 'Hello there.']], words: null }, { file: join(dir, 'b.mp4') }];
-    // Stands in for src/finish: renders each take at 1080p, as the real one does, and its copy for phones where asked.
+    // Stands in for src/finish: renders each take at 1080p, as the real one does, and its upright copy for phones.
     let given = null;
     const finisher = {
       async finish(jobs) {
         given = jobs;
         for (const job of jobs) {
-          for (const output of [job.output, job.mobile_output].filter(Boolean)) ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', output);
+          ffmpeg('-i', job.input, '-vf', 'scale=1920:1080', '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.output);
+          if (job.mobile_output) ffmpeg('-i', job.input, '-vf', `scale=${job.mobile_size.join(':')}`, '-c:v', 'libx264', '-c:a', 'aac', '-ar', '48000', '-ac', '2', job.mobile_output);
         }
         return {};
       },
     };
     const finished = await createVideoJoiner({ finisher }).join(takes, join(dir, 'finished.mp4'), join(dir, 'mobile.mp4'));
     assert.deepEqual(given.map((j) => [j.answer_start, j.cues]), [[0.5, [[0, 1, 'Hello there.']]], [null, null]]);
-    assert.deepEqual(given.map((j) => Boolean(j.mobile_output)), [true, false]); // only a take with captions differs
+    assert.deepEqual(given.map((j) => [Boolean(j.mobile_output), j.mobile_size]), [[true, [1080, 1440]], [true, [1080, 1440]]]); // upright, so every take differs
     assert.deepEqual([finished.captioned, finished.mobile], [[true, false], true]);
-    for (const file of ['finished.mp4', 'mobile.mp4']) {
-      assert.deepEqual(probe(join(dir, file), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1920,1080']);
+    for (const [file, size] of [['finished.mp4', '1920,1080'], ['mobile.mp4', '1080,1440']]) {
+      assert.deepEqual(probe(join(dir, file), 'stream=codec_name,width,height').split('\n').sort(), ['aac', `h264,${size}`]);
       assert.ok(Math.abs(Number(probe(join(dir, file), 'format=duration')) - 3) < 0.1, file);
     }
-    // Without a transcript there's nothing to place differently, so no copy.
-    const uncaptioned = await createVideoJoiner({ finisher }).join([takes[1]], join(dir, 'uncaptioned.mp4'), join(dir, 'uncaptioned_mobile.mp4'));
-    assert.equal(uncaptioned.mobile, false);
-    assert.ok(!existsSync(join(dir, 'uncaptioned_mobile.mp4')));
+    // Without a place for a copy, there's none.
+    const alone = await createVideoJoiner({ finisher }).join([takes[1]], join(dir, 'alone.mp4'));
+    assert.equal(alone.mobile, false);
+    assert.equal(given[0].mobile_output, null);
 
     const logs = [];
     const failing = { finish: async () => Promise.reject(new Error('the models could not be downloaded')) };
     const plain = await createVideoJoiner({ finisher: failing, log: (msg) => logs.push(msg) }).join(takes, join(dir, 'plain.mp4'), join(dir, 'plain_mobile.mp4'));
-    assert.deepEqual([plain.captioned, plain.mobile], [[false, false], false]); // the player draws them instead
-    assert.ok(!existsSync(join(dir, 'plain_mobile.mp4')));
+    assert.deepEqual([plain.captioned, plain.mobile], [[false, false], true]); // the player draws them instead
     assert.deepEqual(probe(join(dir, 'plain.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
+    assert.deepEqual(probe(join(dir, 'plain_mobile.mp4'), 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,720,960']);
     assert.match(logs.join('\n'), /finishing failed, so the takes are joined as recorded: the models could not be downloaded/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -484,6 +530,39 @@ test('ffmpeg cuts away to b-roll: it fills the frame, and the answer moves to th
   }
 });
 
+test("ffmpeg makes the phone's copy upright, each take filling it, without the b-roll", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_phone_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const size = (file) => execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString().trim();
+  try {
+    // A red answer from a webcam, wider than tall, with blue b-roll; then a green one recorded
+    // upright, narrower than the copy.
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=660:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
+    const joiner = createVideoJoiner();
+    const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
+    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1, length: 2 } }, { file: join(dir, 'c.mp4') }], out, phone);
+    assert.equal(mobile, true);
+    assert.equal(size(phone), '720,960'); // 3:4, as the app records answers
+    const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
+    assert.ok(near(pixel(out, 2, 0.5, 0.5), blue), 'the page has the b-roll cut in');
+    assert.ok(near(pixel(phone, 2, 0.5, 0.5), red), 'the phone plays it in its other half instead');
+    assert.ok(near(pixel(phone, 2, 0.02, 0.5), red) && near(pixel(phone, 2, 0.98, 0.5), red), 'filled to the edges, its sides cropped');
+    assert.ok(near(pixel(out, 5, 0.05, 0.5), black), 'the upright take between bars on the page');
+    assert.ok(near(pixel(phone, 5, 0.02, 0.5), green) && near(pixel(phone, 5, 0.5, 0.02), green), "filling the phone's copy");
+    // When every take is 9:16, as the app recorded answers before, so is the copy: nothing is cropped.
+    const tall = join(dir, 'tall.mp4');
+    await joiner.join([{ file: join(dir, 'c.mp4') }, { file: join(dir, 'c.mp4') }], join(dir, 'joined_tall.mp4'), tall);
+    assert.equal(size(tall), '720,1280');
+    assert.equal(await joiner.upright(phone), true);
+    assert.equal(await joiner.upright(out), false);
+    assert.equal(await joiner.upright(join(dir, 'missing.mp4')), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a finisher is given the b-roll and the filter that cuts it in over its picture', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_finish_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
@@ -495,8 +574,7 @@ test('a finisher is given the b-roll and the filter that cuts it in over its pic
       async finish(jobs) {
         for (const { input, output, cutaway } of jobs) {
           assert.equal(cutaway.input, join(dir, 'b.mp4'));
-          // When it plays and where the expert is then, for the phone's captions.
-          assert.deepEqual([cutaway.start, cutaway.length, cutaway.pip], [1, 1.8, pipBox(1920)]);
+          assert.deepEqual([cutaway.start, cutaway.length], [1, 1.8]); // when it plays
           ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', `[0:v]scale=1920:1080,fps=30[pic];${cutaway.filter};[cut]format=yuv420p[v]`, '-map', '[v]', '-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac', output);
         }
         return {};

@@ -257,9 +257,10 @@ function publishedAnswers(questions) {
 
 /**
  * The published answers as one video, or null without ffmpeg. `mobileSrc` is its copy for the mobile
- * app, with burned-in captions placed for its split screen (null without burned-in captions, or for
- * a video joined before there were copies). `chapters` place each answer in it; `captions` is true
- * where its captions are burned into the picture, so players don't draw them again.
+ * app: upright, without the b-roll, and with burned-in captions placed for its split screen (null
+ * for a video joined before there were copies; one joined before they were upright is landscape
+ * until it's joined again). `chapters` place each answer in it; `captions` is true where its
+ * captions are burned into the picture, so players don't draw them again.
  * `questionStart` is how far into the answer its question's sound starts, until found 0.
  */
 function joinedVideo(oh) {

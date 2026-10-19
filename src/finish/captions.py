@@ -11,7 +11,6 @@ where a line was corrected, its words are spread over the line's time instead.
 
 from __future__ import annotations
 
-import itertools
 import re
 from dataclasses import dataclass, field
 
@@ -24,8 +23,12 @@ LEAD = 0.05  # a phrase appears just before it's said...
 HOLD = 0.5  # ...and stays up this long after, unless the next one starts sooner
 SIZE = 0.056  # base font size, as a fraction of the frame height
 BOTTOM = 0.06  # captions sit this far above the bottom edge
-MOBILE_SIZE = 0.075  # on a phone the frame is a few hundred pixels tall, so its copy's are bigger
-MOBILE_TOP = 0.04  # the phone's copy puts the question this far below the top edge
+# The phone's copy is upright. The phone fills its upright player with it, or either half of the
+# player, cropping it to their shapes (width / height), so its captions go where all of those show.
+STAGE, HALF = 9 / 16, 9 / 8
+TALLEST = 9 / 20  # a tall phone's screen, in fullscreen
+MOBILE_SIZE = 0.06  # as a share of as much of the copy's width as the whole player shows
+MOBILE_MARGIN = 1 / 30  # how far inside what a half shows of the copy's height they sit
 EMPHASIS_SHARE = 0.4  # at most this share of phrases gets an emphasised word
 
 EXPERT = "&H00FFFFFF"  # ASS colours are &HAABBGGRR
@@ -230,6 +233,22 @@ def caption_top(height: int) -> float:
     return height * (1 - BOTTOM) - 1.3 * 1.12 * SIZE * height
 
 
+def mobile_caption_top(width: int, height: int) -> float:
+    """The same for the phone's copy, where the answer sits higher."""
+    base, _, low, _ = _mobile_layout(width, height)
+    return low - 1.3 * 1.12 * base
+
+
+def _mobile_layout(width: int, height: int) -> tuple[int, int, int, float]:
+    """Where captions go on the phone's copy, `width` x `height`: their size; how far down the
+    question's top is, just under the split, inside what the bottom half shows; how far down the
+    answer's foot is, just above the split, inside what the top half shows, which is low on the whole
+    player too; and how wide a line can be for the whole player to show it, even on a tall phone."""
+    aspect = width / height
+    inset = (1 - min(1.0, aspect / HALF)) / 2 + MOBILE_MARGIN
+    return round(MOBILE_SIZE * min(1.0, STAGE / aspect) * width), round(inset * height), round((1 - inset) * height), min(1.0, TALLEST / aspect) * width
+
+
 def _script(width: int, height: int, base: int) -> list[str]:
     """The start of an ASS script for libass, with a style for each speaker at `base` size."""
     # No box: a soft dark edge and shadow keep the words readable on light and dark alike.
@@ -275,43 +294,22 @@ def write_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: boo
     return len(phrases_)
 
 
-def write_mobile_ass(phrases_: list[Phrase], path, width: int, height: int, broll: tuple | None = None) -> int:
-    """Writes the captions for the phone's copy of the video, placed for its split screen
-    (mobile/src/media/JointPlayer.jsx), where the frame is in the middle of the player, or its
-    bottom half while the asker or the expert has the top half. The question goes at the top edge,
-    just under the split, as the asker is above it. The answer goes in the middle. While b-roll
-    plays, the phone crops the expert's picture out of the frame into the top half, so the answer
-    goes at the bottom of that picture, at its scale, and comes out just above the split.
-
-    `broll` is (start, length, (x, y, w, h)): when the b-roll plays in the take, in seconds, and
-    where the expert's picture is in the frame. Returns how many phrases were written."""
-    base = round(MOBILE_SIZE * height)
+def write_mobile_ass(phrases_: list[Phrase], path, width: int, height: int, at_top: bool = False) -> int:
+    """Writes the captions for the phone's copy of the video, where all of the ways the phone shows
+    it show them (mobile/src/media/JointPlayer.jsx): in the middle of its width, and within the part
+    of its height a half shows. The question goes at the top of that, just under the split, as the
+    asker is above it. The answer goes at the bottom: low on the whole player, and just above the
+    split while b-roll plays in the bottom half, with the expert cropped into the top half. With
+    `at_top`, where the speaker's mouth would be behind it, the answer goes at the top too. Returns
+    how many phrases were written."""
+    base, top, low, line = _mobile_layout(width, height)
     lines = _script(width, height, base)
-    top = rf"\an8\pos({width // 2},{int(height * MOBILE_TOP)})"
-    middle = rf"\an5\pos({width // 2},{height // 2})"
-    window = (broll[0], broll[0] + broll[1]) if broll else None
-    if broll:
-        bx, by, bw, bh = broll[2]
-        small = round(MOBILE_SIZE * bh)  # the picture fills the top half as the frame fills the middle
-        inset = round(BOTTOM * bh)
-        corner = rf"\an2\pos({bx + bw // 2},{by + bh - inset})\bord{_px(small / 30)}\shad{_px(small / 24)}"
     for p in phrases_:
-        for i, (start, end, cut) in enumerate(_spans(p.start, p.end, window if p.speaker == "expert" else None)):
-            size, pos = (small, corner) if cut else (base, top if p.speaker == "asker" else middle)
-            words = [_word_tags(w, size) + _escape(_display(w.text)) for w in p.words]
-            text = _wrap(words, p.words, size, bw - 2 * inset) if cut else " ".join(words)
-            pop = _pop(size) if i == 0 else rf"\blur{_px(size / 30)}"  # a phrase going on over the cut doesn't pop in again
-            lines.append(f"Dialogue: 0,{_time(start)},{_time(end)},{p.speaker},,0,0,0,,{{{pos}{pop}}}{text}")
+        words = [_word_tags(w, base) + _escape(_display(w.text)) for w in p.words]
+        pos = rf"\an8\pos({width // 2},{top})" if p.speaker == "asker" or at_top else rf"\an2\pos({width // 2},{low})"
+        lines.append(f"Dialogue: 0,{_time(p.start)},{_time(p.end)},{p.speaker},,0,0,0,,{{{pos}{_pop(base)}}}{_wrap(words, p.words, base, line)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(phrases_)
-
-
-def _spans(start: float, end: float, window: tuple | None) -> list[tuple[float, float, bool]]:
-    """A phrase's time split where b-roll starts and ends: (start, end, during the b-roll)."""
-    if not window:
-        return [(start, end, False)]
-    cuts = sorted({start, end, *(t for t in window if start < t < end)})
-    return [(a, b, window[0] <= a and b <= window[1]) for a, b in itertools.pairwise(cuts)]
 
 
 def _wrap(tagged: list[str], words: list[Word], base: int, width: float) -> str:

@@ -7,7 +7,7 @@ import { useApp } from '../context.js';
 import { fmtDuration } from '../format.js';
 import { useLeaveGuard, useMounted } from '../hooks.js';
 import { CueLines } from '../media/transcript.jsx';
-import { AUDIO_RECORDING_TYPES, AudioPlayer, CAMERA, cameraAspect, MAX_QUESTION_SECS, onShape, RECORDING_TYPES, shaped, Video } from '../media/Video.jsx';
+import { AUDIO_RECORDING_TYPES, AudioPlayer, HALF, MAX_QUESTION_SECS, QUESTION_CAMERA, RECORDING_TYPES, Video } from '../media/Video.jsx';
 import { color, font, radius } from '../theme.js';
 import { Button, Checkbox, Field, Hint, Label, Link, Row, Segmented, Serif, Small, confirmed } from '../ui/index.jsx';
 
@@ -126,17 +126,16 @@ function VoicePicker({ voices, value, onChange }) {
   );
 }
 
-// Records a question out loud, or on camera with `camera` (the front one, upright). When the asker
-// stops, the recording is transcribed, and they can play it back and correct the transcript (it
-// becomes the question's text) before asking. Leaving lets go of the microphone and camera, and of a
-// recording that wasn't asked.
+// Records a question out loud, or on camera with `camera` (the front one, in the shape of the top
+// half of the player, where it's shown). When the asker stops, the recording is transcribed, and
+// they can play it back and correct the transcript (it becomes the question's text) before asking.
+// Leaving lets go of the microphone and camera, and of a recording that wasn't asked.
 function SpokenQuestion({ oh, camera, anonymous, onAsked, onBusy }) {
   const { fail } = useApp();
   const mounted = useMounted();
   const [state, setState] = useState({ step: 'idle' });
   const [lines, setLines] = useState([]);
   const [secs, setSecs] = useState(0);
-  const [aspect, setAspect] = useState(9 / 16); // the camera's shape, for its preview
   const r = useRef({ stream: null, recorder: null, take: null, draft: null, timer: 0 }).current;
   const preview = useRef(null);
   const show = (next) => mounted.current && setState(next);
@@ -174,14 +173,13 @@ function SpokenQuestion({ oh, camera, anonymous, onAsked, onBusy }) {
       throw new Error(`This browser can't record ${camera ? 'video' : 'audio'}. Try a recent Chrome, Firefox or Safari.`);
     }
     try {
-      r.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: camera ? CAMERA : false });
+      r.stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: camera ? QUESTION_CAMERA : false });
     } catch (err) {
       stopMic();
       if (err.name === 'NotAllowedError') throw new Error(camera ? 'Allow camera and microphone access to ask on camera.' : 'Allow microphone access to ask out loud.');
       throw new Error(`Couldn't start the ${camera ? 'camera' : 'microphone'}: ${err.message}`);
     }
     if (!mounted.current) return stopMic();
-    if (camera) setAspect(cameraAspect(r.stream));
     const mimeType = (camera ? RECORDING_TYPES : AUDIO_RECORDING_TYPES).find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
     const chunks = [];
     const rec = (r.recorder = new MediaRecorder(r.stream, camera ? { mimeType, videoBitsPerSecond: 1_500_000 } : { mimeType }));
@@ -255,7 +253,7 @@ function SpokenQuestion({ oh, camera, anonymous, onAsked, onBusy }) {
   if (step === 'recording') {
     return (
       <View style={{ gap: 12 }}>
-        {camera ? <video ref={preview} autoPlay playsInline muted {...onShape(setAspect)} style={{ ...take, ...shaped(aspect), transform: 'scaleX(-1)' }} /> : null}
+        {camera ? <video ref={preview} autoPlay playsInline muted style={{ ...take, transform: 'scaleX(-1)' }} /> : null}
         <Row gap={10} wrap>
           <View style={styles.recPill}>
             <Text style={styles.recText}>● REC {fmtDuration(secs)}</Text>
@@ -302,8 +300,9 @@ function SpokenQuestion({ oh, camera, anonymous, onAsked, onBusy }) {
   );
 }
 
-// A recording, or the camera while recording (mirrored, like a selfie view), each in its own shape.
-const take = { display: 'block', objectFit: 'cover', background: '#111', borderRadius: 12 };
+// A recording, or the camera while recording (mirrored, like a selfie view), filling the shape of the
+// top half of the player, as the question will be shown.
+const take = { display: 'block', width: '100%', aspectRatio: String(HALF), objectFit: 'cover', background: '#111', borderRadius: 12 };
 
 const styles = StyleSheet.create({
   askInput: { borderWidth: 0, borderBottomWidth: 1, borderColor: color.lineStrong, borderRadius: 0, backgroundColor: 'transparent', paddingHorizontal: 0, fontFamily: font.serif, fontSize: 21, lineHeight: 29, boxShadow: 'none' },

@@ -27,9 +27,9 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
 
     uv run finish.py job.json
 
-    {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null,
+    {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null, "mobile_size": [1080, 1440],
                 "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
-                "cutaway": {"input": "media/b.mp4", "filter": "...", "start": 2.5, "length": 6, "pip": [x, y, w, h]} or null}],
+                "cutaway": {"input": "media/b.mp4", "filter": "...", "start": 2.5, "length": 6} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -38,12 +38,16 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
 - sound (sound.py): the voice restored to studio quality (or, as "natural", only cleaned up),
   then a broadcast voice chain, with question and answer each at -16 LUFS;
 - captions (captions.py), when the take has a transcript: a few words at a time, a colour per
-  speaker, louder words bigger and key words heavier or in italics. With a `mobile_output`, the
-  take is also written there with its captions placed for the phone's split screen;
+  speaker, louder words bigger and key words heavier or in italics;
 - b-roll, when the take has a cutaway: its clip, and the ffmpeg filter graph that cuts away to it
   (made by src/video.js), from [pic], the finished picture, and [2:v], the clip, to [cut]. It goes
-  under the grain and the captions. `start` and `length` are when it plays, and `pip` is where the
-  expert's picture is in the frame then, for the phone's captions.
+  under the grain and the captions. `start` and `length` are when it plays.
+
+With a `mobile_output`, the take is also written there for the mobile app, in the same pass: the
+same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
+take is 9:16), filled and cropped, so that the phone can fill its upright player with it, or either
+half of it (mobile/src/media/split.js). It has no b-roll cut in, since the phone plays the clip in
+the other half, and its captions are placed where all of those show them.
 
 The takes are cut into pieces of a few seconds that render in parallel. Logs go to stderr; the
 last line on stdout is a JSON report. Exits non-zero on failure.
@@ -261,30 +265,32 @@ def fit_filter(size: tuple[int, int]) -> str:
     )
 
 
-def placement(size: tuple[int, int]) -> tuple[float, float, float]:
-    """Scale and offset from working pixels to output pixels."""
+def placement(size: tuple[int, int], out: tuple[int, int] = (OUT_W, OUT_H), fill: bool = False) -> tuple[float, float, float]:
+    """Scale and offset from working pixels to output pixels: fitted, or filling `out`, cropped."""
     w, h = size
-    s = min(OUT_W / w, OUT_H / h)
-    return s, (OUT_W - w * s) / 2, (OUT_H - h * s) / 2
+    s = (max if fill else min)(out[0] / w, out[1] / h)
+    return s, (out[0] - w * s) / 2, (out[1] - h * s) / 2
 
 
 def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, mobile_ass: Path | None, fonts: Path, tmp: Path) -> None:
-    """Encodes the take to `output`, and with `mobile_ass` also to `mobile_output`: the same picture
-    with the captions placed for the phone. One pass makes both."""
+    """Encodes the take to `output`, and to `mobile_output` if it has one: upright, without the
+    b-roll, and with `mobile_ass`, its captions placed for the phone. One pass makes both."""
     listing = tmp / f"take{index}.txt"
     listing.write_text("".join(f"file '{p}'\n" for p in pieces))
-    picture = f"[0:v]setpts=N/{FPS}/TB,{fit_filter(info['size'])},cas=strength=0.4:planes=1"  # sharpen the detail the upscale softened (luma only)
+    sharpen = "cas=strength=0.4:planes=1"  # the detail the upscale softened (luma only)
     grain = "noise=c0s=3:c0f=t"  # a fine moving grain, as from a camera sensor
 
     def burn(script: Path | None) -> str:
         return ",".join([*([f"ass={_escape(script)}:fontsdir={_escape(fonts)}"] if script else []), "format=yuv420p"])
 
     cutaway = take.get("cutaway")
-    graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain}" if cutaway else f"{picture},{grain}"
-    if mobile_ass:
-        graph += f",split=2[desktop][phone];[desktop]{burn(ass)}[v];[phone]{burn(mobile_ass)}[vm]"
-    else:
-        graph += f",{burn(ass)}[v]"
+    phone = take.get("mobile_output")
+    pw, ph = take.get("mobile_size") or (0, 0)
+    picture = f"[0:v]setpts=N/{FPS}/TB" + (",split=2[desktop][phone];[desktop]" if phone else ",") + f"{fit_filter(info['size'])},{sharpen}"
+    graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain},{burn(ass)}[v]" if cutaway else f"{picture},{grain},{burn(ass)}[v]"
+    if phone:
+        fill = f"scale={pw}:{ph}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={pw}:{ph}"
+        graph += f";[phone]{fill},{sharpen},{grain},{burn(mobile_ass)}[vm]"
     settings = [
         "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
@@ -296,7 +302,7 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
         *(["-i", cutaway["input"]] if cutaway else []),
         "-filter_complex", graph,
         "-map", "[v]", "-map", "1:a", *settings, take["output"],
-        *(["-map", "[vm]", "-map", "1:a", *settings, take["mobile_output"]] if mobile_ass else []),
+        *(["-map", "[vm]", "-map", "1:a", *settings, phone] if phone else []),
     )  # fmt: skip
 
 
@@ -339,18 +345,22 @@ def main() -> None:
             ass, mobile_ass, phrases = None, None, 0
             if take.get("cues"):
                 built = captions.build(take["cues"], take.get("words"), take.get("answer_start"), clean, SR)
-                # Captions go at the top for a take where the mouth often comes down to where they'd be.
-                at_top = False
+                # Captions go at the top for a take where the mouth often comes down to where they'd be,
+                # in either copy: filling the phone's enlarges a take of another shape.
+                at_top = mobile_at_top = False
+                phone = take.get("mobile_output") and tuple(take["mobile_size"])
                 if track is not None:
+                    mouth = float(np.percentile(track[:, 1] + 0.75 * track[:, 3], 90))
                     s, _, oy = placement(size)
-                    mouth = float(np.percentile(track[:, 1] + 0.75 * track[:, 3], 90)) * s + oy
-                    at_top = mouth + 0.02 * OUT_H > captions.caption_top(OUT_H)
+                    at_top = mouth * s + oy + 0.02 * OUT_H > captions.caption_top(OUT_H)
+                    if phone:
+                        s, _, oy = placement(size, phone, fill=True)
+                        mobile_at_top = mouth * s + oy + 0.02 * phone[1] > captions.mobile_caption_top(*phone)
                 ass = tmp / f"take{i}.ass"
                 phrases = captions.write_ass(built, ass, OUT_W, OUT_H, at_top)
-                if take.get("mobile_output"):
-                    cut = take.get("cutaway")
+                if phone:
                     mobile_ass = tmp / f"take{i}_mobile.ass"
-                    captions.write_mobile_ass(built, mobile_ass, OUT_W, OUT_H, cut and (cut["start"], cut["length"], cut["pip"]))
+                    captions.write_mobile_ass(built, mobile_ass, *phone, mobile_at_top)
             entry = {
                 "input": take["input"],
                 "frames": frames,

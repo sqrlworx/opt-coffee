@@ -63,7 +63,7 @@ export function createSession({ order, camera, questions, keep, finishing, toast
       clip.setAttribute('playsinline', '');
       clip.preload = 'auto';
       clip.src = url;
-      Object.assign(clip.style, { display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#111' });
+      Object.assign(clip.style, { display: 'block', width: '100%', height: '100%', objectFit: 'cover', background: '#111' });
       clip.addEventListener('playing', () => {
         if (state.clip !== clip) return;
         state.clipShown = true;

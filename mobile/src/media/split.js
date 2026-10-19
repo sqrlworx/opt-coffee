@@ -4,10 +4,10 @@
 // be in the corner goes in the top half and the main one in the bottom half, each at full width.
 // This is the arithmetic for that, kept apart from React so it can be tested (test/split.test.js).
 
-// Where a layer sits on the stage, a player two 16:9 pictures tall. `center` is a lone picture
-// between them, before or after a split; `full` fills the stage (a camera preview, cropped). A stage
-// wider than tall (fullscreen on a phone turned sideways) splits side by side instead, the top half's
-// picture on the left.
+// Where a layer sits on the stage, an upright player (9:16): `top` and `bottom` are its halves, and
+// `full` is all of it, for a lone picture before or after a split. A stage wider than tall
+// (fullscreen on a phone turned sideways) splits side by side instead, the top half's picture on the
+// left.
 export function slot(name, wide = false) {
   if (wide) {
     if (name === 'top') return { top: '0%', left: '0%', width: '50%', height: '100%' };
@@ -16,7 +16,6 @@ export function slot(name, wide = false) {
   }
   if (name === 'top') return { top: '0%', left: '0%', width: '100%', height: '50%' };
   if (name === 'bottom') return { top: '50%', left: '0%', width: '100%', height: '50%' };
-  if (name === 'center') return { top: '25%', left: '0%', width: '100%', height: '50%' };
   return { top: '0%', left: '0%', width: '100%', height: '100%' };
 }
 
@@ -74,7 +73,9 @@ export function cutCue(part, t) {
 // draws it there (cutawayFilter in src/video.js, which this mirrors): a 4:3 crop of their take at
 // the top left, in a thin white frame with rounded corners. The rectangle, [x, y, width, height] in
 // pixels of a frame `width` wide, is that picture inside its frame, brought in past the rounded
-// corners, so the top half shows just the expert, cropped from the video already playing.
+// corners, so the top half shows just the expert, cropped from the video already playing. The
+// phone's own copy of the joined video has no b-roll cut in, so this is for a video joined before
+// there was one.
 export const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022 };
 
 export function pipRect(width) {
@@ -87,8 +88,10 @@ export function pipRect(width) {
   return [x + corner, x + corner, pw - 2 * corner, ph - 2 * corner];
 }
 
-// A `w`x`h` picture fitted inside a box, centred: [x, y, width, height].
-export function contain(w, h, boxW, boxH) {
-  const scale = Math.min(boxW / w, boxH / h);
-  return [(boxW - w * scale) / 2, (boxH - h * scale) / 2, w * scale, h * scale];
+// The middle of a `w`x`h` picture that fills a box of another shape, as CSS's object-fit: cover
+// crops it: [x, y, width, height] in the picture's pixels.
+export function cover(w, h, boxW, boxH) {
+  const scale = Math.max(boxW / w, boxH / h);
+  const [cw, ch] = [boxW / scale, boxH / scale];
+  return [(w - cw) / 2, (h - ch) / 2, cw, ch];
 }

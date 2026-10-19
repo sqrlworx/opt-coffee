@@ -100,9 +100,9 @@ export function useMediaTime(ref) {
   return t;
 }
 
-// The stage the split screen plays on: two 16:9 pictures tall, so a split never changes its size
-// (and the page under it doesn't jump). `wide` is whether it's wider than tall, as it is in
-// fullscreen on a phone turned sideways, where the halves go side by side.
+// The stage the split screen plays on: upright, 9:16, as phones film, so each half is 9:8 (STAGE,
+// HALF). A split never changes its size, so the page under it doesn't jump. `wide` is whether it's
+// wider than tall, as it is in fullscreen on a phone turned sideways, where the halves go side by side.
 export function useStage() {
   const ref = useRef(null);
   const [wide, setWide] = useState(false);
@@ -116,10 +116,15 @@ export function useStage() {
   return { ref, wide };
 }
 
-export const stageStyle = { position: 'relative', width: '100%', aspectRatio: '8 / 9', maxHeight: '78vh', overflow: 'hidden', background: '#000', borderRadius: 18, userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'manipulation' };
+export const STAGE = 9 / 16;
+export const HALF = 9 / 8;
+
+// At most 78% of the screen tall: narrower rather than another shape.
+export const stageStyle = { position: 'relative', width: `min(100%, 78vh * ${STAGE})`, alignSelf: 'center', aspectRatio: String(STAGE), overflow: 'hidden', background: '#000', borderRadius: 18, userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'manipulation' };
 
 // A layer of the stage in `name`'s place (see slot()), moving there smoothly; hidden ones fade out.
-export function layer(name, wide, { shown = true, fit = 'contain', z = 0, extra = null } = {}) {
+// A video fills its place, cropped to it.
+export function layer(name, wide, { shown = true, fit = 'cover', z = 0, extra = null } = {}) {
   return {
     position: 'absolute',
     ...slot(name, wide),
@@ -155,18 +160,14 @@ export function useFullscreen(ref) {
   return on;
 }
 
-// The front camera, upright as phones film: 9:16. A phone's camera is upright already, and Chrome
-// crops that shape out of a webcam that's wider than tall. Asking for more than 1080 tall makes
-// Chrome pick a 4K webcam's 4K mode, and MediaRecorder then records the crop at full size
-// (1216x2160), whatever size the track reports.
-export const CAMERA = { facingMode: 'user', aspectRatio: { ideal: 9 / 16 }, height: { ideal: 1080 } };
-
-// The camera's shape, width / height, as the browser expects it to come out. The preview, once it
-// plays, has the final say (see onShape).
-export function cameraAspect(stream) {
-  const { width, height } = stream.getVideoTracks()[0]?.getSettings() ?? {};
-  return width && height ? width / height : 9 / 16;
-}
+// The front camera. An answer is recorded 3:4, the shape of a phone's camera, so that it can fill
+// the whole stage (9:16) or either half of it (9:8) with little cropped off either way. A question
+// asked on camera is only ever shown in the top half, so it's recorded in that shape. Chrome crops
+// these out of a webcam that's wider than tall: a 1080p webcam records 810x1080 and 1215x1080.
+// Asking for more than 1080 tall makes Chrome pick a 4K webcam's 4K mode, and MediaRecorder then
+// records the crop at full size, whatever size the track reports.
+export const ANSWER_CAMERA = { facingMode: 'user', aspectRatio: { ideal: 3 / 4 }, height: { ideal: 1080 } };
+export const QUESTION_CAMERA = { facingMode: 'user', aspectRatio: { ideal: HALF }, height: { ideal: 1080 } };
 
 // Prefer MP4 (plays in every browser, and phones record it) where the browser can record it; Firefox records WebM.
 export const RECORDING_TYPES = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];

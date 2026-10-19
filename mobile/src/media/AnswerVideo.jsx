@@ -2,16 +2,16 @@
 // screen: from `broll.start` for `broll.length` seconds, the expert moves to the top half and the
 // b-roll plays in the bottom half, muted (the expert's sound carries on) and kept in step. A video's
 // own controls would end up in one half, so it gets these instead: play, the time, and a timeline
-// marking where the b-roll is. Between cuts an upright take (as the app records) has the whole
-// stage, since the middle of it is only 16:9. Without b-roll it's the video with its own controls,
-// as it was. `videoRef` is the answer's <video>, for its transcript to follow.
+// marking where the b-roll is. Between cuts the take has the whole stage. Each fills its place,
+// except that a take alone on a phone turned sideways is shown whole. Without b-roll it's the video
+// with its own controls, as it was. `videoRef` is the answer's <video>, for its transcript to follow.
 import { useEffect, useRef, useState } from 'react';
 import { fmtDuration } from '../format.js';
 import { color } from '../theme.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { brollAt } from './split.js';
-import { fixDuration, layer, onShape, stageStyle, useStage, Video } from './Video.jsx';
+import { fixDuration, layer, stageStyle, useStage, Video } from './Video.jsx';
 
 export function AnswerVideo({ src, captions, broll, videoRef }) {
   const placed = broll?.video && broll.start != null ? broll : null;
@@ -34,7 +34,6 @@ function BrollStage({ src, captions, broll, videoRef }) {
   const latest = useRef(broll);
   latest.current = broll;
   const [view, setView] = useState({ cut: false, second: 0, total: 0, playing: false });
-  const [aspect, setAspect] = useState(16 / 9); // the take's shape
 
   useEffect(() => {
     const v = video.current;
@@ -86,10 +85,10 @@ function BrollStage({ src, captions, broll, videoRef }) {
 
   return (
     <div ref={stageRef} className="split-stage" style={{ ...stageStyle, borderRadius: 12 }} onClick={toggle}>
-      <video ref={video} src={src} preload="metadata" playsInline {...onShape(setAspect)} style={layer(view.cut ? 'top' : aspect < 1 ? 'full' : 'center', wide)}>
+      <video ref={video} src={src} preload="metadata" playsInline style={layer(view.cut ? 'top' : 'full', wide, { fit: wide && !view.cut ? 'contain' : 'cover' })}>
         {captions ? <track key={captions} kind="subtitles" src={captions} srcLang="en" label="English" /> : null}
       </video>
-      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer('bottom', wide, { shown: view.cut, fit: 'cover', z: 1 })} />
+      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer('bottom', wide, { shown: view.cut, z: 1 })} />
       {view.playing ? null : <BigPlay onPress={toggle} />}
       <div style={controlsBar} onClick={(e) => e.stopPropagation()}>
         <CtrlButton label={view.playing ? 'Pause' : 'Play'} onPress={toggle}>

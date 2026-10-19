@@ -1,28 +1,37 @@
 // The published answers as one video: the takes joined end to end on the server (src/video.js),
-// as the page's jointPlayer plays them, but split screen instead of picture in picture.
+// as the page's jointPlayer plays them, but split screen instead of picture in picture, on an
+// upright stage that each picture fills.
 //
 // While a question is played (the start of each take, up to its `answerStart`), the asker takes
 // the top half: their video for a question asked on camera, kept in step with the question, and
 // otherwise the fox saying it. The joined video moves to the bottom half. While an answer's b-roll
-// plays, the server has drawn the expert into the corner of the joined video's picture; here the
-// expert is cropped back out of it into the top half, and the clip itself plays in the bottom half,
-// in step. The rest of the time the joined video plays alone, between the halves.
+// plays, the expert is cropped from the joined video into the top half, and the clip itself plays
+// in the bottom half, in step. The rest of the time the joined video has the whole stage.
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
-// until the stage is tapped. It plays the joined video's copy for phones where there is one: its
-// burned-in captions are placed for the split (see write_mobile_ass in src/finish/captions.py),
-// over b-roll too, in the expert's picture that's cropped into the top half. Captions that aren't
-// burned in are drawn just above the split, under whoever is talking in the top half, or on the
-// middle of the joined video while it plays alone. So are burned-in ones while b-roll covers them,
-// in a video joined before there were copies for phones.
+// until the stage is tapped. It plays the joined video's copy for phones where there is one: upright,
+// with no b-roll cut in, and with its burned-in captions where the whole stage and both halves show
+// them (see write_mobile_ass in src/finish/captions.py). A video joined before there was one plays
+// as the page has it, the expert cropped from the corner where the server put them over the b-roll.
+// Captions that aren't burned in are drawn just above the split, under whoever is talking in the top
+// half, or low on the joined video while it plays alone, where the phone's copy has them. So are
+// burned-in ones while b-roll covers them, in a video joined before there were copies for phones.
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { blinkAt, fox } from '../../../public/fox.js';
 import { api } from '../api.js';
 import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
-import { contain, cueAt, cutCue, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
+import { cover, cueAt, cutCue, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
 import { fixDuration, layer, stageStyle, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+
+// How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
+// (src/finish/captions.py).
+const LOW = 0.8;
+// The fox stands on the bottom edge of its half, where its picture is cut off, as big as fits. The
+// half is the colour of the picture's own background (public/fox.webp), so whatever room is left
+// above it doesn't show.
+const FOX_BACKDROP = '#f9f9f9';
 
 const INITIAL = { split: null, caption: null, isQuestion: false, asker: '', hasFace: false, second: 0, playing: false, started: false };
 const same = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
@@ -89,7 +98,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   // The askers' videos, for questions asked on camera, muted: their sound is in the joined video.
   function face(q) {
     const r = rt.current;
-    if (!r.faces.has(q.id)) r.faces.set(q.id, sideVideo(q.askerVideo, 'contain', '#111'));
+    if (!r.faces.has(q.id)) r.faces.set(q.id, sideVideo(q.askerVideo, 'cover', '#111'));
     return r.faces.get(q.id);
   }
   // The answers' b-roll clips, muted: the expert's sound carries on under them.
@@ -128,7 +137,9 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     if (c) follow(c, at, 0.25);
   }
 
-  // The expert, cropped from the corner of the joined video's picture where the server put them.
+  // The expert, cropped from the joined video to fill the top half: from the phone's copy, which is
+  // upright and has no b-roll cut in, or else from the corner of the picture where the server put
+  // them over the b-roll.
   function drawCrop() {
     const c = cropCanvas.current;
     const v = videoRef.current;
@@ -138,12 +149,10 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     if (!w || !h) return;
     if (c.width !== w || c.height !== h) [c.width, c.height] = [w, h];
     const ctx = c.getContext('2d');
-    const [sx, sy, sw, sh] = pipRect(v.videoWidth);
-    const [dx, dy, dw, dh] = contain(sw, sh, w, h);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, w, h);
+    const [sx, sy, sw, sh] = v.videoHeight > v.videoWidth ? [0, 0, v.videoWidth, v.videoHeight] : pipRect(v.videoWidth);
+    const [cx, cy, cw, ch] = cover(sw, sh, w, h);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(v, sx, sy, sw, sh, dx, dy, dw, dh);
+    ctx.drawImage(v, sx + cx, sy + cy, cw, ch, 0, 0, w, h);
   }
 
   // The questions' lip sync, for the fox. Each loads while the answer before it plays.
@@ -251,11 +260,13 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   }, [view.playing, controls, scrub]);
 
   const ccHidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
-  const mainSlot = view.split ? 'bottom' : 'center';
-  // Captions sit just above the split, or on the middle of a lone picture, rising clear of the play
-  // button while it's shown. Sideways, a split's go at the bottom of the left half, above the controls.
-  const captionSideways = wide && Boolean(view.split);
-  const captionShift = captionSideways ? `${controlsShown ? -92 : -12}px` : controlsShown ? '-46px' : view.split ? '-10px' : '50%';
+  // Alone, the joined video has the whole stage, but all of it shows on a phone turned sideways:
+  // filling that, an upright picture would be cut down to a band across the face.
+  const mainFit = wide && !view.split ? 'contain' : 'cover';
+  // Captions sit just above the split, rising clear of the play button while it's shown, or low on a
+  // lone picture. Sideways they go at the bottom of the left half, or of the stage, above the controls.
+  const captionLow = view.split || wide ? null : { height: `${100 * LOW}%` };
+  const captionShift = wide ? `${controlsShown ? -92 : -12}px` : !view.split ? '0px' : controlsShown ? '-46px' : '-10px';
   const scrubPart = scrub != null ? partAt(parts, scrub) : null;
 
   return (
@@ -268,17 +279,18 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
         setControls(!controlsShown);
       }}
     >
-      <video ref={videoRef} src={video.mobileSrc ?? video.src} preload="metadata" playsInline style={layer(mainSlot, wide)} />
+      <video ref={videoRef} src={video.mobileSrc ?? video.src} preload="metadata" playsInline style={layer(view.split ? 'bottom' : 'full', wide, { fit: mainFit })} />
       <div ref={clipSlot} style={layer('bottom', wide, { shown: view.split === 'broll', z: 1, extra: { background: '#000' } })} />
-      <div style={layer('top', wide, { shown: Boolean(view.split), z: 2, extra: { background: view.split === 'broll' ? '#000' : '#f3f3f3', overflow: 'hidden' } })} aria-hidden="true">
-        <div style={{ position: 'absolute', inset: 0, display: view.split === 'broll' ? 'none' : 'block' }}>
-          <canvas ref={foxCanvas} style={{ position: 'absolute', top: 0, left: '50%', height: '100%', aspectRatio: '627 / 470', transform: 'translateX(-50%)', visibility: view.hasFace ? 'hidden' : 'visible' }} />
+      <div style={layer('top', wide, { shown: Boolean(view.split), z: 2, extra: { background: view.split === 'broll' ? '#000' : FOX_BACKDROP, overflow: 'hidden' } })} aria-hidden="true">
+        <div style={{ position: 'absolute', inset: 0, containerType: 'size', display: view.split === 'broll' ? 'none' : 'block' }}>
+          <canvas ref={foxCanvas} style={{ position: 'absolute', bottom: 0, left: '50%', width: 'min(100cqw, 100cqh * 627 / 470)', aspectRatio: '627 / 470', transform: 'translateX(-50%)', visibility: view.hasFace ? 'hidden' : 'visible' }} />
           <div ref={faceSlot} style={{ position: 'absolute', inset: 0, display: view.hasFace ? 'block' : 'none' }} />
         </div>
-        <canvas ref={cropCanvas} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: view.split === 'broll' ? 'block' : 'none' }} />
+        {/* Hidden rather than taken out, so it has a size to draw at the moment the cut comes up, even paused. */}
+        <canvas ref={cropCanvas} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', visibility: view.split === 'broll' ? 'visible' : 'hidden' }} />
         {view.split !== 'broll' && view.asker ? <span style={askerPill}>{view.asker}</span> : null}
       </div>
-      <div style={layer('top', captionSideways, { z: 3, extra: { display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box', padding: '0 6%' } })} aria-hidden="true">
+      <div style={layer(view.split ? 'top' : 'full', wide, { z: 3, extra: { display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box', padding: '0 6%', ...captionLow } })} aria-hidden="true">
         {view.caption ? <span style={{ ...captionStyle, fontStyle: view.isQuestion ? 'italic' : 'normal', transform: `translateY(${captionShift})` }}>{view.caption}</span> : null}
       </div>
       {!view.started ? <BigPlay label="Play" onPress={() => play()} /> : controlsShown ? <BigPlay playing={view.playing} onPress={toggle} /> : null}

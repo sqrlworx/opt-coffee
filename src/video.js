@@ -15,6 +15,13 @@ const TRANSCRIPT_POLL = 1000;
 const WIDTH = 1280;
 const HEIGHT = 720;
 const FINISHED = [1920, 1080]; // the size src/finish renders takes at
+// The mobile app's copy is upright, so that the phone can fill its upright player with it, or either
+// half of it (mobile/src/media/split.js). It's 9:16 when every take is, as the app recorded answers
+// before they were 3:4, so they fill the whole player uncropped; otherwise 3:4, as it records them
+// now. It's 720 wide, or 1080 from src/finish.
+const TALL = 9 / 16;
+const UPRIGHT = 3 / 4;
+const phoneSize = (width, aspect) => [width, Math.round(width / aspect / 2) * 2];
 // Finding a question's sound in a video, by lining up how loud each is over time.
 const LOUDNESS_RATE = 8000; // samples per second
 const STEP = 0.005; // seconds between loudness measurements
@@ -22,8 +29,9 @@ const QUESTION_LATE = [-0.1, 0.5]; // how early or late a question's sound might
 const MIN_MATCH = 0.4; // correlation below which it isn't taken as found
 // The expert's picture while b-roll plays, in fractions of the frame's width: at the top left and
 // framed like the asker's in the player (.jp-pip in public/styles.css), a 4:3 crop with rounded
-// corners, a thin white frame and a soft shadow below it. The mobile app crops it back out to show
-// the expert in the top half of its split screen (pipRect in mobile/src/media/split.js).
+// corners, a thin white frame and a soft shadow below it. The phone's copy has no b-roll cut in, but
+// in a video joined before there was one, the mobile app crops the expert back out of it into the
+// top half of its split screen (pipRect in mobile/src/media/split.js).
 export const PIP = { width: 0.176, inset: 0.03, radius: 0.0096, ring: 0.0022, blur: 0.009, drop: 0.005 };
 const CUT_FADE = 0.3; // seconds the cut to b-roll and back takes
 
@@ -79,11 +87,14 @@ export function cutawayFilter({ width, height, start, length, pic = 'pic', broll
  * without re-encoding again.
  *
  * With a `finisher` (src/finish), each take is finished instead of just re-encoded: lit and graded
- * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. The phone
- * gets a copy of its own, with the captions placed for its split screen. If finishing fails, the
- * takes are joined as recorded.
+ * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. If finishing
+ * fails, the takes are joined as recorded.
  *
  * A take with b-roll cuts away to it (see cutawayFilter), under the captions.
+ *
+ * The phone gets a copy of its own, made from the same parts: upright (9:16 or 3:4, see TALL), each
+ * take filling it, cropped, without its b-roll (the phone plays that in the other half of its split
+ * screen), and with the captions, if they're burned in, placed for it.
  *
  * Returns null when ffmpeg isn't on the PATH.
  */
@@ -95,29 +106,51 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
   const ffmpeg = (args) => run('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args], { timeout: FFMPEG_TIMEOUT, maxBuffer: 10_000_000 });
   const probe = async (file, entries) => (await run('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file])).stdout.trim();
 
-  // The takes as recorded, brought to the same size, frame rate and codecs, with their b-roll cut in.
-  async function reencode(takes, dir) {
+  // The shape of the phone's copy of `takes`, width / height (see TALL).
+  async function phoneAspect(takes) {
+    const sizes = await Promise.all(takes.map(({ file }) => probe(file, 'stream=width,height').catch(() => '')));
+    const tall = sizes.every((size) => {
+      const [, width, height] = /(\d+),(\d+)/.exec(size) ?? [];
+      return width / height <= TALL + 0.01;
+    });
+    return tall ? TALL : UPRIGHT;
+  }
+
+  // The takes as recorded, brought to the same size, frame rate and codecs, with their b-roll cut
+  // in: `parts`, and with `phone`, the size of the phone's copy, also `mobile`, those copies, from
+  // the same pass.
+  async function reencode(takes, dir, phone) {
     const parts = [];
+    const mobile = [];
     for (const [i, { file, broll }] of takes.entries()) {
       const part = join(dir, `${i}.mp4`);
+      const copy = join(dir, `${i}_mobile.mp4`);
       // Every take has sound, but a part without any would break joining, so give it silence.
       const silent = !(await probe(file, 'stream=codec_type')).includes('audio');
-      const fit = `[0:v]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`;
+      const fit = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`;
+      const fill = phone && `scale=${phone[0]}:${phone[1]}:force_original_aspect_ratio=increase,crop=${phone[0]}:${phone[1]},setsar=1,fps=30,format=yuv420p`;
+      const picture = phone ? `[0:v]split=2[desktop][phone];[phone]${fill}[vm];[desktop]${fit}` : `[0:v]${fit}`;
       const inputs = ['-i', file, ...(broll ? ['-i', broll.file] : [])];
-      await ffmpeg([
-        ...inputs,
-        ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-shortest'] : []),
-        '-filter_complex', broll ? `${fit}[pic];${cutawayFilter({ width: WIDTH, height: HEIGHT, start: broll.start, length: broll.length, broll: '1:v', out: 'v' })}` : `${fit}[v]`,
-        '-map', '[v]', '-map', silent ? `${inputs.length / 2}:a` : '0:a:0',
+      const output = (video, to) => [
+        '-map', video, '-map', silent ? `${inputs.length / 2}:a` : '0:a:0',
+        ...(silent ? ['-shortest'] : []),
         '-af', 'aresample=48000:async=1',
         '-ac', '2',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
         '-c:a', 'aac', '-b:a', '128k',
-        part,
+        to,
+      ];
+      await ffmpeg([
+        ...inputs,
+        ...(silent ? ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo'] : []),
+        '-filter_complex', broll ? `${picture}[pic];${cutawayFilter({ width: WIDTH, height: HEIGHT, start: broll.start, length: broll.length, broll: '1:v', out: 'v' })}` : `${picture}[v]`,
+        ...output('[v]', part),
+        ...(phone ? output('[vm]', copy) : []),
       ]);
       parts.push(part);
+      mobile.push(copy);
     }
-    return parts;
+    return { parts, mobile: phone ? mobile : null };
   }
 
   // How loud `file` is every STEP seconds, in dB, from `start` for `length` seconds (or to its end).
@@ -154,11 +187,11 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
     return best.at;
   }
 
-  // The takes finished, or null if that failed: `parts`, and `mobile`, the phone's copies if asked
-  // for, which differ only where a take has captions.
-  async function finish(takes, dir, withMobile) {
+  // The takes finished, or null if that failed: `parts`, and with `phone`, the size of the phone's
+  // copy, also `mobile`, those copies, from the same pass.
+  async function finish(takes, dir, phone) {
     const parts = takes.map((_, i) => join(dir, `finished_${i}.mp4`));
-    const mobile = takes.map((t, i) => (withMobile && t.cues?.length ? join(dir, `finished_${i}_mobile.mp4`) : parts[i]));
+    const mobile = phone ? takes.map((_, i) => join(dir, `finished_${i}_mobile.mp4`)) : null;
     try {
       // The b-roll is cut in over the finished picture, as input 2 (see src/finish/finish.py).
       const cutaway = ({ file, start, length }) => ({
@@ -166,13 +199,13 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         filter: cutawayFilter({ width: FINISHED[0], height: FINISHED[1], start, length, broll: '2:v' }),
         start,
         length,
-        pip: pipBox(FINISHED[0]),
       });
       await finisher.finish(
         takes.map((t, i) => ({
           input: t.file,
           output: parts[i],
-          mobile_output: mobile[i] === parts[i] ? null : mobile[i],
+          mobile_output: mobile?.[i] ?? null,
+          mobile_size: phone,
           answer_start: t.answerStart ?? null,
           cues: t.cues ?? null,
           words: t.words ?? null,
@@ -192,10 +225,10 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
     finishing: Boolean(finisher),
 
     /**
-     * Writes the takes, in order, into one MP4 at `out`, and the phone's copy at `mobileOut` when
-     * captions are burned in. A take is a file name, or {file, answerStart, cues, words, broll} with
-     * what finishing uses: where the answer starts after the question, and the transcript's cues and
-     * word timings; and b-roll to cut away to, {file, start, length}.
+     * Writes the takes, in order, into one MP4 at `out`, and the phone's copy at `mobileOut` if
+     * given. A take is a file name, or {file, answerStart, cues, words, broll} with what finishing
+     * uses: where the answer starts after the question, and the transcript's cues and word timings;
+     * and b-roll to cut away to, {file, start, length}.
      * @returns {Promise<{durations: number[], captioned: boolean[], mobile: boolean}>} how long each
      *   part is in the result, in seconds, whether its captions are burned in, and whether the
      *   phone's copy was written (the same parts, so the same durations)
@@ -211,15 +244,15 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
       };
       try {
         takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
-        const finished = finisher ? await finish(takes, dir, Boolean(mobileOut)) : null;
-        const parts = finished?.parts ?? (await reencode(takes, dir));
+        const aspect = mobileOut ? await phoneAspect(takes) : null;
+        const finished = finisher ? await finish(takes, dir, aspect && phoneSize(1080, aspect)) : null;
+        const { parts, mobile } = finished ?? (await reencode(takes, dir, aspect && phoneSize(720, aspect)));
         const durations = [];
         for (const part of parts) durations.push(Number(await probe(part, 'format=duration')));
         const captioned = takes.map((t) => Boolean(finished && t.cues?.length));
-        const mobile = Boolean(mobileOut && captioned.some(Boolean));
         await concat(parts, out);
-        if (mobile) await concat(finished.mobile, mobileOut);
-        return { durations, captioned, mobile };
+        if (mobile) await concat(mobile, mobileOut);
+        return { durations, captioned, mobile: Boolean(mobile) };
       } finally {
         rmSync(dir, { recursive: true, force: true });
         rmSync(`${out}.part`, { force: true });
@@ -246,6 +279,16 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         }
       }
       return found;
+    },
+
+    /** Whether `file` is taller than wide, as the phone's copy is; false if it can't be read. */
+    async upright(file) {
+      try {
+        const [, width, height] = /(\d+),(\d+)/.exec(await probe(file, 'stream=width,height')).map(Number);
+        return height > width;
+      } catch {
+        return false;
+      }
     },
   };
 }
@@ -278,7 +321,8 @@ function correlation(a, b, offset) {
  * Background work joining each published office hour's answers into one video, one at a time.
  * Progress lives in the database (office_hours.video_status), so `resume()` at startup picks up
  * anything pending, or published before joining existed. It also finds the questions in videos
- * joined before that was done (see joiner.locate).
+ * joined before that was done (see joiner.locate), and joins again those whose phone's copy isn't
+ * upright, from before it was (see joiner.upright).
  *
  * When the joiner finishes takes, joining waits for transcripts still being made, so captions can
  * be burned in, and `refresh()` makes the video again after a transcript is corrected.
@@ -310,7 +354,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
       )
       .all(officeHourId);
     const name = `${randomBytes(16).toString('hex')}.mp4`;
-    const mobileName = `${randomBytes(16).toString('hex')}.mp4`; // the phone's copy, when captions are burned in
+    const mobileName = `${randomBytes(16).toString('hex')}.mp4`; // the phone's copy
     try {
       if (!answers.length) throw new Error('nothing was published');
       // The question at the start of each take is captioned as it was asked: a spoken one from its own transcript.
@@ -376,11 +420,23 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
     });
   }
 
+  /**
+   * Queues making a published office hour's video again if its copy for phones isn't upright (or it
+   * has none): it was joined before the phone's copy was. Until then, readers keep the current one.
+   */
+  function uprightForPhones(officeHourId) {
+    enqueue(async () => {
+      const oh = db.prepare("SELECT video_mobile FROM office_hours WHERE id = ? AND video_status = 'ready'").get(officeHourId);
+      if (oh && !(oh.video_mobile && (await joiner.upright(join(mediaDir, oh.video_mobile))))) await render(officeHourId, { remake: true });
+    });
+  }
+
   function resume() {
     const waiting = db.prepare("SELECT id FROM office_hours WHERE published_at IS NOT NULL AND (video_status IS NULL OR video_status = 'pending')").all();
     waiting.forEach((oh) => joinAnswers(oh.id));
     const joined = db.prepare("SELECT id, video_chapters FROM office_hours WHERE video_status = 'ready'").all();
     joined.filter((oh) => JSON.parse(oh.video_chapters).some((c) => c.length < 5)).forEach((oh) => relocate(oh.id));
+    if (joiner.upright) joined.forEach((oh) => uprightForPhones(oh.id));
   }
 
   return {
