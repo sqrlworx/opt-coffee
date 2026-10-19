@@ -13,6 +13,7 @@ import { createSession } from '../manage/session.js';
 import { Studio } from '../manage/Studio.jsx';
 import { Suggestions } from '../manage/Suggestions.jsx';
 import { QuestionText } from '../media/transcript.jsx';
+import { CAMERA } from '../media/Video.jsx';
 import { QuestionMeta } from '../officehour/questions.jsx';
 import { go } from '../router.js';
 import { color, font, MAX_WIDTH, radius, TAB_BAR_HEIGHT, TOUCH } from '../theme.js';
@@ -162,7 +163,7 @@ function Planner({ data, reload }) {
     }
     let camera;
     try {
-      camera = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: true });
+      camera = await navigator.mediaDevices.getUserMedia({ video: CAMERA, audio: true });
     } catch (err) {
       throw new Error(err.name === 'NotAllowedError' ? 'Allow camera and microphone access to record your answers.' : `Couldn't start the camera: ${err.message}`);
     }

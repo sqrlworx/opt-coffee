@@ -200,7 +200,7 @@ function BrollPanel({ qid, plan }) {
   return <View style={styles.panel}>{body}</View>;
 }
 
-const answerVideo = { aspectRatio: '16 / 9', background: '#111', borderRadius: 12 };
+const answerVideo = { background: '#111', borderRadius: 12 };
 
 const styles = StyleSheet.create({
   panel: { gap: 10, paddingVertical: 14, paddingHorizontal: 16, borderRadius: radius.sm, backgroundColor: color.surface },

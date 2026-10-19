@@ -546,9 +546,18 @@ function fixDuration(media, { firstFrame = false } = {}) {
   return media;
 }
 
+// Marks a video `upright` once its picture turns out taller than wide, as the mobile app records,
+// so the styles made for 16:9 don't crop it.
+function markUpright(video) {
+  const mark = () => video.videoWidth && video.classList.toggle('upright', video.videoHeight > video.videoWidth);
+  video.addEventListener('loadedmetadata', mark);
+  video.addEventListener('resize', mark);
+  return video;
+}
+
 // `transcript` adds its captions as subtitles once they're ready.
 function videoPlayer(src, transcript) {
-  const video = fixDuration(h('video', { class: 'answer-video', src, controls: true, preload: 'metadata', playsinline: true }), { firstFrame: true });
+  const video = markUpright(fixDuration(h('video', { class: 'answer-video', src, controls: true, preload: 'metadata', playsinline: true }), { firstFrame: true }));
   addCaptions(video, transcript);
   return video;
 }
@@ -820,7 +829,7 @@ function questionText(q) {
     }
     return body;
   }
-  const video = q.askerVideo ? h('video', { class: 'q-video', src: q.askerVideo, preload: 'none', playsinline: true, hidden: true }) : null;
+  const video = q.askerVideo ? markUpright(h('video', { class: 'q-video', src: q.askerVideo, preload: 'none', playsinline: true, hidden: true })) : null;
   const media = video ?? h('audio', { src: q.audio, preload: 'none' });
   const cues = q.audioTranscript?.cues;
   const body = cues?.length ? syncedCues(media, cues, 'q-body') : h('p', { class: 'q-body' }, q.body);
@@ -1196,7 +1205,7 @@ function jointPlayer(answers, { src, chapters }) {
   const faces = new Map(); // question id -> <video>
   function face(q) {
     if (!faces.has(q.id)) {
-      const f = fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true }));
+      const f = markUpright(fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true })));
       f.muted = true;
       faces.set(q.id, f);
     }
@@ -2039,7 +2048,7 @@ async function managePage({ id }) {
       const url = questions.get(qid).askerVideo;
       if (!url) return Promise.resolve(null);
       if (!clips.has(url)) {
-        const clip = h('video', { class: 'studio-pip-video', src: url, preload: 'auto', playsinline: true });
+        const clip = markUpright(h('video', { class: 'studio-pip-video', src: url, preload: 'auto', playsinline: true }));
         clip.muted = true; // its sound is the question's audio, played (and recorded) with it
         clip.addEventListener('playing', () => clip.parentNode === pip && (pip.hidden = false));
         clips.set(url, new Promise((resolve) => {

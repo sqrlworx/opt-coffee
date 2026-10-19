@@ -179,7 +179,7 @@ export function QuestionText({ q, style }) {
           onPlaying={() => setSeen(true)}
           onPause={() => setSeen(false)}
           onClick={() => mediaRef.current.pause()}
-          style={{ display: playing && seen ? 'block' : 'none', maxWidth: 360, aspectRatio: '16 / 9', objectFit: 'cover', background: '#111', borderRadius: 12 }}
+          style={{ display: playing && seen ? 'block' : 'none', maxWidth: 360, background: '#111', borderRadius: 12 }}
         />
       ) : (
         <audio ref={mediaRef} src={audio.audio} preload="none" />

@@ -239,6 +239,7 @@ textarea { resize: vertical; }
 .q-asked { display: grid; gap: 10px; min-width: 0; }
 .q-video { display: block; width: 100%; max-width: 320px; aspect-ratio: 16 / 9; object-fit: cover; background: #111; border-radius: var(--radius-sm); cursor: pointer; }
 .q-video[hidden] { display: none; }
+.q-video.upright { width: auto; max-width: 100%; height: 320px; aspect-ratio: auto; } /* from a phone held upright: as tall as a 16:9 one is wide */
 .queue-head .q-asked { flex: 1; }
 .q-audio { display: block; height: 36px; width: 100%; max-width: 360px; }
 .cue { cursor: pointer; border-radius: 3px; transition: background-color 0.15s; }
@@ -333,6 +334,7 @@ textarea { resize: vertical; }
 .jp-asking:not(.has-face) .jp-face-slot { display: none; } /* it keeps loading while hidden */
 .jp-asking.has-face .jp-fox { visibility: hidden; }
 .jp-face { display: block; width: 100%; height: 100%; object-fit: cover; background: #111; }
+.jp-face.upright { object-fit: contain; } /* all of one from a phone held upright, not a 4:3 slice of it */
 .jp-asker { padding: 0.25em 0.7em; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; font-weight: 600; white-space: nowrap; }
 .icon { display: inline-flex; }
 .jp-big-play { position: absolute; inset: 0; margin: auto; width: 76px; height: 76px; display: grid; place-items: center; border: none; border-radius: 50%; background: rgba(255, 255, 255, 0.92); color: var(--ink); cursor: pointer; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); transition: transform 0.2s var(--ease), background-color 0.2s, color 0.2s; }
@@ -449,6 +451,7 @@ textarea { resize: vertical; }
 .video-answer .broll-view.has-broll { max-width: calc(260px * 16 / 9); }
 .broll-view.has-broll .answer-video { position: absolute; z-index: 1; top: 0; left: 0; width: 100%; height: 100%; max-height: none; aspect-ratio: auto; border-radius: 0; cursor: pointer; transition: top 0.3s, left 0.3s, width 0.3s, height 0.3s, border-radius 0.3s, box-shadow 0.3s; }
 .broll-view.is-cut .answer-video { top: 3cqw; left: 3cqw; width: 17.6cqw; height: 13.2cqw; object-fit: cover; border-radius: 0.96cqw; box-shadow: 0 0.5cqw 1.9cqw rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(255, 255, 255, 0.85); }
+.broll-view.is-cut .answer-video.upright { object-fit: contain; } /* an upright take whole, between bars, as the joined video has it */
 .broll-clip { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.3s; cursor: pointer; }
 .broll-view.is-cut .broll-clip { opacity: 1; }
 .broll-controls { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 6px; padding: 16px 8px 4px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.6)); color: #fff; opacity: 0; transition: opacity 0.2s; }
@@ -459,6 +462,8 @@ textarea { resize: vertical; }
 .studio-pip { position: absolute; right: 10px; bottom: 10px; width: 30%; border-radius: 10px; overflow: hidden; background: #111; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 0 2px rgba(255, 255, 255, 0.85); }
 .studio-pip[hidden] { display: none; }
 .studio-pip-video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.studio-pip:has(> .upright) { width: 17%; } /* an asker's video from a phone held upright, about as big as a 16:9 one */
+.studio-pip-video.upright { aspect-ratio: auto; }
 .studio-pip-label { position: absolute; left: 6px; bottom: 6px; padding: 1px 8px; border-radius: 999px; background: rgba(0, 0, 0, 0.55); color: #fff; font-size: 0.75rem; font-weight: 600; }
 .rec-badge { position: absolute; top: 10px; left: 10px; background: var(--accent); color: #fff; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em; padding: 3px 10px; border-radius: 999px; font-variant-numeric: tabular-nums; }
 /* recording session: answering questions back to back */

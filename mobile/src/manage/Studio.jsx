@@ -1,11 +1,12 @@
 // The recording session (session.js) on a phone: full screen, the camera above and the question
-// and its controls below. Where the page plays the asker's video as a small picture over the camera
-// preview, this splits the camera's frame: the asker's video in the top half while their question
-// plays, the camera in the bottom half. The rest of the time the camera has all of it.
-import { useEffect, useReducer, useRef } from 'react';
+// and its controls below. The camera records upright (9:16), and its frame is that shape, so the
+// expert sees all of what's recorded. Where the page plays the asker's video as a small picture over
+// the camera preview, this splits the camera's frame: the asker's video in the top half while their
+// question plays, the camera in the bottom half. The rest of the time the camera has all of it.
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { Modal, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { fmtDuration } from '../format.js';
-import { layer, useStage } from '../media/Video.jsx';
+import { cameraAspect, layer, onShape, useStage } from '../media/Video.jsx';
 import { QuestionMeta } from '../officehour/questions.jsx';
 import { color, font, MAX_WIDTH, radius } from '../theme.js';
 import { Button, Hint, Label, Row, Serif, Small, Warn } from '../ui/index.jsx';
@@ -17,6 +18,7 @@ export function Studio({ session, questions, queue, hasAnswer, saving }) {
   const { ref: stageRef, wide } = useStage();
   const preview = useRef(null);
   const pipSlot = useRef(null);
+  const [aspect, setAspect] = useState(() => cameraAspect(session.camera));
   const { state } = session;
 
   useEffect(() => {
@@ -48,8 +50,8 @@ export function Studio({ session, questions, queue, hasAnswer, saving }) {
   return (
     <Modal visible animationType="slide" onRequestClose={back}>
       <View style={styles.screen} role="dialog" aria-label="Recording answers">
-        <div ref={stageRef} style={stage}>
-          <video ref={preview} autoPlay playsInline muted style={layer(split ? 'bottom' : 'full', wide, { fit: 'cover', extra: { transform: 'scaleX(-1)' } })} />
+        <div ref={stageRef} style={stage(aspect)}>
+          <video ref={preview} autoPlay playsInline muted {...onShape(setAspect)} style={layer(split ? 'bottom' : 'full', wide, { fit: 'cover', extra: { transform: 'scaleX(-1)' } })} />
           <div ref={pipSlot} style={layer('top', wide, { shown: split, z: 1, extra: { background: '#111', overflow: 'hidden' } })} />
           <div style={layer('top', wide, { shown: split, z: 2 })}>
             <span style={pill}>{state.label}</span>
@@ -108,7 +110,17 @@ export function Studio({ session, questions, queue, hasAnswer, saving }) {
   );
 }
 
-const stage = { position: 'relative', width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', aspectRatio: '8 / 9', maxHeight: '54vh', background: '#000', overflow: 'hidden', flexShrink: 0 };
+// The camera's frame, `aspect` (width / height) being the camera's shape. An upright camera's is that
+// shape, as big as fits above the question. A camera wider than tall (a webcam, in a browser that
+// can't crop it upright) fills a frame two 16:9 pictures tall, cropped, like the players' stage.
+const stage = (aspect) => ({
+  position: 'relative',
+  alignSelf: 'center',
+  background: '#000',
+  overflow: 'hidden',
+  flexShrink: 0,
+  ...(aspect < 1 ? { width: `min(100%, ${MAX_WIDTH}px, 54vh * ${aspect})`, aspectRatio: String(aspect), marginTop: 12, borderRadius: radius.lg } : { width: '100%', maxWidth: MAX_WIDTH, aspectRatio: '8 / 9', maxHeight: '54vh' }),
+});
 const pill = { position: 'absolute', left: 10, bottom: 10, padding: '2px 10px', borderRadius: 999, background: 'rgba(0,0,0,0.55)', color: '#fff', font: "600 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif", whiteSpace: 'nowrap' };
 const recBadge = { position: 'absolute', top: 10, left: 10, padding: '3px 10px', borderRadius: 999, color: '#fff', font: "700 12px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif", letterSpacing: '0.04em', fontVariantNumeric: 'tabular-nums' };
 

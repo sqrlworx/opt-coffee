@@ -25,17 +25,36 @@ export function fixDuration(media, { firstFrame = false } = {}) {
   };
 }
 
-// A <video>, playing inline (not jumping to fullscreen on iPhones), with its duration fixed.
-// `muted` is set on the element itself: React's attribute doesn't stop it playing sound everywhere.
+// Props for a <video> that tell `set` its picture's shape, width / height: once it loads, and again
+// whenever that changes (a phone's camera turned sideways).
+export function onShape(set) {
+  const update = (e) => {
+    const { videoWidth: w, videoHeight: h } = e.currentTarget;
+    if (w && h) set(w / h);
+  };
+  return { onLoadedMetadata: update, onResize: update };
+}
+
+// A video's box in its picture's shape: full width, except that an upright one (as the app records)
+// stops at 60% of the screen's height, centred, rather than running down the page.
+export function shaped(aspect) {
+  if (aspect >= 1) return { width: '100%', aspectRatio: String(aspect) };
+  return { width: `min(100%, 60vh * ${aspect})`, aspectRatio: String(aspect), alignSelf: 'center' };
+}
+
+// A <video>, playing inline (not jumping to fullscreen on iPhones), with its duration fixed, in its
+// picture's shape (16:9 until that's known). `muted` is set on the element itself: React's
+// attribute doesn't stop it playing sound everywhere.
 export const Video = forwardRef(function Video({ src, firstFrame = true, muted = false, style, children, ...props }, ref) {
   const el = useRef(null);
+  const [aspect, setAspect] = useState(16 / 9);
   useImperativeHandle(ref, () => el.current, []);
   useEffect(() => fixDuration(el.current, { firstFrame }), [src, firstFrame]);
   useEffect(() => {
     el.current.muted = muted;
   }, [muted]);
   return (
-    <video ref={el} src={src} playsInline preload="metadata" style={{ display: 'block', width: '100%', ...style }} {...props}>
+    <video ref={el} src={src} playsInline preload="metadata" {...onShape(setAspect)} style={{ display: 'block', ...shaped(aspect), ...style }} {...props}>
       {children}
     </video>
   );
@@ -134,6 +153,19 @@ export function useFullscreen(ref) {
     };
   }, [ref]);
   return on;
+}
+
+// The front camera, upright as phones film: 9:16. A phone's camera is upright already, and Chrome
+// crops that shape out of a webcam that's wider than tall. Asking for more than 1080 tall makes
+// Chrome pick a 4K webcam's 4K mode, and MediaRecorder then records the crop at full size
+// (1216x2160), whatever size the track reports.
+export const CAMERA = { facingMode: 'user', aspectRatio: { ideal: 9 / 16 }, height: { ideal: 1080 } };
+
+// The camera's shape, width / height, as the browser expects it to come out. The preview, once it
+// plays, has the final say (see onShape).
+export function cameraAspect(stream) {
+  const { width, height } = stream.getVideoTracks()[0]?.getSettings() ?? {};
+  return width && height ? width / height : 9 / 16;
 }
 
 // Prefer MP4 (plays in every browser, and phones record it) where the browser can record it; Firefox records WebM.
