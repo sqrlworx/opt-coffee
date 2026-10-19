@@ -42,5 +42,5 @@ export function toLocalInput(date) {
 
 // Who asked a question, after it in the summary and discussion.
 export const askedBy = (q) => (q.source === 'moderator' ? 'suggested by the moderator' : q.anonymous ? 'anonymous' : q.author?.displayName);
-// Who's asking, over the video while a question is played.
-export const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Someone asks' : `${q.author.displayName} asks`);
+// Who's asking, on their half of the player while a question is played.
+export const askerLabel = (q) => (q.source === 'moderator' ? 'Suggested question' : q.anonymous || !q.author ? 'Anonymous' : q.author.displayName);

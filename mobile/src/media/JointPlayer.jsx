@@ -292,7 +292,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
           <canvas ref={foxCanvas} style={{ position: 'absolute', bottom: 0, left: '50%', width: 'min(100cqw, 100cqh * 627 / 470)', aspectRatio: '627 / 470', transform: 'translateX(-50%)', visibility: view.hasFace ? 'hidden' : 'visible' }} />
           <div ref={faceSlot} style={{ position: 'absolute', inset: 0, display: view.hasFace ? 'block' : 'none' }} />
         </div>
-        {view.asker ? <span style={askerPill}>{view.asker}</span> : null}
+        {view.asker ? <span style={{ ...askerPill, bottom: controlsShown ? 90 : 10 }}>{view.asker}</span> : null}
       </div>
       {/* Faded rather than taken out, so it has a size to draw at the moment the cut comes up, even paused. */}
       <canvas ref={cropCanvas} aria-hidden="true" style={layer('top', wide, { shown: view.split === 'broll' && view.pip, z: 2 })} />
@@ -347,7 +347,8 @@ function sideVideo(src, fit, background) {
   return el;
 }
 
-const askerPill = { position: 'absolute', left: 10, top: 10, padding: '3px 11px', borderRadius: 999, background: 'rgba(0,0,0,0.5)', color: '#fff', font: "600 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", whiteSpace: 'nowrap' };
+// At the bottom left of the asker's half, risen clear of the controls while they're shown.
+const askerPill = { position: 'absolute', left: 10, padding: '3px 11px', borderRadius: 999, background: 'rgba(0,0,0,0.5)', color: '#fff', font: "600 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", whiteSpace: 'nowrap', transition: 'bottom 0.25s' };
 const captionStyle = { padding: '2px 9px', borderRadius: 5, background: 'rgba(0,0,0,0.62)', color: '#fff', font: "600 15px/1.35 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", textAlign: 'center', textWrap: 'balance', transition: 'transform 0.3s' };
 const controlsBar = { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 5, paddingTop: 28, paddingBottom: 2, background: 'linear-gradient(transparent, rgba(0,0,0,0.7))', transition: 'opacity 0.25s' };
 const timeStyle = { color: '#fff', fontSize: 13, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', fontFamily: 'ui-sans-serif, system-ui, -apple-system, sans-serif' };
