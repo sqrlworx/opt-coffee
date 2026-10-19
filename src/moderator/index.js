@@ -6,23 +6,33 @@ const CACHE_LIMIT = 500;
 /**
  * The moderator facade the app talks to.
  *
- * - suggestQuestions: async; uses Claude when available, heuristics otherwise.
+ * - suggestQuestions: async; uses the LLM when available, heuristics otherwise.
  * - followUpQuestions: async, the same way; questions for a follow-up, from a discussion.
- * - groupQuestions: sync, so page loads never wait on an LLM. With Claude enabled it
+ * - groupQuestions: sync, so page loads never wait on an LLM. With an LLM enabled it
  *   serves cached LLM groupings and refreshes them in the background
  *   (stale-while-revalidate); until a grouping is ready it returns the heuristic one.
  * - suggestOrder: always local and deterministic, computed from the groups.
  * - summarizeAnswer: sync, cached and refreshed in the background like groupQuestions. Until the
  *   LLM's summary is ready it returns the heuristic one marked `pending`, so pages can check back.
- * - placeBroll: async; where b-roll goes in an answer. Claude picks the moment when available;
+ * - placeBroll: async; where b-roll goes in an answer. The LLM picks the moment when available;
  *   how long it plays, and where it may go, are always the heuristic's.
  *
- * `llm` stands in for Claude (tests).
- * @param {{mode?: 'auto'|'heuristic'|'claude', log?: (msg:string)=>void, llm?: object}} opts
+ * In `auto` mode the LLM is Muse if META_API_KEY is set, else Claude if Anthropic credentials are.
+ * `llm` stands in for it (tests).
+ * @param {{mode?: 'auto'|'heuristic'|'muse'|'claude', log?: (msg:string)=>void, llm?: object}} opts
  */
 export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'auto', log = console.warn, llm = null } = {}) {
-  const hasCredentials = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
-  if (!llm && (mode === 'claude' || (mode === 'auto' && hasCredentials))) {
+  const hasClaudeCredentials = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  const backend = mode === 'auto' ? (process.env.META_API_KEY ? 'muse' : hasClaudeCredentials ? 'claude' : 'heuristic') : mode;
+  if (!llm && backend === 'muse') {
+    try {
+      const { createMuseModerator } = await import('./muse.js');
+      llm = createMuseModerator();
+    } catch (err) {
+      log(`[moderator] Muse unavailable, using heuristics: ${err.message}`);
+    }
+  }
+  if (!llm && backend === 'claude') {
     try {
       const { createClaudeModerator } = await import('./claude.js');
       llm = await createClaudeModerator();
@@ -46,7 +56,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
     llm
       .groupQuestions(questions)
       .then((groups) => remember(groupCache, key, sanitizeGroups(groups, questions)))
-      .catch((err) => log(`[moderator] Claude grouping failed: ${err.message}`))
+      .catch((err) => log(`[moderator] ${llm.name} grouping failed: ${err.message}`))
       .finally(() => inFlight.delete(key));
   }
 
@@ -57,14 +67,14 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
       .summarizeAnswer(input)
       .then((summary) => remember(summaryCache, key, sanitizeSummary(summary, input)))
       .catch((err) => {
-        log(`[moderator] Claude summary failed: ${err.message}`);
+        log(`[moderator] ${llm.name} summary failed: ${err.message}`);
         remember(summaryCache, key, heuristic.summarizeAnswer(input)); // so pages stop waiting for it
       })
       .finally(() => inFlight.delete(key));
   }
 
   return {
-    name: llm ? 'claude' : 'heuristic',
+    name: llm ? llm.name : 'heuristic',
 
     async suggestQuestions(expert, officeHour, opts = {}) {
       if (llm) {
@@ -72,7 +82,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
           const out = await llm.suggestQuestions(expert, officeHour, opts);
           if (out.length) return out;
         } catch (err) {
-          log(`[moderator] Claude suggestions failed: ${err.message}`);
+          log(`[moderator] ${llm.name} suggestions failed: ${err.message}`);
         }
       }
       return heuristic.suggestQuestions(expert, officeHour, opts);
@@ -89,7 +99,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
         try {
           return (await llm.followUpQuestions(officeHour, discussion, opts)).map((q) => q.slice(0, 500));
         } catch (err) {
-          log(`[moderator] Claude follow-up questions failed: ${err.message}`);
+          log(`[moderator] ${llm.name} follow-up questions failed: ${err.message}`);
         }
       }
       return heuristic.followUpQuestions(discussion, opts);
@@ -138,7 +148,7 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
         // LLM output is untrusted: kept where the b-roll can go.
         if (Number.isFinite(start)) return { start: Math.round(Math.min(range.to, Math.max(range.from, start)) * 1000) / 1000, length: placed.length };
       } catch (err) {
-        log(`[moderator] Claude b-roll placement failed: ${err.message}`);
+        log(`[moderator] ${llm.name} b-roll placement failed: ${err.message}`);
       }
       return placed;
     },

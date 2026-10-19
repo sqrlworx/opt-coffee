@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { brollRange, followUpQuestions, groupQuestions, placeBroll, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
 import { createModerator } from '../src/moderator/index.js';
+import { createMuseModerator } from '../src/moderator/muse.js';
 
 const Q = (id, body, votes = 0, source = 'asker') => ({ id, body, votes, source, createdAt: `2026-01-01T00:00:0${id % 10}Z` });
 
@@ -98,13 +99,77 @@ test('suggests something even with an empty profile and no topic', () => {
   assert.ok(out.some((q) => /photography/i.test(q)));
 });
 
-test('createModerator falls back to heuristics when Claude is not configured', async () => {
+test('createModerator falls back to heuristics when no LLM is configured', async () => {
   const moderator = await createModerator({ mode: 'heuristic' });
   assert.equal(moderator.name, 'heuristic');
   const groups = moderator.groupQuestions(questions);
   assert.ok(groups.length >= 3);
   const seeds = await moderator.suggestQuestions({ displayName: 'A', bio: '', expertise: ['ml'] }, { title: 'x', topic: null });
   assert.ok(seeds.length > 0);
+});
+
+test('createModerator uses Muse when there is a Meta API key, ahead of Claude', async (t) => {
+  const saved = { META_API_KEY: process.env.META_API_KEY, ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY };
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.META_API_KEY = 'mk-test';
+  process.env.ANTHROPIC_API_KEY = 'sk-test';
+  assert.equal((await createModerator({ mode: 'auto' })).name, 'muse');
+  // Forced without a key, it says why and uses the heuristics.
+  delete process.env.META_API_KEY;
+  const logs = [];
+  assert.equal((await createModerator({ mode: 'muse', log: (msg) => logs.push(msg) })).name, 'heuristic');
+  assert.match(logs.join('\n'), /Muse unavailable, using heuristics: META_API_KEY is not set/);
+});
+
+// Meta's Model API, stood in for by a fake fetch: records each request, and answers from `reply(body)`.
+function withFakeMuse(t, reply) {
+  const realFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    requests.push({ url: String(url), body, auth: init.headers.Authorization });
+    const [status, data] = await reply(body);
+    return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+  };
+  t.after(() => (globalThis.fetch = realFetch));
+  return { muse: createMuseModerator({ apiKey: 'mk-test', model: 'muse-test' }), requests };
+}
+const completion = (answer, finishReason = 'stop') => [200, { choices: [{ index: 0, message: { role: 'assistant', content: JSON.stringify(answer), refusal: null }, finish_reason: finishReason }] }];
+
+test('Muse is asked through the Model API, and answers to a schema', async (t) => {
+  const groups = [
+    { label: 'Staff Promotion', question_ids: [1, 2] },
+    { label: 'Distributed Databases', question_ids: [3, 4] },
+    { label: 'Hiring', question_ids: [5, 6] },
+  ];
+  const { muse, requests } = withFakeMuse(t, () => completion({ groups }));
+  assert.equal(muse.name, 'muse');
+  assert.deepEqual(await muse.groupQuestions(questions), groups.map((g) => ({ label: g.label, questionIds: g.question_ids })));
+  const [{ url, auth, body }] = requests;
+  assert.equal(url, 'https://api.meta.ai/v1/chat/completions');
+  assert.equal(auth, 'Bearer mk-test');
+  assert.equal(body.model, 'muse-test');
+  assert.deepEqual(body.messages.map((m) => m.role), ['developer', 'user']);
+  assert.match(body.messages[0].content, /moderator of "off hours"/);
+  assert.match(body.messages[1].content, /^Group these office-hour questions/);
+  assert.match(body.messages[1].content, /\[5\] Any tips on hiring and interviewing engineers\?/);
+  assert.equal(body.response_format.type, 'json_schema');
+  assert.equal(body.response_format.json_schema.strict, true);
+  assert.deepEqual(body.response_format.json_schema.schema.required, ['groups']);
+});
+
+test("Muse's errors and cut-off answers are reported, and there's no Muse moderator without a key", async (t) => {
+  assert.throws(() => createMuseModerator({ apiKey: '' }), /META_API_KEY is not set/);
+  let next = [429, { error: { message: 'Rate limit exceeded', type: 'rate_limit_error' } }];
+  const { muse } = withFakeMuse(t, () => next);
+  await assert.rejects(muse.groupQuestions(questions), /Muse moderator failed \(429\): Rate limit exceeded/);
+  next = completion({ question: 'Why?', points: [] }, 'length');
+  await assert.rejects(muse.summarizeAnswer({ question: 'Why?', answer: 'Because.' }), /Muse moderator stopped with length/);
 });
 
 // ---------- summaries ----------
@@ -139,7 +204,7 @@ test('summaries of short and empty answers', () => {
   assert.deepEqual(summarizeAnswer({ question: 'Count?', answer: 'One, two, three.' }).points, ['One, two, three.']);
 });
 
-test('Claude summaries are served once ready, with heuristic ones (marked pending) until then', async () => {
+test('LLM summaries are served once ready, with heuristic ones (marked pending) until then', async () => {
   const calls = [];
   let reply;
   const llm = {
@@ -202,7 +267,7 @@ test('follow-up questions come from people\'s replies: unanswered first, then mo
   ]);
   assert.deepEqual(followUpQuestions(discussion, { count: 1 }), ['How much time do you spend coding each week?']);
   assert.deepEqual(followUpQuestions([]), []);
-  // The facade falls back to the heuristic without Claude.
+  // The facade falls back to the heuristic without an LLM.
   const moderator = await createModerator({ mode: 'heuristic' });
   assert.deepEqual(await moderator.followUpQuestions({ title: 't' }, discussion, { count: 1 }), ['How much time do you spend coding each week?']);
 });
@@ -251,7 +316,7 @@ test("b-roll that matches nothing said goes about a third of the way in, at a se
   assert.ok(placeBroll({ description: 'A sunset', clip: 2, answerStart: 2, end: 12, words }).start >= 2);
 });
 
-test('Claude picks where b-roll goes when configured, kept where it can go, with the heuristic as fallback', async () => {
+test('The LLM picks where b-roll goes when configured, kept where it can go, with the heuristic as fallback', async () => {
   const calls = [];
   let reply;
   const llm = { placeBroll: async (input) => (calls.push(input), reply(input)) };
