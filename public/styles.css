@@ -263,6 +263,11 @@ textarea { resize: vertical; }
 .ft-q .muted { font-family: var(--sans); }
 .ft-a { display: grid; gap: 10px; padding-left: 20px; border-left: 2px solid var(--line-strong); }
 .ft-speaker { font-size: 0.7rem; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.12em; }
+/* An answer's transcript, folded to its first lines (see folded()): the paragraph they end in is cut
+   short at --lines lines. */
+.folded { display: grid; gap: 10px; }
+.folded .cut { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--lines); line-clamp: var(--lines); overflow: hidden; }
+.fold-btn { justify-self: start; }
 
 /* ---------- discussion ---------- */
 .thread { display: grid; gap: 12px; margin-top: 4px; }

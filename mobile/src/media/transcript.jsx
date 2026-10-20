@@ -1,7 +1,7 @@
 // Questions and transcripts as text that follows its recording: the line being spoken is
 // highlighted, and tapping a line plays from there. Speech is processed in the background, so text
 // that's still on its way is watched until it's ready.
-import { useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from '../api.js';
 import { useApp } from '../context.js';
@@ -226,11 +226,61 @@ export function AnswerParagraphs({ question, transcript, onReady }) {
     if (i && start - cues[i - 1][1] >= 1) paragraphs.push([]);
     paragraphs.at(-1).push(text);
   });
-  return paragraphs.map((p, i) => (
-    <Text key={i} style={[styles.body, { lineHeight: 26 }]}>
-      {p.join(' ')}
-    </Text>
-  ));
+  const texts = paragraphs.map((p) => p.join(' '));
+  return <Folded key={texts.join('\n')} texts={texts} />;
+}
+
+// How many lines of an answer the discussion shows until "Show more", and how tall a line is.
+const FOLD = 4;
+const LINE = 26;
+
+// Paragraphs of text, at most FOLD lines of them until "Show more" shows the rest, which "Show less"
+// folds again. Folded, the paragraph those lines end in is cut short with an ellipsis and the ones
+// after it are left out. The button only shows when there's more. The lines are counted with the
+// paragraphs laid out in full, first and again whenever the width changes.
+function Folded({ texts }) {
+  const box = useRef(null);
+  const width = useRef(0);
+  const [open, setOpen] = useState(false);
+  // While they're being counted, undefined; then null if they all fit, or the last paragraph shown
+  // folded and how many of its lines (0 for all of them).
+  const [fold, setFold] = useState(undefined);
+  useLayoutEffect(() => {
+    if (fold !== undefined) return;
+    width.current = box.current.clientWidth;
+    let left = FOLD;
+    let next = null;
+    const els = [...box.current.children];
+    for (const [i, el] of els.entries()) {
+      const lines = Math.round(el.getBoundingClientRect().height / LINE);
+      if (lines > left || (lines === left && i < els.length - 1)) {
+        next = { last: i, lines: lines > left ? left : 0 };
+        break;
+      }
+      left -= lines;
+    }
+    setFold(next);
+  }, [fold]);
+  useEffect(() => {
+    const el = box.current;
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => el.clientWidth !== width.current && setFold(undefined));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const folded = fold && !open;
+  return (
+    <>
+      <View ref={box} style={{ gap: 10 }}>
+        {(folded ? texts.slice(0, fold.last + 1) : texts).map((text, i) => (
+          <Text key={i} numberOfLines={folded && i === fold.last && fold.lines ? fold.lines : undefined} style={[styles.body, { lineHeight: LINE }]}>
+            {text}
+          </Text>
+        ))}
+      </View>
+      {fold ? <Button kind="link" small title={open ? 'Show less' : 'Show more'} onPress={() => setOpen(!open)} style={{ alignSelf: 'flex-start' }} /> : null}
+    </>
+  );
 }
 
 const styles = StyleSheet.create({

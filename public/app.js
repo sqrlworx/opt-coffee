@@ -1152,7 +1152,43 @@ function answerText(question, transcript, container, onReady) {
     if (i && start - cues[i - 1][1] >= 1) paragraphs.push([]);
     paragraphs.at(-1).push(text);
   });
-  return paragraphs.map((p) => h('p', {}, p.join(' ')));
+  return folded(paragraphs.map((p) => p.join(' ')));
+}
+
+// Paragraphs of text, at most FOLD lines of them until "Show more" shows the rest, which "Show less"
+// folds again. Folded, the paragraph those lines end in is cut short with an ellipsis and the ones
+// after it are left out. The button only shows when there's more. The lines are counted with the
+// paragraphs laid out in full, again whenever the size changes.
+const FOLD = 4;
+function folded(texts) {
+  const ps = texts.map((text) => h('p', {}, text));
+  const box = h('div', { class: 'folded' }, ps);
+  let open = false;
+  const button = h('button', { type: 'button', class: 'link-btn small fold-btn', hidden: true, onclick: () => ((open = !open), fold()) });
+  function fold() {
+    ps.forEach((p) => ((p.hidden = false), p.classList.remove('cut')));
+    let left = FOLD;
+    let last = -1; // the last paragraph shown while it's folded, if there's more
+    let cut = false; // whether that one is cut short
+    for (const [i, p] of ps.entries()) {
+      const lines = Math.round(p.offsetHeight / parseFloat(getComputedStyle(p).lineHeight));
+      if (lines > left || (lines === left && i < ps.length - 1)) {
+        [last, cut] = [i, lines > left];
+        break;
+      }
+      left -= lines;
+    }
+    button.hidden = last < 0;
+    button.textContent = open ? 'Show less' : 'Show more';
+    if (open || last < 0) return;
+    if (cut) {
+      ps[last].classList.add('cut');
+      ps[last].style.setProperty('--lines', left);
+    }
+    ps.slice(last + 1).forEach((p) => (p.hidden = true));
+  }
+  new ResizeObserver(fold).observe(box);
+  return [box, button];
 }
 
 // Player control icons. Inline SVG, since symbols like ⛶ are missing from many fonts.
