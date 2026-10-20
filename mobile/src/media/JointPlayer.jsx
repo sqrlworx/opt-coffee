@@ -12,8 +12,9 @@
 // shows the asker's picture.
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
-// until the stage is tapped. Docked under the top bar (`docked`), it's half the screen tall, too
-// narrow for all of them, so it keeps play, the timeline and fullscreen.
+// until the stage is tapped. While it's too narrow for all of them, as when it shrinks docked under
+// the top bar, it keeps play, the timeline and fullscreen. `tall` is how tall it may get, as a CSS
+// length, if not STAGE_TALL.
 //
 // It plays the joined video's copy for phones where there is one: upright, with full-screen b-roll
 // but not split-screen b-roll cut in, and with its burned-in captions at the bottom of the expert's
@@ -29,7 +30,7 @@ import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
-import { advancing, backStyle, DOCKED_TALL, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+import { advancing, backStyle, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
 
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
@@ -41,11 +42,14 @@ const FOX_BACKDROP = '#f9f9f9';
 const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, asker: '', focus: null, pip: false, second: 0, playing: false, started: false };
 const same = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
 
-export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent, docked = false }, ref) {
+export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent, tall }, ref) {
   const parts = useMemo(() => joinedParts(answers, video.chapters), [answers, video.chapters]);
   const cues = useMemo(() => joinedCues(parts), [parts]);
   const total = parts.at(-1)?.end ?? 0;
-  const { ref: stageRef, wide } = useStage();
+  const ccHidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
+  // Narrower than play, the time, mute and fullscreen need, and CC if it shows, it keeps the first
+  // and the last of them.
+  const { ref: stageRef, wide, narrow: compact } = useStage(ccHidden ? 236 : 282);
   const fullscreen = useFullscreen(stageRef);
   const videoRef = useRef(null);
   const bubbleCanvas = useRef(null);
@@ -274,8 +278,6 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     return () => clearTimeout(timer);
   }, [view.playing, controls, scrub]);
 
-  const ccHidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
-  const compact = docked && !fullscreen;
   // Alone, the joined video has the whole stage, but all of it shows on a phone turned sideways:
   // filling that, an upright picture would be cut down to a band across the face.
   const mainFit = wide && !view.split ? 'contain' : 'cover';
@@ -289,7 +291,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     <div
       ref={stageRef}
       className="split-stage"
-      style={docked ? { ...stageStyle, width: stageWidth(DOCKED_TALL) } : stageStyle}
+      style={tall ? { ...stageStyle, width: stageWidth(tall) } : stageStyle}
       onClick={() => {
         if (!rt.current.started) return play();
         setControls(!controlsShown);

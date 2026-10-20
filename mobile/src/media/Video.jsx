@@ -108,25 +108,33 @@ export function useMediaTime(ref) {
 // The stage the split screen plays on: upright, 9:16, as phones film, so each half is 9:8 (STAGE,
 // HALF). A split never changes its size, so the page under it doesn't jump. `wide` is whether it's
 // wider than tall, as it is in fullscreen on a phone turned sideways, where the halves go side by side.
-export function useStage() {
+// `narrow` is whether it's narrower than `narrowBelow` (pixels), what a player's buttons need, as it
+// gets docked under the top bar, or upright on a phone turned sideways.
+export function useStage(narrowBelow = 0) {
   const ref = useRef(null);
+  const below = useRef(narrowBelow);
+  below.current = narrowBelow;
   const [wide, setWide] = useState(false);
+  const [narrow, setNarrow] = useState(false);
   useEffect(() => {
     const el = ref.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => setWide(el.clientWidth > el.clientHeight * 1.2));
+    const observer = new ResizeObserver(() => {
+      setWide(el.clientWidth > el.clientHeight * 1.2);
+      setNarrow(el.clientWidth < below.current);
+    });
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  return { ref, wide };
+  return { ref, wide, narrow };
 }
 
 export const STAGE = 9 / 16;
 export const HALF = 9 / 8;
 
 // How tall the stage gets, narrower rather than another shape: 78% of the screen, or, docked under
-// the top bar while a list under it is scrolled, half of the screen as it is with the browser's bars
-// showing, so the list has room.
+// the top bar while a list under it is scrolled, down to half of the screen as it is with the
+// browser's bars showing, so the list has room.
 export const STAGE_TALL = '78vh';
 export const DOCKED_TALL = '50svh';
 export const stageWidth = (tall) => `min(100%, ${tall} * ${STAGE})`;
