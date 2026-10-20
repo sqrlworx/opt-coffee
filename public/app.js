@@ -1452,12 +1452,12 @@ function jointPlayer(answers, { src, chapters }) {
   };
 }
 
-// The Q&A in short, under the video: each question in a few words, then the main points of its
-// answer. Each question and answer is one thing to click, which plays it from the question; the
-// one being played is highlighted. Summaries are written once an answer is transcribed (and again
-// when it's corrected), so answers still waiting for one are watched. `refresh(q)` fetches a new
-// one after a correction.
-function summaryTranscript(player) {
+// The questions under the video, to skip to: each where it starts, its number, and the moderator's
+// few words for it, or the question cut short, in two lines at most. Each is one thing to click,
+// which plays it from the question; the one being played is highlighted. Summaries are written once
+// an answer is transcribed (and again when it's corrected), so answers still waiting for one are
+// watched. `refresh(q)` fetches a new one after a correction.
+function skipTo(player) {
   const items = new Map(); // question id -> its button
   const watching = new Set();
   const list = h('ol', { class: 'st-list' });
@@ -1468,27 +1468,11 @@ function summaryTranscript(player) {
     draw(part);
   }
 
-  // Spans styled as blocks: a button may only hold inline content.
+  // Spans: a button may only hold inline content.
   function draw(part) {
     const { q, start } = part;
-    const { summary, transcript } = q;
-    const by = askedBy(q);
-    let note = null;
-    if (transcript?.status === 'pending') note = 'A summary of the answer will appear here once it’s transcribed.';
-    else if (!transcript || transcript.status === 'failed') note = "This answer couldn't be transcribed.";
-    else if (!summary?.points.length) note = 'No speech was detected in this answer.';
-    setChildren(
-      items.get(q.id),
-      h('span', { class: 'st-time' }, fmtDuration(start)),
-      h(
-        'span',
-        { class: 'st-body' },
-        h('span', { class: 'st-q' }, summary?.question ?? q.body, by ? h('span', { class: 'st-by' }, ` — ${by}`) : null),
-        summary?.points.map((p) => h('span', { class: 'st-point' }, p)),
-        note ? h('span', { class: 'muted small st-note' }, note) : null,
-      ),
-    );
-    if (transcript?.status === 'pending' || summary?.pending) watch(part);
+    setChildren(items.get(q.id), h('span', { class: 'st-time' }, fmtDuration(start)), h('span', { class: 'st-q' }, q.summary?.question ?? q.body));
+    if (q.transcript?.status === 'pending' || q.summary?.pending) watch(part);
   }
 
   const update = (part, question) => {
@@ -1515,12 +1499,7 @@ function summaryTranscript(player) {
   ['timeupdate', 'seeked'].forEach((type) => player.video.addEventListener(type, highlight));
 
   return {
-    el: h(
-      'section',
-      { class: 'card summary-transcript' },
-      h('div', { class: 'row space-between gap-sm wrap' }, h('h2', {}, 'Summary'), h('span', { class: 'muted small' }, '✦ Summarized by the moderator. Click one to play it.')),
-      list,
-    ),
+    el: h('section', { class: 'skip-to' }, h('h2', {}, 'Skip to'), list),
     refresh(q) {
       const part = player.parts.find((p) => p.q === q);
       api('GET', `/api/questions/${q.id}`).then(({ question }) => update(part, question), (err) => toast(err.message, 'error'));
@@ -1683,11 +1662,12 @@ async function officeHourPage({ id }) {
       ? h('details', { class: 'card' }, h('summary', {}, `${rest.length} question${rest.length === 1 ? ' was' : 's were'} not answered`, h('span', { class: 'muted small' }, ' · only you see these')), h('ul', { class: 'q-list' }, rest.map((q) => questionRow(q, { canVote: false }))))
       : null;
     if (data.video?.status === 'ready') {
-      // One video, with a short transcript to find your way around it. The full one is folded away.
+      // One video, with its questions under it to skip to, and the player docked under the top bar
+      // while they're scrolled. The full transcript is folded away.
       const player = jointPlayer(data.answers, data.video);
-      const summary = summaryTranscript(player);
-      const onChange = (q) => (player.update(q), summary.refresh(q));
-      return h('div', { class: 'stack' }, header, h('section', {}, title, player.el, summary.el), discussion(oh, data.answers, onChange), unanswered);
+      const skip = skipTo(player);
+      const onChange = (q) => (player.update(q), skip.refresh(q));
+      return h('div', { class: 'stack' }, header, h('section', {}, title, h('div', { class: 'jp-dock' }, player.el), skip.el), discussion(oh, data.answers, onChange), unanswered);
     }
     // Without ffmpeg, or if joining failed, each answer has its own video.
     const videos = new Map();
@@ -2907,6 +2887,9 @@ async function render() {
   window.scrollTo(0, 0);
 }
 
+// The top bar's height, which grows when it wraps on a narrow screen, for the player that docks
+// under it (--topbar).
+new ResizeObserver(() => document.documentElement.style.setProperty('--topbar', `${$nav.parentElement.offsetHeight}px`)).observe($nav.parentElement);
 window.addEventListener('hashchange', render);
 await loadMe();
 render();

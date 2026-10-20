@@ -12,13 +12,16 @@
 // shows the asker's picture.
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
-// until the stage is tapped. It plays the joined video's copy for phones where there is one: upright,
-// with full-screen b-roll but not split-screen b-roll cut in, and with its burned-in captions at the
-// bottom of the expert's half (see write_mobile_ass in src/finish/captions.py). A video joined before
-// there was one plays as the page has it, the expert cropped from the corner where the server put
-// them over the b-roll. Captions that aren't burned in are drawn there too, just above the split, or
-// low on the joined video while it plays alone. So are burned-in ones while b-roll covers them, in a
-// video joined before there were copies for phones.
+// until the stage is tapped. Docked under the top bar (`docked`), it's half the screen tall, too
+// narrow for all of them, so it keeps play, the timeline and fullscreen.
+//
+// It plays the joined video's copy for phones where there is one: upright, with full-screen b-roll
+// but not split-screen b-roll cut in, and with its burned-in captions at the bottom of the expert's
+// half (see write_mobile_ass in src/finish/captions.py). A video joined before there was one plays
+// as the page has it, the expert cropped from the corner where the server put them over the b-roll.
+// Captions that aren't burned in are drawn there too, just above the split, or low on the joined
+// video while it plays alone. So are burned-in ones while b-roll covers them, in a video joined
+// before there were copies for phones.
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { blinkAt, FOX, fox } from '../../../public/fox.js';
 import { api } from '../api.js';
@@ -26,7 +29,7 @@ import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
-import { backStyle, drawBack, fixDuration, layer, stageStyle, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+import { backStyle, DOCKED_TALL, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
 
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
@@ -38,7 +41,7 @@ const FOX_BACKDROP = '#f9f9f9';
 const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, asker: '', focus: null, pip: false, second: 0, playing: false, started: false };
 const same = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
 
-export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent }, ref) {
+export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent, docked = false }, ref) {
   const parts = useMemo(() => joinedParts(answers, video.chapters), [answers, video.chapters]);
   const cues = useMemo(() => joinedCues(parts), [parts]);
   const total = parts.at(-1)?.end ?? 0;
@@ -90,7 +93,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     if (m.cut && pip) drawCrop();
     if (m.asking) r.asker = askerLabel(m.asking); // kept while the half or the bubble fades out
     if (fillRef.current) fillRef.current.style.width = `${total ? (100 * t) / total : 0}%`;
-    // Which answer is playing, for the summary under the player: nothing before it's played.
+    // Which answer is playing, for Skip to under the player: nothing before it's played.
     const current = v.paused && t < 0.05 ? null : (m.part?.q.id ?? null);
     if (current !== r.current) {
       r.current = current;
@@ -271,6 +274,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   }, [view.playing, controls, scrub]);
 
   const ccHidden = parts.length > 0 && parts.every((p) => p.captions); // they're all in the picture
+  const compact = docked && !fullscreen;
   // Alone, the joined video has the whole stage, but all of it shows on a phone turned sideways:
   // filling that, an upright picture would be cut down to a band across the face.
   const mainFit = wide && !view.split ? 'contain' : 'cover';
@@ -284,7 +288,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     <div
       ref={stageRef}
       className="split-stage"
-      style={stageStyle}
+      style={docked ? { ...stageStyle, width: stageWidth(DOCKED_TALL) } : stageStyle}
       onClick={() => {
         if (!rt.current.started) return play();
         setControls(!controlsShown);
@@ -327,18 +331,22 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
           <CtrlButton label={view.playing ? 'Pause' : 'Play'} onPress={toggle}>
             <Icon name={view.playing ? 'pause' : 'play'} color="#fff" />
           </CtrlButton>
-          <span style={timeStyle}>
-            {fmtDuration(view.second)} / {fmtDuration(total)}
-          </span>
+          {compact ? null : (
+            <span style={timeStyle}>
+              {fmtDuration(view.second)} / {fmtDuration(total)}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
-          {ccHidden ? null : (
+          {ccHidden || compact ? null : (
             <CtrlButton label="Captions" pressed={captionsOn} onPress={() => setCaptionsOn(!captionsOn)}>
               CC
             </CtrlButton>
           )}
-          <CtrlButton label={muted ? 'Unmute' : 'Mute'} onPress={() => (videoRef.current.muted = !videoRef.current.muted)}>
-            <Icon name={muted ? 'muted' : 'sound'} color="#fff" />
-          </CtrlButton>
+          {compact ? null : (
+            <CtrlButton label={muted ? 'Unmute' : 'Mute'} onPress={() => (videoRef.current.muted = !videoRef.current.muted)}>
+              <Icon name={muted ? 'muted' : 'sound'} color="#fff" />
+            </CtrlButton>
+          )}
           <CtrlButton label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} onPress={() => toggleFullscreen(stageRef.current, videoRef.current)}>
             <Icon name={fullscreen ? 'exitFullscreen' : 'fullscreen'} color="#fff" />
           </CtrlButton>

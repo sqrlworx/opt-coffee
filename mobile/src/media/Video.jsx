@@ -119,8 +119,14 @@ export function useStage() {
 export const STAGE = 9 / 16;
 export const HALF = 9 / 8;
 
-// At most 78% of the screen tall: narrower rather than another shape.
-export const stageStyle = { position: 'relative', width: `min(100%, 78vh * ${STAGE})`, alignSelf: 'center', aspectRatio: String(STAGE), overflow: 'hidden', background: '#000', borderRadius: 18, userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'manipulation' };
+// How tall the stage gets, narrower rather than another shape: 78% of the screen, or, docked under
+// the top bar while a list under it is scrolled, half of the screen as it is with the browser's bars
+// showing, so the list has room.
+export const STAGE_TALL = '78vh';
+export const DOCKED_TALL = '50svh';
+export const stageWidth = (tall) => `min(100%, ${tall} * ${STAGE})`;
+
+export const stageStyle = { position: 'relative', width: stageWidth(STAGE_TALL), alignSelf: 'center', aspectRatio: String(STAGE), overflow: 'hidden', background: '#000', borderRadius: 18, userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'manipulation' };
 
 // A layer of the stage in `name`'s place (see slot()), moving there smoothly; hidden ones fade out.
 // A video fills its place, cropped to it.

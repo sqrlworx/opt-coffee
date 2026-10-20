@@ -307,6 +307,9 @@ textarea { resize: vertical; }
 .answer-video { display: block; width: 100%; max-height: 420px; aspect-ratio: 16 / 9; background: #111; border-radius: var(--radius-sm); }
 
 /* ---------- watching: the answers as one video ---------- */
+/* The player docks under the top bar while Skip to is scrolled under it, until the list ends. Its
+   paper keeps the list from showing above it and at its corners; the margin cancels the padding. */
+.jp-dock { position: sticky; top: var(--topbar, 0px); z-index: 5; margin: -12px 0; padding: 12px 0; background: var(--paper); }
 .joint-player { position: relative; container-type: inline-size; aspect-ratio: 16 / 9; background: #000; border-radius: var(--radius); overflow: hidden; outline: none; user-select: none; }
 .joint-player.is-fullscreen { border-radius: 0; }
 .joint-player.playing.idle { cursor: none; }
@@ -346,21 +349,17 @@ textarea { resize: vertical; }
 .jp-fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #fff; pointer-events: none; }
 .jp-tick { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1.5px; background: rgba(0, 0, 0, 0.75); pointer-events: none; }
 .jp-tip { position: absolute; bottom: 16px; transform: translateX(-50%); max-width: 280px; padding: 3px 8px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-.summary-transcript { background: none; padding: 0; border-radius: 0; gap: 16px; margin-top: 16px; }
-.summary-transcript h2 { font-size: 1.5rem; }
+.skip-to { margin-top: 16px; }
+.skip-to h2 { font-size: 1.5rem; }
 .st-list { list-style: none; margin: 0; padding: 0; display: grid; counter-reset: st; border-top: 1px solid var(--line); }
 .st-list > li { counter-increment: st; border-bottom: 1px solid var(--line); }
-/* Each question and answer is one button. */
+/* Each question is one button. */
 .st-item { display: flex; align-items: baseline; gap: 16px; width: 100%; padding: 14px 12px 14px 10px; border: none; border-left: 2px solid transparent; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: background-color 0.15s, border-color 0.15s; }
 .st-item:hover { background: var(--raised); }
 .st-item.is-current { border-left-color: var(--accent); background: var(--raised); }
 .st-time { min-width: 38px; flex-shrink: 0; font-size: 0.78rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-.st-body { display: grid; gap: 4px; min-width: 0; }
-.st-q { font-family: var(--serif); font-size: 1.15rem; line-height: 1.35; }
+.st-q { font-family: var(--serif); font-size: 1.15rem; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .st-q::before { content: counter(st, decimal-leading-zero) '  '; color: var(--accent); white-space: pre; }
-.st-by { font-family: var(--sans); font-size: 0.82rem; color: var(--muted); }
-.st-point { position: relative; padding-left: 16px; color: var(--ink-2); }
-.st-point::before { content: '–'; position: absolute; left: 0; color: var(--muted); }
 
 /* ---------- feed ---------- */
 .feed-head { display: flex; gap: 12px; align-items: center; font-size: 0.92rem; }

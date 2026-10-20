@@ -30,4 +30,6 @@ export const TOUCH = 44;
 // How wide the content gets on a tablet, or a phone turned sideways.
 export const MAX_WIDTH = 640;
 
+// Under the notch: the player docks under the top bar.
+export const TOP_BAR_HEIGHT = 52;
 export const TAB_BAR_HEIGHT = 58;

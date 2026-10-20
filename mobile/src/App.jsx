@@ -5,7 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { api } from './api.js';
 import { AppContext, useApp } from './context.js';
 import { go, match, useHash } from './router.js';
-import { color, font, MAX_WIDTH, TAB_BAR_HEIGHT } from './theme.js';
+import { color, font, MAX_WIDTH, TAB_BAR_HEIGHT, TOP_BAR_HEIGHT } from './theme.js';
 import { Icon } from './ui/icons.jsx';
 import { Empty, Link, Loading } from './ui/index.jsx';
 import ExplorePage from './pages/Explore.jsx';
@@ -222,7 +222,7 @@ const selectStyle = { font: 'inherit', fontSize: 14, border: 'none', background:
 const styles = StyleSheet.create({
   page: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', paddingHorizontal: 20, paddingTop: 24, paddingBottom: `calc(${TAB_BAR_HEIGHT + 48}px + env(safe-area-inset-bottom))`, flexGrow: 1 },
   topbar: { position: 'sticky', top: 0, zIndex: 10, backgroundColor: 'rgba(248,246,242,0.9)', backdropFilter: 'saturate(1.4) blur(14px)', borderBottomWidth: 1, borderBottomColor: color.line, paddingTop: 'env(safe-area-inset-top)' },
-  topbarInner: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', minHeight: 52, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  topbarInner: { width: '100%', maxWidth: MAX_WIDTH, alignSelf: 'center', minHeight: TOP_BAR_HEIGHT, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
   brand: { fontFamily: font.serif, fontSize: 26, lineHeight: 30, letterSpacing: -0.8, color: color.ink },
   devSwitch: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: color.surface, borderRadius: 999, paddingLeft: 12, paddingRight: 6, flexShrink: 1 },
   devLabel: { fontFamily: font.sans, fontSize: 12, color: color.muted },
