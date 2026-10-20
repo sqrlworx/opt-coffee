@@ -562,6 +562,13 @@ function fixDuration(media, { firstFrame = false } = {}) {
   return media;
 }
 
+// Whether a media element's time is moving: playing, and neither seeking nor waiting for data, as
+// it does when it's sent somewhere it hasn't loaded yet. A video kept in step with it holds still
+// meanwhile, rather than playing on and being sent back.
+function advancing(media) {
+  return !media.paused && !media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+}
+
 // Marks a video `upright` once its picture turns out taller than wide, as the mobile app records,
 // so the styles made for 16:9 don't crop it.
 function markUpright(video) {
@@ -655,7 +662,7 @@ function brollView(video, broll) {
       if (!over) {
         const at = t - current.start;
         if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
-        if (video.paused) clip.pause();
+        if (!advancing(video)) clip.pause();
         else if (clip.paused && !clip.ended) clip.play().catch(() => {});
       }
       drawFill(blur, clip, 0.5, 0.25);
@@ -1313,7 +1320,7 @@ function jointPlayer(answers, { src, chapters }) {
     if (f) {
       // Seek only once the browser knows how long it is (see fixDuration), and when it has drifted.
       if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
-      if (video.paused) f.pause();
+      if (!advancing(video)) f.pause();
       else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
     }
     asking.classList.toggle('has-face', Boolean(f));

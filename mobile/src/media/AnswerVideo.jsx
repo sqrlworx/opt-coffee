@@ -16,7 +16,7 @@ import { color } from '../theme.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { brollAt, focusPosition, playLength } from './split.js';
-import { backStyle, drawBack, fixDuration, layer, stageStyle, useStage, Video } from './Video.jsx';
+import { advancing, backStyle, drawBack, fixDuration, layer, stageStyle, useStage, Video } from './Video.jsx';
 
 export function AnswerVideo({ src, captions, broll, videoRef }) {
   const placed = broll?.video && broll.start != null ? broll : null;
@@ -60,7 +60,7 @@ function BrollStage({ src, captions, broll, videoRef }) {
       if (cut && !over.current) {
         const at = t - b.start;
         if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
-        if (v.paused) clip.pause();
+        if (!advancing(v)) clip.pause();
         else if (clip.paused && !clip.ended) clip.play().catch(() => {});
       } else if (!cut) {
         clip.pause();

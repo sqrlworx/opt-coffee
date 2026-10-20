@@ -67,6 +67,11 @@ export const AudioPlayer = forwardRef(function AudioPlayer({ src }, ref) {
   return <audio ref={el} src={src} controls preload="metadata" style={{ display: 'block', width: '100%', height: 44 }} />;
 });
 
+// Whether a media element's time is moving: playing, and neither seeking nor waiting for data, as it
+// does when it's sent somewhere it hasn't loaded yet. A video kept in step with it holds still
+// meanwhile, rather than playing on and being sent back.
+export const advancing = (media) => !media.paused && !media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
+
 // Whether a media element is playing, kept up to date.
 export function usePlaying(ref) {
   const [playing, setPlaying] = useState(false);

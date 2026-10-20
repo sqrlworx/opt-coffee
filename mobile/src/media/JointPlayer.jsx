@@ -29,7 +29,7 @@ import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
-import { backStyle, DOCKED_TALL, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+import { advancing, backStyle, DOCKED_TALL, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
 
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
@@ -126,11 +126,12 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     }
     return r.clips.get(q.id);
   }
-  // Kept in step with the joined video: it plays and pauses with it, and seeks once it's drifted.
+  // Kept in step with the joined video: it plays and pauses with it, holds still while the joined
+  // video waits for data (see advancing), and seeks once it's drifted.
   function follow(el, at, limit) {
     const v = videoRef.current;
     if (Number.isFinite(el.duration) && Math.abs(el.currentTime - at) > limit) el.currentTime = Math.min(Math.max(0, at), el.duration);
-    if (v.paused) el.pause();
+    if (!advancing(v)) el.pause();
     else if (el.paused && !el.ended) el.play().catch(() => {}); // it may end a moment before its part does
   }
   function showFace(f, at) {
