@@ -61,22 +61,21 @@ export function pipBox(width) {
  * ([`pic`], `width`x`height` at 30 fps), fading in and out. The b-roll ([`broll`], any size or frame
  * rate) goes in a place that depends on `layout`:
  * - 'split', the page's split screen: the expert on the left half, from [`half`] (their take already
- *   filling `width / 2` x `height`, timed like [`pic`]), and the b-roll cropped to fill the right half;
- * - 'corner', full screen on the page: all of the b-roll in the frame, and the picture at the top left;
- * - 'alone', full screen in the phone's copy: all of the b-roll in the middle of the frame that the
- *   phone's upright player shows (STAGE).
- * Full screen, the b-roll is the picture, so none of it is cropped off: it's as big as fits, over a
- * blurred, darker copy of itself filling the rest of the frame, as src/finish sets a take of another
- * shape (fit_filter in finish.py). Its output, [`out`], is timed like [`pic`].
+ *   filling `width / 2` x `height`, timed like [`pic`]), and the b-roll in the right half;
+ * - 'corner', full screen on the page: the b-roll in the frame, and the picture at the top left;
+ * - 'alone', full screen in the phone's copy: the b-roll in the middle of the frame that the phone's
+ *   upright player shows (STAGE).
+ * None of the b-roll is cropped off: it's as big as fits in its place, over a blurred, darker copy of
+ * itself filling the rest of it, as src/finish sets a take of another shape (fit_filter in
+ * finish.py). Its output, [`out`], is timed like [`pic`].
  */
 export function cutawayFilter({ layout = 'corner', width, height, start, length, pic = 'pic', half = 'half', broll = 'broll', out = 'cut' }) {
   const t = (secs) => String(Math.round(secs * 1000) / 1000);
   const fade = Math.min(CUT_FADE, length / 2);
   const at = `setpts=PTS-STARTPTS+${t(start)}/TB`;
   const fades = `fade=t=in:st=${t(start)}:d=${t(fade)}:alpha=1,fade=t=out:st=${t(start + length - fade)}:d=${t(fade)}:alpha=1`;
-  const fill = (w, h) => `[${broll}]fps=30,scale=${w}:${h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w}:${h},setsar=1,trim=duration=${t(length)},${at}`;
-  // All of the b-roll in `fw` x `fh` (all of the `w` x `h` frame, unless less of it is seen), over
-  // the blurred copy filling the frame.
+  // All of the b-roll in `fw` x `fh` (all of its `w` x `h` place, unless less of that is seen), over
+  // the blurred copy filling the place.
   const whole = (w, h, label, [fw, fh] = [w, h]) =>
     [
       `[${broll}]fps=30,trim=duration=${t(length)},${at},setsar=1,split=2[${label}_all][${label}_back]`,
@@ -86,7 +85,7 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
     ].join(';');
   if (layout === 'split') {
     return [
-      `${fill(width / 2, height)},format=yuv420p[split_broll]`,
+      `${whole(width / 2, height, 'split')},format=yuv420p[split_broll]`,
       `[${half}]trim=start=${t(start)}:duration=${t(length)},${at},setsar=1,format=yuv420p[split_face]`,
       `[split_face][split_broll]hstack=inputs=2,format=yuva420p,${fades}[split_both]`,
       `[${pic}][split_both]overlay=0:0:eof_action=pass,format=yuv420p[${out}]`,
@@ -126,9 +125,9 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
  * at 1080p, its sound cleaned up, and its captions burned in when it has a transcript. If finishing
  * fails, the takes are joined as recorded.
  *
- * A take with b-roll cuts away to it (see cutawayFilter), under the captions: split screen, with the
- * take beside it filling the left half, or full screen, all of it in the frame with the take in the
- * corner.
+ * A take with b-roll cuts away to it (see cutawayFilter), under the captions: split screen, all of it
+ * in the right half beside the take filling the left half, or full screen, all of it in the frame
+ * with the take in the corner.
  *
  * The phone gets a copy of its own, made from the same parts: upright (9:16 or 3:4, see TALL), each
  * take filling it, cropped, with full-screen b-roll in it too, all of it where the phone's player

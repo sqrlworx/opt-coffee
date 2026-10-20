@@ -579,11 +579,11 @@ function videoPlayer(src, transcript) {
 }
 
 // An answer's video with its b-roll cut in, as it is in the joined video (src/video.js): from
-// `broll.start` for `broll.length` seconds, split screen, the answer filling the left half and the
-// b-roll the right, fading in together over the answer, or, with `broll.full`, full screen, all of
-// the b-roll in the frame, over a blurred copy of itself, and the answer moving to a picture at the
-// top left. The b-roll is muted, since the answer's sound carries on, and kept in step with the
-// answer. The video's own controls would be covered, or shrink into that picture, so it gets these
+// `broll.start` for `broll.length` seconds, split screen, the answer filling the left half and all of
+// the b-roll in the right, fading in together over the answer, or, with `broll.full`, full screen,
+// all of the b-roll in the frame and the answer moving to a picture at the top left. Either way the
+// b-roll sits on a blurred copy of itself where its shape leaves room. It's muted, since the
+// answer's sound carries on, and kept in step with the answer. The video's own controls would be covered, or shrink into that picture, so it gets these
 // instead: play, the time, and a timeline marking where the b-roll is. Without b-roll it's the
 // video as it was. Called again for the same video, it updates the same frame with `broll`.
 function brollView(video, broll) {
@@ -592,11 +592,12 @@ function brollView(video, broll) {
   const clip = h('video', { class: 'broll-clip', preload: 'auto', playsinline: true, 'aria-hidden': 'true' });
   clip.muted = true;
   // The left half of a split, drawn from the answer as it plays, cropped to fill it rather than fitted,
-  // as the joined video has it; and full screen, the blurred copy of the b-roll it sits on, drawn
-  // small from the clip. They're faded rather than taken out, so they have a size to draw at the
-  // moment the cut comes up, even paused.
+  // as the joined video has it; and the blurred copy the b-roll sits on, drawn small from the clip,
+  // in a box that keeps its blurred edges in. They're faded rather than taken out, so they have a
+  // size to draw at the moment the cut comes up, even paused.
   const half = h('canvas', { class: 'broll-half', 'aria-hidden': 'true' });
-  const back = h('canvas', { class: 'broll-back', 'aria-hidden': 'true' });
+  const blur = h('canvas');
+  const back = h('div', { class: 'broll-back', 'aria-hidden': 'true' }, blur);
   const playBtn = h('button', { type: 'button', class: 'jp-btn', 'aria-label': 'Play', onclick: () => toggle() }, icon('play'));
   const time = h('span', { class: 'jp-time' });
   const fill = h('span', { class: 'jp-fill' });
@@ -618,8 +619,8 @@ function brollView(video, broll) {
       if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
       if (video.paused) clip.pause();
       else if (clip.paused && !clip.ended) clip.play().catch(() => {});
-      if (current.full) drawFill(back, clip, 0.5, 0.25);
-      else drawFill(half, video, 0.6, devicePixelRatio);
+      drawFill(blur, clip, 0.5, 0.25);
+      if (!current.full) drawFill(half, video, 0.6, devicePixelRatio);
     } else {
       clip.pause();
     }
@@ -1122,8 +1123,8 @@ function icon(name) {
 // It has its own controls, so captions and the asker stay on it in fullscreen. Captions are drawn
 // at the bottom, except for answers whose captions are burned into the video (`captions` on their
 // chapter, when the server finished it). While a question is being played, a picture at the top
-// left shows who asked: the asker's video for a question asked on camera, kept in step with the
-// question, and otherwise the fox saying it. `chapters` place each answer in the video, and where
+// left shows who asked: the asker's video for a question asked on camera, from the moment it starts
+// and kept in step with the question, and otherwise the fox saying it. `chapters` place each answer in the video, and where
 // its question's sound starts in it (`questionStart`), which the fox and the asker's video follow;
 // its question's cues and its transcript's are timed from the start of its take. `update(q)` picks
 // up a transcript that's ready or corrected.
@@ -1246,18 +1247,18 @@ function jointPlayer(answers, { src, chapters }) {
   el.addEventListener('webkitfullscreenchange', onFullscreen);
 
   // The askers' videos, for questions asked on camera, muted: their sound is in the joined video.
-  // Each loads while the answer before it plays, so it's ready when its question comes up.
+  // Each loads while the answer before it plays, showing its first frame once it has, so it's ready
+  // when its question comes up.
   const faces = new Map(); // question id -> <video>
   function face(q) {
     if (!faces.has(q.id)) {
-      const f = markUpright(fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true })));
+      const f = markUpright(fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true }), { firstFrame: true }));
       f.muted = true;
       faces.set(q.id, f);
     }
     return faces.get(q.id);
   }
   let shownFace = null;
-  const pictured = new WeakSet(); // faces that have had a frame to show
   function showFace(f, at) {
     if (f !== shownFace) {
       shownFace?.pause();
@@ -1269,12 +1270,8 @@ function jointPlayer(answers, { src, chapters }) {
       if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
       if (video.paused) f.pause();
       else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
-      // The fox stands in until the video has a picture of this moment, rather than an empty
-      // black box or a first frame that then jumps. Once shown it stays, even while it seeks
-      // (the last frame stays up meanwhile).
-      if (f.readyState >= 2 && !f.seeking && Math.abs(f.currentTime - at) <= 0.3) pictured.add(f);
     }
-    asking.classList.toggle('has-face', Boolean(f && pictured.has(f)));
+    asking.classList.toggle('has-face', Boolean(f));
   }
 
   // The questions' lip sync, for the fox. Each loads while the answer before it plays.
@@ -1312,7 +1309,7 @@ function jointPlayer(answers, { src, chapters }) {
     const at = q ? t - part.start - (part.questionStart ?? 0) : 0;
     showFace(q?.askerVideo ? face(q) : null, at);
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
-    if (q && !asking.classList.contains('has-face')) {
+    if (q && !q.askerVideo) {
       const sync = lipSync(q);
       stand.draw(sync ? (sync.frames[Math.floor(at * sync.fps)] ?? [0, 1, 0]) : [level, 1, level], blinkAt(q.id, at), at);
     }

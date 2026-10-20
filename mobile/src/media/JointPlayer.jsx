@@ -3,10 +3,10 @@
 // upright stage that each picture fills.
 //
 // The expert has the top half whenever it splits. While a question asked on camera is played (the
-// start of each take, up to its `answerStart`), the asker's video is under them, kept in step with
-// the question. While an answer's split-screen b-roll plays, the clip is, in step. The rest of the
-// time the joined video has the whole stage, full-screen b-roll included, which the server cuts
-// into it. The halves crop the expert and the asker to frame their faces, where the server found
+// start of each take, up to its `answerStart`), the asker's video is under them from the moment it
+// starts, kept in step with the question. While an answer's split-screen b-roll plays, all of the
+// clip is, in step, on a blurred copy of itself where its shape leaves room. The rest of the time
+// the joined video has the whole stage, full-screen b-roll included, which the server cuts into it. The halves crop the expert and the asker to frame their faces, where the server found
 // them (the chapters' expertFocus and askerFocus). Any other question doesn't split: the fox says
 // it in a bubble at the top left, over the expert, with the asker's name under it, where the page
 // shows the asker's picture.
@@ -26,17 +26,16 @@ import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
-import { fixDuration, layer, stageStyle, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+import { backStyle, drawBack, fixDuration, layer, stageStyle, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
 
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
 const LOW = 0.8;
-// Until an asker's video has a picture to show, the fox stands in, on the bottom edge of their half
-// where its picture is cut off, as big as fits. The half and the bubble are the colour of the
-// picture's own background (public/fox.webp), so whatever room is left around it doesn't show.
+// The fox's bubble is the colour of its picture's own background (public/fox.webp), so whatever room
+// is left around the fox doesn't show.
 const FOX_BACKDROP = '#f9f9f9';
 
-const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, asker: '', hasFace: false, focus: null, pip: false, second: 0, playing: false, started: false };
+const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, asker: '', focus: null, pip: false, second: 0, playing: false, started: false };
 const same = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
 
 export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent }, ref) {
@@ -46,11 +45,11 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   const { ref: stageRef, wide } = useStage();
   const fullscreen = useFullscreen(stageRef);
   const videoRef = useRef(null);
-  const foxCanvas = useRef(null);
   const bubbleCanvas = useRef(null);
   const cropCanvas = useRef(null);
   const faceSlot = useRef(null);
   const clipSlot = useRef(null);
+  const clipBack = useRef(null);
   const fillRef = useRef(null);
   const latest = useRef(null);
   latest.current = { parts, cues, total, onCurrent, mobileCopy: Boolean(video.mobileSrc) };
@@ -80,12 +79,12 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     }
     showFace(m.asking?.askerVideo ? face(m.part) : null, m.at);
     showClip(m.cut ? clip(m.part.q) : null, m.clipAt);
+    if (m.cut && clipBack.current) drawBack(clipBack.current, r.shownClip);
     r.level = m.asking && r.analyser && !v.paused ? 0.6 * r.level + 0.4 * loudness() : 0.85 * r.level;
-    const hasFace = Boolean(r.shownFace && r.pictured.has(r.shownFace));
     const bubble = Boolean(m.asking && !m.asking.askerVideo);
-    if (m.asking && !hasFace) {
+    if (bubble) {
       const sync = lipSync(m.asking);
-      (bubble ? r.bubbleFox : r.fox).draw(sync ? (sync.frames[Math.floor(m.at * sync.fps)] ?? [0, 1, 0]) : [r.level, 1, r.level], blinkAt(m.asking.id, m.at), m.at);
+      r.bubbleFox.draw(sync ? (sync.frames[Math.floor(m.at * sync.fps)] ?? [0, 1, 0]) : [r.level, 1, r.level], blinkAt(m.asking.id, m.at), m.at);
     }
     const pip = v.videoWidth > v.videoHeight; // the page's video, with the b-roll cut in
     if (m.cut && pip) drawCrop();
@@ -97,7 +96,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       r.current = current;
       onCurrent?.(current);
     }
-    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, asker: r.asker, hasFace, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused, started: r.started };
+    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, asker: r.asker, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused, started: r.started };
     setView((prev) => (same(prev, next) ? prev : next));
   }, []);
 
@@ -112,10 +111,16 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     }
     return r.faces.get(q.id);
   }
-  // The answers' b-roll clips, muted: the expert's sound carries on under them.
+  // The answers' b-roll clips, muted: the expert's sound carries on under them. Each is shown whole,
+  // on the blurred copy of itself drawn under it, which follows a paused clip once it has the frame
+  // it was sent to.
   function clip(q) {
     const r = rt.current;
-    if (!r.clips.has(q.id)) r.clips.set(q.id, sideVideo(q.broll.video, 'cover', '#000'));
+    if (!r.clips.has(q.id)) {
+      const el = sideVideo(q.broll.video, 'contain', 'transparent');
+      ['seeked', 'loadeddata'].forEach((type) => el.addEventListener(type, tick));
+      r.clips.set(q.id, el);
+    }
     return r.clips.get(q.id);
   }
   // Kept in step with the joined video: it plays and pauses with it, and seeks once it's drifted.
@@ -132,11 +137,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       faceSlot.current?.replaceChildren(...(f ? [f] : []));
       r.shownFace = f;
     }
-    if (!f) return;
-    follow(f, at, 0.3);
-    // The fox stands in until the video has a picture of this moment, rather than an empty black
-    // box or a first frame that then jumps. Once shown it stays, even while it seeks.
-    if (f.readyState >= 2 && !f.seeking && Math.abs(f.currentTime - at) <= 0.3) r.pictured.add(f);
+    if (f) follow(f, at, 0.3);
   }
   function showClip(c, at) {
     const r = rt.current;
@@ -221,7 +222,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
 
   useEffect(() => {
     const v = videoRef.current;
-    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, pictured: new WeakSet(), fox: fox(foxCanvas.current), bubbleFox: fox(bubbleCanvas.current, FOX.bubble), asker: '', current: undefined, frame: 0 };
+    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, bubbleFox: fox(bubbleCanvas.current, FOX.bubble), asker: '', current: undefined, frame: 0 };
     const r = rt.current;
     const unfix = fixDuration(v, { firstFrame: true });
     // Every frame while it plays, so the split and the captions land on time; timeupdate is only a
@@ -290,12 +291,12 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       }}
     >
       <video ref={videoRef} src={video.mobileSrc ?? video.src} preload="metadata" playsInline style={layer(view.split ? 'top' : 'full', wide, { fit: mainFit, extra: { objectPosition: view.split ? focusPosition(view.focus) : 'center' } })} />
-      <div ref={clipSlot} style={layer('bottom', wide, { shown: view.split === 'broll', z: 1, extra: { background: '#000' } })} />
-      <div style={layer('bottom', wide, { shown: view.split === 'question', z: 1, extra: { background: FOX_BACKDROP, overflow: 'hidden' } })} aria-hidden="true">
-        <div style={{ position: 'absolute', inset: 0, containerType: 'size' }}>
-          <canvas ref={foxCanvas} style={{ position: 'absolute', bottom: 0, left: '50%', width: 'min(100cqw, 100cqh * 627 / 470)', aspectRatio: '627 / 470', transform: 'translateX(-50%)', visibility: view.hasFace ? 'hidden' : 'visible' }} />
-          <div ref={faceSlot} style={{ position: 'absolute', inset: 0, display: view.hasFace ? 'block' : 'none' }} />
-        </div>
+      <div aria-hidden="true" style={layer('bottom', wide, { shown: view.split === 'broll', z: 1, extra: { background: '#000', overflow: 'hidden' } })}>
+        <canvas ref={clipBack} style={backStyle} />
+      </div>
+      <div ref={clipSlot} style={layer('bottom', wide, { shown: view.split === 'broll', z: 1 })} />
+      <div style={layer('bottom', wide, { shown: view.split === 'question', z: 1, extra: { background: '#111', overflow: 'hidden' } })} aria-hidden="true">
+        <div ref={faceSlot} style={{ position: 'absolute', inset: 0 }} />
         {view.asker ? <span style={{ ...askerPill, bottom: controlsShown ? 90 : 10 }}>{view.asker}</span> : null}
       </div>
       {/* Faded rather than taken out, so it has a size to draw at the moment the cut comes up, even paused. */}
@@ -347,7 +348,9 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   );
 });
 
-// A muted video that plays alongside the joined one, in one of the halves.
+// A muted video that plays alongside the joined one, in one of the halves. It shows its first frame
+// as soon as it loads, which it does while the answer before it plays, so its half has a picture from
+// the moment it comes up.
 function sideVideo(src, fit, background) {
   const el = document.createElement('video');
   el.muted = true;
@@ -356,7 +359,7 @@ function sideVideo(src, fit, background) {
   el.preload = 'metadata';
   el.src = src;
   Object.assign(el.style, { display: 'block', width: '100%', height: '100%', objectFit: fit, background });
-  fixDuration(el);
+  fixDuration(el, { firstFrame: true });
   return el;
 }
 

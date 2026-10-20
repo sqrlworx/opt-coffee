@@ -1,20 +1,19 @@
 // One answer's video, with its b-roll cut in as the phone plays it in the joined video: from
-// `broll.start` for `broll.length` seconds, split screen, the expert moving to the top half while the
-// b-roll plays in the bottom half, or full screen, all of the b-roll fading in over the whole stage,
-// on a blurred copy of itself where its shape leaves room. The b-roll is muted (the expert's sound
-// carries on) and kept in step. A video's own controls would end up in one half, so it gets these
-// instead: play, the time, and a timeline marking where the b-roll is. Between cuts the take has the
-// whole stage. The take and split-screen b-roll fill their places, cropping more off the top than the
-// bottom, except that a take alone on a phone turned sideways is shown whole. Without b-roll it's the
-// video with its own controls, as it was. `videoRef` is the answer's <video>, for its transcript to
-// follow.
+// `broll.start` for `broll.length` seconds, split screen, the expert moving to the top half while all
+// of the b-roll plays in the bottom half, or full screen, all of it fading in over the whole stage.
+// Either way the b-roll sits on a blurred copy of itself where its shape leaves room. It's muted (the
+// expert's sound carries on) and kept in step. A video's own controls would end up in one half, so it
+// gets these instead: play, the time, and a timeline marking where the b-roll is. Between cuts the
+// take has the whole stage. The take fills its place, cropping more off the top than the bottom,
+// except that a take alone on a phone turned sideways is shown whole. Without b-roll it's the video
+// with its own controls, as it was. `videoRef` is the answer's <video>, for its transcript to follow.
 import { useEffect, useRef, useState } from 'react';
 import { fmtDuration } from '../format.js';
 import { color } from '../theme.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
-import { brollAt, cover, focusPosition } from './split.js';
-import { fixDuration, layer, stageStyle, useStage, Video } from './Video.jsx';
+import { brollAt, focusPosition } from './split.js';
+import { backStyle, drawBack, fixDuration, layer, stageStyle, useStage, Video } from './Video.jsx';
 
 export function AnswerVideo({ src, captions, broll, videoRef }) {
   const placed = broll?.video && broll.start != null ? broll : null;
@@ -55,7 +54,7 @@ function BrollStage({ src, captions, broll, videoRef }) {
         if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
         if (v.paused) clip.pause();
         else if (clip.paused && !clip.ended) clip.play().catch(() => {});
-        if (b.full && backRef.current) drawBack(backRef.current, clip);
+        if (backRef.current) drawBack(backRef.current, clip);
       } else {
         clip.pause();
       }
@@ -99,8 +98,10 @@ function BrollStage({ src, captions, broll, videoRef }) {
         {captions ? <track key={captions} kind="subtitles" src={captions} srcLang="en" label="English" /> : null}
       </video>
       {/* Faded rather than taken out, so it has a size to draw at the moment the cut comes up, even paused. */}
-      {broll.full ? <canvas ref={backRef} aria-hidden="true" style={layer('full', wide, { shown: view.cut, z: 1, extra: backStyle })} /> : null}
-      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer(broll.full ? 'full' : 'bottom', wide, { shown: view.cut, z: 2, fit: broll.full ? 'contain' : 'cover' })} />
+      <div aria-hidden="true" style={layer(broll.full ? 'full' : 'bottom', wide, { shown: view.cut, z: 1, extra: { overflow: 'hidden' } })}>
+        <canvas ref={backRef} style={backStyle} />
+      </div>
+      <video ref={clipRef} src={broll.video} preload="auto" playsInline aria-hidden="true" style={layer(broll.full ? 'full' : 'bottom', wide, { shown: view.cut, z: 2, fit: 'contain' })} />
       {view.playing ? null : <BigPlay onPress={toggle} />}
       <div style={controlsBar} onClick={(e) => e.stopPropagation()}>
         <CtrlButton label={view.playing ? 'Pause' : 'Play'} onPress={toggle}>
@@ -115,16 +116,5 @@ function BrollStage({ src, captions, broll, videoRef }) {
   );
 }
 
-// The clip, drawn small to fill the stage, for the blurred copy of itself that full-screen b-roll
-// sits on, as the joined video has it (cutawayFilter in src/video.js).
-function drawBack(canvas, clip) {
-  const [w, h] = [Math.round(canvas.clientWidth / 4), Math.round(canvas.clientHeight / 4)];
-  if (!w || !h || !clip.videoWidth || clip.readyState < 2) return;
-  if (canvas.width !== w || canvas.height !== h) [canvas.width, canvas.height] = [w, h];
-  const [x, y, cw, ch] = cover(clip.videoWidth, clip.videoHeight, w, h);
-  canvas.getContext('2d').drawImage(clip, x, y, cw, ch, 0, 0, w, h);
-}
-
-const backStyle = { filter: 'blur(12px) brightness(0.9) saturate(0.7)', transform: 'scale(1.1)' };
 const controlsBar = { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 5, display: 'flex', alignItems: 'center', gap: 6, padding: '22px 12px 2px 4px', background: 'linear-gradient(transparent, rgba(0,0,0,0.6))' };
 const timeStyle = { color: '#fff', fontSize: 13, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', fontFamily: 'ui-sans-serif, system-ui, -apple-system, sans-serif' };

@@ -519,15 +519,15 @@ function pixel(file, t, x, y) {
 }
 const near = ([r, g, b], [er, eg, eb]) => Math.abs(r - er) < 40 && Math.abs(g - eg) < 40 && Math.abs(b - eb) < 40;
 
-test('ffmpeg cuts away to b-roll split screen: the answer fills the left half and the b-roll the right', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+test('ffmpeg cuts away to b-roll split screen: the answer fills the left half, and all of the b-roll is in the right, over a blurred copy of itself', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
   const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
   try {
-    // A red answer, and blue b-roll, square and at another frame rate, as the generator might make it;
-    // then a green answer recorded upright.
+    // A red answer, and blue b-roll, wider than its half, green at its sides, and at another frame
+    // rate, as the generator might make it; then a green answer recorded upright.
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
-    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=512x512:rate=24:duration=3', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=3,drawbox=x=0:w=60:h=ih:color=green:t=fill,drawbox=x=iw-60:w=60:h=ih:color=green:t=fill', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'b.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=660:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
     const out = join(dir, 'joined.mp4');
     const broll = { file: join(dir, 'b.mp4'), start: 1.5, length: 2 };
@@ -538,6 +538,9 @@ test('ffmpeg cuts away to b-roll split screen: the answer fills the left half an
     assert.ok(near(pixel(out, 1, 0.75, 0.5), red));
     assert.ok(near(pixel(out, 2.5, 0.25, 0.5), red), 'the answer on the left');
     assert.ok(near(pixel(out, 2.5, 0.75, 0.5), blue), 'the b-roll on the right');
+    assert.ok(near(pixel(out, 2.5, 0.51, 0.5), green) && near(pixel(out, 2.5, 0.99, 0.5), green), 'all of it, side to side, not cropped to fill its half');
+    const [r, g, b] = pixel(out, 2.5, 0.75, 0.1);
+    assert.ok(r < 40 && g < 40 && b > 100 && b < 220, `above it, its blurred copy: ${[r, g, b]}`);
     assert.ok(near(pixel(out, 4, 0.75, 0.5), red));
     // The upright answer sits between bars, then fills its half.
     assert.ok(near(pixel(out, 6, 0.05, 0.5), black));

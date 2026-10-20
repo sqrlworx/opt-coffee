@@ -1,7 +1,7 @@
 // Video and sound. React Native has no video on the web, so these are the browser's own <video>
 // and <audio> elements, inside React Native views.
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { slot } from './split.js';
+import { cover, slot } from './split.js';
 
 // Browser recordings don't store their duration up front, so the player reports Infinity and can't
 // seek. Seeking far past the end makes the browser find the real duration. `firstFrame` then seeks
@@ -136,6 +136,19 @@ export function layer(name, wide, { shown = true, fit = 'cover', z = 0, extra = 
     ...extra,
   };
 }
+
+// B-roll is shown whole, as the joined video has it (cutawayFilter in src/video.js), on a blurred,
+// darker copy of itself where its shape leaves room: `video` drawn small on `canvas`, which goes,
+// with backStyle, in a layer that keeps its blurred edges in (overflow hidden).
+export function drawBack(canvas, video) {
+  const [w, h] = [Math.round(canvas.clientWidth / 4), Math.round(canvas.clientHeight / 4)];
+  if (!w || !h || !video.videoWidth || video.readyState < 2) return;
+  if (canvas.width !== w || canvas.height !== h) [canvas.width, canvas.height] = [w, h];
+  const [x, y, cw, ch] = cover(video.videoWidth, video.videoHeight, w, h);
+  canvas.getContext('2d').drawImage(video, x, y, cw, ch, 0, 0, w, h);
+}
+
+export const backStyle = { display: 'block', width: '100%', height: '100%', filter: 'blur(12px) brightness(0.9) saturate(0.7)', transform: 'scale(1.1)' };
 
 // Fullscreen for the stage, so the split and the controls stay on. iPhones can only put a video
 // itself fullscreen, without them.
