@@ -29,7 +29,7 @@ export function AnswerBox({ qid, plan }) {
       {/* Takes recorded on this page keep playing from the phone's copy once saved. */}
       <AnswerVideo src={m.local.get(qid) ?? url} captions={transcript?.captions} broll={broll?.status === 'ready' && broll.start != null ? broll : null} videoRef={videoRef} />
       <AnswerTranscript videoRef={videoRef} transcript={transcript} questionId={qid} pick={(q) => q.answerTranscript} onUpdate={(t) => (m.transcripts.set(qid, t), plan.bump())} editable />
-      {brollOn ? <BrollPanel qid={qid} plan={plan} /> : null}
+      {brollOn ? <BrollPanel qid={qid} plan={plan} videoRef={videoRef} /> : null}
     </View>
   );
 }
@@ -60,15 +60,18 @@ export function AnswerActions({ qid, plan }) {
 // Under a recorded answer, the expert makes b-roll to cut away to while they talk, describing it
 // once Make b-roll opens the box for that, or uploads a video of their own from the phone's camera
 // roll. The server makes the shot, which takes a few minutes, or gets the video ready, and places it
-// where it fits what they're saying; the answer's video above then plays with it cut in. An uploaded
-// video can then go full screen. What they've typed is kept while the planner redraws.
-function BrollPanel({ qid, plan }) {
+// where it fits what they're saying; the answer's video above then plays with it cut in. They can
+// then cut in to it where the answer's video (`videoRef`) is instead. An uploaded video can go full
+// screen, and then keep playing past the end of the answer. What they've typed is kept while the
+// planner redraws.
+function BrollPanel({ qid, plan, videoRef }) {
   const { makesBroll, brollModel, fail } = useApp();
   const { m } = plan;
   const broll = m.brolls.get(qid);
   const file = useRef(null);
   useWatchQuestion(qid, broll?.status === 'pending', (q) => q.broll?.status !== 'pending', (q) => m.brolls.get(qid)?.status === 'pending' && plan.setBroll(qid, q.broll));
   const remove = async () => plan.setBroll(qid, (await api('DELETE', `/api/questions/${qid}/broll`)).broll);
+  const patch = (body) => api('PATCH', `/api/questions/${qid}/broll`, body).then((res) => plan.setBroll(qid, res.broll), fail);
   const draft = m.brollDrafts.get(qid); // what's typed in the box, while it's open
   const changing = m.brollChanging.has(qid);
   const model = makesBroll && brollModel ? <Hint>model: {brollModel}</Hint> : null;
@@ -101,7 +104,7 @@ function BrollPanel({ qid, plan }) {
           if (picked) plan.uploadBroll(qid, picked);
         }}
       />
-      {makesBroll ? model : <Hint>{"A video of your own, shorter than your answer. It's cut in where you talk about it, and while it plays your answer moves to the top half of the screen."}</Hint>}
+      {makesBroll ? model : <Hint>{"A video of your own. It's cut in where you talk about it, and while it plays your answer moves to the top half of the screen; then you can choose where."}</Hint>}
     </View>
   );
 
@@ -175,18 +178,41 @@ function BrollPanel({ qid, plan }) {
       </>
     );
   } else {
+    const chosen = broll.chosen != null;
     body = (
       <>
         {head}
         {broll.start != null ? (
           <Small style={{ color: color.muted }}>
-            Cut in {broll.full ? 'full screen ' : ''}at {fmtDuration(broll.start)}–{fmtDuration(broll.start + broll.length)}, where it fits what you're saying. Play your answer to see it.
+            Cut in {broll.full ? 'full screen ' : ''}at {fmtDuration(broll.start)}–{fmtDuration(broll.start + broll.length)}, {chosen ? 'where you chose' : "where it fits what you're saying"}. Play your answer to see it.
           </Small>
+        ) : chosen ? (
+          <Warn>There's no room for b-roll after {fmtDuration(broll.chosen)}, where you chose. Pick an earlier moment, or let the moderator choose.</Warn>
         ) : (
           <Warn>This answer is too short for its b-roll, so it’s left out. Re-record a longer answer{broll.upload ? '' : ', or make new b-roll to fit this one'}.</Warn>
         )}
-        {/* An uploaded video can fill the screen instead; it's placed again to suit. */}
-        {broll.upload ? <Checkbox checked={broll.full} onChange={(full) => api('PATCH', `/api/questions/${qid}/broll`, { full }).then((res) => plan.setBroll(qid, res.broll), fail)} label="Full screen" /> : null}
+        {/* Not all of a video they uploaded plays when it's longer than the time left in the answer. */}
+        {broll.upload && broll.start != null && broll.clipLength > broll.length + 0.5 ? (
+          <Small style={{ color: color.muted }}>
+            Only {fmtDuration(broll.length)} of your {fmtDuration(broll.clipLength)} video fits before your answer ends.
+          </Small>
+        ) : null}
+        {/* Where it cuts in: where the answer's video is, which they play, scrub or tap the transcript to. */}
+        <View style={{ gap: 6 }}>
+          <Row wrap gap={8}>
+            <Button kind="ring" small title="Cut in here" onPress={() => patch({ start: Math.round(videoRef.current.currentTime * 1000) / 1000 })} />
+            {chosen ? <Button kind="link" small title="Let the moderator choose" onPress={() => patch({ start: null })} /> : null}
+          </Row>
+          <Hint>Play your answer, or tap a line of its transcript, to where the b-roll should start, then tap Cut in here.</Hint>
+        </View>
+        {/* An uploaded video can fill the screen instead, and then keep playing past the end of the answer; it's placed again to suit. */}
+        {broll.upload ? <Checkbox checked={broll.full} onChange={(full) => patch({ full })} label="Full screen" /> : null}
+        {broll.upload && broll.full ? (
+          <View style={{ gap: 2 }}>
+            <Checkbox checked={broll.pastEnd} onChange={(pastEnd) => patch({ pastEnd })} label="Keep playing past the end of my answer" />
+            <Hint>Your answer gets longer, silent under your video.</Hint>
+          </View>
+        ) : null}
         {/* What was filmed, which may be a scene standing for the idea they described. */}
         {broll.shot && broll.shot !== broll.prompt ? (
           <Disclosure title={<Small style={{ color: color.muted }}>What was filmed</Small>}>

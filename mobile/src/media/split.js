@@ -65,6 +65,10 @@ export function moment(parts, t, started = true) {
 // bottom half, or full screen, the b-roll over all of it.
 export const brollAt = (broll, t) => Boolean(broll?.video && broll.start != null && t >= broll.start && t < broll.start + broll.length);
 
+// How long one answer's own video plays for with its b-roll, the video being `length` seconds long:
+// to where full-screen b-roll that runs past the end of the answer ends, if it does.
+export const playLength = (broll, length) => (broll?.video && broll.start != null && length && broll.start + broll.length > length + 0.05 ? broll.start + broll.length : length);
+
 // The captions over the joined video, [start, end, text] over all of it: each answer's question and
 // transcript, shifted by where its answer starts, except where they're burned into the picture.
 export function joinedCues(parts) {

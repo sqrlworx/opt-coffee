@@ -286,14 +286,29 @@ function spoken(text, at) {
 }
 const kitchen = spoken('So the first thing is to plan your week. Then, when you cook, start with fresh vegetables and chop them all before you turn on the stove. That saves a lot of time. Finally, clean up as you go.', 3);
 
-test('b-roll is shorter than the answer, and starts after it does and ends before it does', () => {
+test('all of the b-roll plays, if the answer is as long, starting after it does and ending before it does where there is room', () => {
   assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 23 }), { length: 5, from: 5.5, to: 16.5 });
-  // A short answer gets a shorter cut, with less room either side.
-  assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 8 }), { length: 3, from: 4, to: 4 });
-  assert.deepEqual(brollRange({ clip: 5, answerStart: null, end: 6 }), { length: 3.6, from: 1.2, to: 1.2 });
+  // Less room either side as the answer gets shorter, and none once it's as short as the clip.
+  assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 10 }), { length: 5, from: 4, to: 4 });
+  assert.deepEqual(brollRange({ clip: 5, answerStart: 3, end: 8 }), { length: 5, from: 3, to: 3 });
+  // Shorter than the clip, the answer is all b-roll.
+  assert.deepEqual(brollRange({ clip: 5, answerStart: null, end: 4 }), { length: 4, from: 0, to: 0 });
   // Too short to cut away at all.
-  assert.equal(brollRange({ clip: 5, answerStart: 3, end: 5.4 }), null);
-  assert.equal(placeBroll({ description: 'anything', clip: 5, answerStart: 3, end: 5.4, words: null }), null);
+  assert.equal(brollRange({ clip: 5, answerStart: 3, end: 4.4 }), null);
+  assert.equal(placeBroll({ description: 'anything', clip: 5, answerStart: 3, end: 4.4, words: null }), null);
+  // Let run past the end of the answer, all of the clip plays: one longer than the answer from as early as it can.
+  assert.deepEqual(brollRange({ clip: 8, answerStart: 2, end: 20, pastEnd: true }), { length: 8, from: 4.5, to: 10.5 });
+  assert.deepEqual(brollRange({ clip: 30, answerStart: 2, end: 20, pastEnd: true }), { length: 30, from: 2, to: 2 });
+});
+
+test('b-roll goes where the expert chose, shortened to end before the answer does unless it may run past the end', () => {
+  const at = (start, more = {}) => placeBroll({ description: 'anything', clip: 6, answerStart: 2, end: 20, words: kitchen, start, ...more });
+  assert.deepEqual(at(10), { start: 10, length: 6 });
+  assert.deepEqual(at(1), { start: 2, length: 6 }); // not in the question
+  assert.deepEqual(at(16), { start: 16, length: 2.5 }); // stopping a moment before the answer ends
+  assert.equal(at(17.5), null); // too little left
+  assert.deepEqual(at(18, { clip: 8, pastEnd: true }), { start: 18, length: 8 });
+  assert.equal(at(19, { clip: 8, pastEnd: true }), null); // it still cuts in while the expert talks
 });
 
 test('b-roll goes where the expert talks about what it shows, on a phrase starting', () => {
@@ -339,4 +354,7 @@ test('The LLM picks where b-roll goes when configured, kept where it can go, wit
   reply = () => ({ start: 7.2 });
   await moderator.placeBroll({ ...input, full: true });
   assert.equal(calls.at(-1).full, true);
+  // Where the expert chose isn't the LLM's to change.
+  assert.deepEqual(await moderator.placeBroll({ ...input, start: 12 }), { start: 12, length: 4 });
+  assert.equal(calls.length, 4);
 });

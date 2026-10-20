@@ -578,6 +578,42 @@ test('ffmpeg cuts away to full-screen b-roll: all of it shows, over a blurred co
   }
 });
 
+test('ffmpeg lengthens a take whose full-screen b-roll runs past its end: it ends on the b-roll, in silence, and the answer leaves the corner as it ends', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_past_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const seconds = (file, stream) => Number(execFileSync('ffprobe', ['-v', 'error', '-select_streams', stream, '-show_entries', 'stream=duration', '-of', 'csv=p=0', file]).toString().trim());
+  // The loudest `file` is from `from` for `length` seconds, in dB.
+  const loudest = (file, from, length) => {
+    const { stderr } = spawnSync('ffmpeg', ['-hide_banner', '-ss', String(from), '-t', String(length), '-i', file, '-vn', '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8' });
+    const [, db] = /max_volume: (\S+) dB/.exec(stderr);
+    return db === '-inf' ? -Infinity : Number(db);
+  };
+  try {
+    // A red answer of 5 seconds, 4 seconds of blue b-roll from 3 seconds in, then a green answer.
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1280x720:rate=24:duration=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=660:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
+    const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
+    const broll = { file: join(dir, 'b.mp4'), start: 3, length: 4, full: true, pastEnd: true };
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }], out, phone);
+    assert.ok(Math.abs(durations[0] - 7) < 0.1, `${durations[0]}s, to where the b-roll ends`);
+    const [red, blue, green] = [[255, 0, 0], [0, 0, 255], [0, 128, 0]];
+    const [x, y, w, h] = pipBox(1280).map((n, i) => n / (i % 2 ? 720 : 1280));
+    assert.ok(near(pixel(out, 4, x + w / 2, y + h / 2), red), 'the answer in the corner while it lasts');
+    assert.ok(near(pixel(out, 6, 0.5, 0.5), blue) && near(pixel(out, 6, x + w / 2, y + h / 2), blue), 'then the b-roll alone');
+    assert.ok(near(pixel(out, 6.9, 0.5, 0.5), blue), 'to its end, without cutting back');
+    assert.ok(near(pixel(out, 7.5, 0.5, 0.5), green), 'the next answer starts after it');
+    assert.ok(near(pixel(phone, 6, 0.5, 0.5), blue));
+    assert.ok(Math.abs(seconds(out, 'a') - 9) < 0.15, `sound under it too: ${seconds(out, 'a')}s`);
+    assert.ok(loudest(out, 4, 0.8) > -30 && loudest(out, 5.3, 1.5) < -60, 'silent once the answer has ended');
+    // Without pastEnd, b-roll that fits isn't lengthened.
+    const fits = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { ...broll, start: 1, length: 2 } }], join(dir, 'fits.mp4'));
+    assert.ok(Math.abs(fits.durations[0] - 5) < 0.1, `${fits.durations[0]}s`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ffmpeg makes the phone's copy upright, each take filling it, with full-screen b-roll but not split-screen b-roll", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_phone_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);

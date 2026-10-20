@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { api, sendFile } from '../api.js';
 import { useApp } from '../context.js';
-import { fmtDate } from '../format.js';
+import { fmtDate, fmtDuration } from '../format.js';
 import { useBump, useLeaveGuard, useLoad } from '../hooks.js';
 import { AnswerActions, AnswerBox } from '../manage/AnswerBox.jsx';
 import { createSession } from '../manage/session.js';
@@ -227,7 +227,7 @@ function Planner({ data, reload }) {
         s.brollDrafts.delete(qid);
         s.brollChanging.delete(qid);
         s.brolls.set(qid, res.broll);
-        if (res.trimmed) toast(`Your video is ${Math.round(res.trimmed.from)} seconds long, and this answer has room for ${Math.round(res.trimmed.to)} seconds of b-roll, so its start is used.`);
+        if (res.trimmed) toast(`Your video is ${fmtDuration(res.trimmed.from)} long, and b-roll can be up to ${fmtDuration(res.trimmed.to)}, so its start is used.`);
       } catch (err) {
         if (err.status === 401) requireLogin();
         else if (err.name !== 'AbortError') toast(`Couldn't add your video: ${err.message}`, 'error');

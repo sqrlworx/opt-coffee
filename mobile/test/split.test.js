@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { pipBox, PIP as SERVER_PIP } from '../../src/video.js';
-import { brollAt, cover, cutCue, FOCUS, focusPosition, joinedCues, joinedParts, moment, PIP, pipRect, slot } from '../src/media/split.js';
+import { brollAt, cover, cutCue, FOCUS, focusPosition, joinedCues, joinedParts, moment, PIP, pipRect, playLength, slot } from '../src/media/split.js';
 
 const asked = { id: 1, answerStart: 3, questionCues: [[0, 2.5, 'How do I start?']], transcript: { status: 'ready', cues: [[3.2, 6, 'Start small.']] } };
 const withBroll = { id: 2, answerStart: 4, broll: { video: '/media/b.mp4', start: 6, length: 3 }, transcript: { status: 'ready', cues: [[6.5, 8, 'Like this.']] } };
@@ -62,6 +62,13 @@ test('an answer’s own video splits for its b-roll the same way', () => {
   assert.equal(brollAt(withBroll.broll, 7), true);
   assert.equal(brollAt(withBroll.broll, 9), false);
   assert.equal(brollAt({ ...withBroll.broll, start: null }, 7), false, 'not placed (the take is too short for it)');
+});
+
+test('an answer’s own video plays on to the end of b-roll that runs past the end of the answer', () => {
+  assert.equal(playLength(withBroll.broll, 12), 12, 'b-roll within the answer');
+  assert.equal(playLength({ ...withBroll.broll, length: 8 }, 12), 14, 'past its end');
+  assert.equal(playLength({ ...withBroll.broll, start: null, length: 8 }, 12), 12, 'not placed');
+  assert.equal(playLength(null, 12), 12);
 });
 
 test('captions burned into the picture are drawn while b-roll covers them', () => {

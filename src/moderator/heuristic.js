@@ -350,7 +350,6 @@ export function summarizeAnswer({ question, answer }) {
 
 // ---------- b-roll ----------
 
-const BROLL_SHARE = 0.6; // of an answer, at most, is b-roll
 const MIN_BROLL = 1.5; // seconds; a cutaway shorter than this isn't worth it
 const LEAD = 2.5; // seconds the expert is on camera, at most, before cutting away
 const TAIL = 1.5; // and after cutting back, before the answer ends
@@ -358,20 +357,36 @@ const PHRASE_GAP = 0.25; // seconds of silence before a word that starts a phras
 const SENTENCE_GAP = 0.6;
 
 /**
- * Where b-roll can go in an answer, and for how long. The expert is seen first and last: the
- * b-roll starts a little after the answer does and ends a little before, and it's no more than
- * 60% of the answer (so always shorter than it). The take starts with the question, up to
+ * Where b-roll can go in an answer, and for how long: all of it, unless it's longer than the
+ * answer. The expert is seen first and last, as far as there's room: the b-roll starts a little
+ * after the answer does and ends a little before. With `pastEnd` (full-screen b-roll the expert
+ * lets run past the end of their answer), it's all of the clip, and one longer than the answer
+ * starts as early as it can and runs on past the end. The take starts with the question, up to
  * `answerStart`; `end` is how long the take is, and `clip` how long the b-roll is.
  * @returns {{length: number, from: number, to: number} | null}  the length it plays for, and the
  *   earliest and latest it can start; null when the answer is too short for any
  */
-export function brollRange({ clip, answerStart, end }) {
+export function brollRange({ clip, answerStart, end, pastEnd = false }) {
   const from = answerStart ?? 0;
   const answer = end - from;
-  const length = Math.min(clip, answer * BROLL_SHARE);
-  if (!(length >= MIN_BROLL)) return null;
-  const spare = answer - length;
-  return { length: round3(length), from: round3(from + Math.min(LEAD, spare / 2)), to: round3(end - length - Math.min(TAIL, spare / 2)) };
+  const length = pastEnd ? clip : Math.min(clip, answer);
+  if (!(length >= MIN_BROLL && answer > 0)) return null;
+  const spare = Math.max(0, answer - length);
+  const earliest = from + Math.min(LEAD, spare / 2);
+  return { length: round3(length), from: round3(earliest), to: round3(Math.max(earliest, end - length - Math.min(TAIL, spare / 2))) };
+}
+
+/**
+ * B-roll cut in where the expert chose, `start` seconds into the take (not before the answer
+ * starts): from there until a little before the answer ends, or all of it if it's shorter; with
+ * `pastEnd`, all of it, past the end of the answer if need be. Null when it would cut in less than
+ * MIN_BROLL before the answer ends, or play for less than that.
+ * @returns {{start: number, length: number} | null}
+ */
+function placeAt({ start, clip, answerStart, end, pastEnd = false }) {
+  const at = Math.max(answerStart ?? 0, start);
+  const length = pastEnd ? clip : Math.min(clip, end - at - TAIL);
+  return end - at >= MIN_BROLL && length >= MIN_BROLL ? { start: round3(at), length: round3(length) } : null;
 }
 
 /**
@@ -379,12 +394,14 @@ export function brollRange({ clip, answerStart, end }) {
  * it's described with), on a sentence or phrase starting. A word said just before the cut counts
  * nearly as much as one said during it, and less the later it comes. Without a transcript, or when
  * nothing said matches, it goes about a third of the way into the answer, at a phrase if there is
- * one there. See brollRange for how long it plays and where it can go.
- * @param {{description: string, clip: number, answerStart: number|null, end: number, words?: [number, number, string][] | null}} input
- *   `words` are the take's, from speech-to-text, timed from its start
+ * one there. See brollRange for how long it plays and where it can go. With a `start`, it goes
+ * where the expert chose instead (see placeAt).
+ * @param {{description: string, clip: number, answerStart: number|null, end: number, words?: [number, number, string][] | null,
+ *   start?: number|null, pastEnd?: boolean}} input  `words` are the take's, from speech-to-text, timed from its start
  * @returns {{start: number, length: number} | null}  null when the answer is too short for b-roll
  */
 export function placeBroll(input) {
+  if (input.start != null) return placeAt(input);
   const range = brollRange(input);
   if (!range) return null;
   const { length, from, to } = range;

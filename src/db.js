@@ -61,15 +61,19 @@ CREATE TABLE IF NOT EXISTS questions (
   broll_status   TEXT,                      -- making it (or getting an upload ready) and placing it in the take: 'pending' | 'ready' | 'failed'; NULL = no b-roll
   broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
   broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
-  broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and shorter than the answer)
+  broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and within the answer unless it runs past its end)
   broll_full     INTEGER NOT NULL DEFAULT 0, -- 1: full screen, for a clip the expert uploaded: all of it in the page's frame, with the expert in the corner, and in the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
+  broll_past_end INTEGER NOT NULL DEFAULT 0, -- 1: full screen, it plays to its end even past the end of the answer, which gets longer; 0: it stops a little before the answer ends
+  broll_chosen   REAL,                      -- seconds into answer_video where the expert chose to cut away to it; NULL = where the moderator places it
+  broll_seconds  REAL,                      -- how long the clip is, measured when it was placed
   published_position     INTEGER,           -- snapshot taken at publish time: what readers see
   published_answer_video TEXT,
   published_answer_start REAL,
-  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start, length and whether it's full screen
+  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start, length, whether it's full screen and runs past the end
   published_broll_start  REAL,
   published_broll_length REAL,
-  published_broll_full   INTEGER
+  published_broll_full   INTEGER,
+  published_broll_past_end INTEGER
 );
 CREATE INDEX IF NOT EXISTS questions_by_oh ON questions(office_hour_id);
 
@@ -204,6 +208,15 @@ function migrate(db) {
     db.exec(`
       ALTER TABLE questions ADD COLUMN broll_full INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE questions ADD COLUMN published_broll_full INTEGER;
+    `);
+  }
+  if (!columns.has('broll_chosen')) {
+    // Experts can choose where b-roll cuts in, and let full-screen b-roll run past the end of the answer.
+    db.exec(`
+      ALTER TABLE questions ADD COLUMN broll_past_end INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE questions ADD COLUMN broll_chosen REAL;
+      ALTER TABLE questions ADD COLUMN broll_seconds REAL;
+      ALTER TABLE questions ADD COLUMN published_broll_past_end INTEGER;
     `);
   }
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));

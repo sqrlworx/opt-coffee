@@ -437,15 +437,17 @@ textarea { resize: vertical; }
 .broll-form { display: grid; gap: 8px; }
 .broll-shot summary { cursor: pointer; color: var(--muted); }
 .broll-shot p { margin: 4px 0 0; color: var(--muted); }
-.broll-form .hint { margin: 0; }
+.broll .hint { margin: 0; }
 /* An answer with its b-roll cut in (brollView). Split screen: the answer fills the left half (drawn
    from it) and all of the b-roll is in the right half, fading in together over the answer. Full
    screen: all of the b-roll is in the frame, and the answer shrinks to a picture at the top left,
-   framed like the asker's in the joined video. Either way the b-roll sits on a blurred copy of
-   itself (drawn from it) where its shape leaves room. */
+   framed like the asker's in the joined video, until the answer ends if the b-roll plays on past it
+   (is-over). Either way the b-roll sits on a blurred copy of itself (drawn from it) where its shape
+   leaves room. */
 .broll-view.has-broll { position: relative; container-type: inline-size; aspect-ratio: 16 / 9; background: #111; border-radius: var(--radius-sm); overflow: hidden; user-select: none; }
 .video-answer .broll-view.has-broll { max-width: calc(260px * 16 / 9); }
-.broll-view.has-broll .answer-video { position: absolute; z-index: 1; top: 0; left: 0; width: 100%; height: 100%; max-height: none; aspect-ratio: auto; border-radius: 0; cursor: pointer; transition: top 0.3s, left 0.3s, width 0.3s, height 0.3s, border-radius 0.3s, box-shadow 0.3s; }
+.broll-view.has-broll .answer-video { position: absolute; z-index: 1; top: 0; left: 0; width: 100%; height: 100%; max-height: none; aspect-ratio: auto; border-radius: 0; cursor: pointer; transition: top 0.3s, left 0.3s, width 0.3s, height 0.3s, border-radius 0.3s, box-shadow 0.3s, opacity 0.3s; }
+.broll-view.is-over .answer-video { opacity: 0; }
 .broll-view.is-full.is-cut .answer-video { top: 3cqw; left: 3cqw; width: 17.6cqw; height: 13.2cqw; object-fit: cover; border-radius: 0.96cqw; box-shadow: 0 0.5cqw 1.9cqw rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(255, 255, 255, 0.85); }
 .broll-view.is-full.is-cut .answer-video.upright { object-fit: contain; } /* an upright take whole, between bars, as the joined video has it */
 .broll-half, .broll-back, .broll-clip { position: absolute; z-index: 2; top: 0; width: 50%; height: 100%; opacity: 0; transition: opacity 0.3s; }

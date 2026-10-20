@@ -5,6 +5,7 @@ import { rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { mediaDuration } from './broll/index.js';
 import { takeCaptions } from './speech/captions.js';
 
 const run = promisify(execFile);
@@ -68,12 +69,22 @@ export function pipBox(width) {
  * None of the b-roll is cropped off: it's as big as fits in its place, over a blurred, darker copy of
  * itself filling the rest of it, as src/finish sets a take of another shape (fit_filter in
  * finish.py). Its output, [`out`], is timed like [`pic`].
+ *
+ * B-roll that runs past `until`, the end of the take (full screen, which the expert let run past the
+ * end of their answer), doesn't cut back: the part ends on it. [`pic`] must then be lengthened to
+ * `start + length`, by repeating its last frame, and in the corner, the take's picture fades out
+ * at `until`.
  */
-export function cutawayFilter({ layout = 'corner', width, height, start, length, pic = 'pic', half = 'half', broll = 'broll', out = 'cut' }) {
+export function cutawayFilter({ layout = 'corner', width, height, start, length, until = Infinity, pic = 'pic', half = 'half', broll = 'broll', out = 'cut' }) {
   const t = (secs) => String(Math.round(secs * 1000) / 1000);
-  const fade = Math.min(CUT_FADE, length / 2);
+  // Fading in at `start`, and out again `shown` seconds later unless it doesn't cut back.
+  const fadesFor = (shown, back = true) => {
+    const fade = Math.min(CUT_FADE, shown / 2);
+    return `fade=t=in:st=${t(start)}:d=${t(fade)}:alpha=1${back ? `,fade=t=out:st=${t(start + shown - fade)}:d=${t(fade)}:alpha=1` : ''}`;
+  };
+  const over = start + length > until;
   const at = `setpts=PTS-STARTPTS+${t(start)}/TB`;
-  const fades = `fade=t=in:st=${t(start)}:d=${t(fade)}:alpha=1,fade=t=out:st=${t(start + length - fade)}:d=${t(fade)}:alpha=1`;
+  const fades = fadesFor(length, !over);
   // All of the b-roll in `fw` x `fh` (all of its `w` x `h` place, unless less of that is seen), over
   // the blurred copy filling the place.
   const whole = (w, h, label, [fw, fh] = [w, h]) =>
@@ -101,12 +112,13 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
   const blur = Math.max(1, Math.round(PIP.blur * width));
   // Rounded corners, smoothed over a pixel, as the alpha of an RGBA picture.
   const round = (r) => `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*clip(${r}+0.5-hypot(max(abs(X+0.5-W/2)-(W/2-${r}),0),max(abs(Y+0.5-H/2)-(H/2-${r}),0)),0,1)'`;
+  const shown = over ? Math.max(2 * CUT_FADE, until - start) : length; // the take's picture, until the take ends
   return [
     `[${pic}]split=2[cut_base][cut_face]`,
     `${whole(width, height, 'cut')},format=yuva420p,${fades}[cut_broll]`,
-    `[cut_face]trim=start=${t(start)}:duration=${t(length)},${at},crop=min(iw\\,ih*4/3):min(ih\\,iw*3/4),scale=${pw}:${ph}:flags=lanczos,setsar=1,format=rgba,${round(radius)}[cut_pic]`,
-    `color=white:s=${cw}x${ch}:r=30:d=${t(length)},${at},format=rgba,${round(radius + ring)}[cut_card]`,
-    `[cut_card][cut_pic]overlay=${ring}:${ring}:format=auto,${fades}[cut_framed]`,
+    `[cut_face]trim=start=${t(start)}:duration=${t(shown)},${at},crop=min(iw\\,ih*4/3):min(ih\\,iw*3/4),scale=${pw}:${ph}:flags=lanczos,setsar=1,format=rgba,${round(radius)}[cut_pic]`,
+    `color=white:s=${cw}x${ch}:r=30:d=${t(shown)},${at},format=rgba,${round(radius + ring)}[cut_card]`,
+    `[cut_card][cut_pic]overlay=${ring}:${ring}:format=auto,${fadesFor(shown)}[cut_framed]`,
     `[cut_framed]split=2[cut_top][cut_shade]`,
     `[cut_shade]colorchannelmixer=rr=0:gg=0:bb=0:aa=0.45,pad=${cw + 6 * blur}:${ch + 6 * blur}:${3 * blur}:${3 * blur}:color=black@0,gblur=sigma=${blur}[cut_shadow]`,
     `[cut_base][cut_broll]overlay=0:0:eof_action=pass[cut_b]`,
@@ -167,22 +179,27 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
       const silent = !(await probe(file, 'stream=codec_type')).includes('audio');
       const fit = `scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:-1:-1,setsar=1,fps=30,format=yuv420p`;
       const fill = ([w, h], down = 0.5) => `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h}:(iw-ow)/2:(ih-oh)*${down},setsar=1,fps=30,format=yuv420p`;
-      const cut = (layout, [width, height], pic, out) => cutawayFilter({ layout, width, height, start: broll.start, length: broll.length, pic, broll: '1:v', out });
+      const cut = (layout, [width, height], pic, out) => cutawayFilter({ layout, width, height, start: broll.start, length: broll.length, until: broll.until, pic, broll: '1:v', out });
+      // B-roll that runs past the end of the take lengthens it to where the b-roll ends: its last
+      // frame held, under the b-roll, and silence.
+      const end = broll && broll.start + broll.length > broll.until ? broll.start + broll.length : null;
+      const hold = end ? `,tpad=stop_mode=clone:stop_duration=${end - broll.until + 1}` : '';
       // Split-screen b-roll has the take beside it on the page, filling the left half; full-screen
       // b-roll fills the phone's copy too.
       const split = broll && !broll.full;
       const copies = ['desktop', ...(phone ? ['phone'] : []), ...(split ? ['face'] : [])];
       const graph = [
         `[0:v]split=${copies.length}${copies.map((c) => `[${c}]`).join('')}`,
-        `[desktop]${fit}${broll ? `[pic];${cut(split ? 'split' : 'corner', [WIDTH, HEIGHT], 'pic', 'v')}` : '[v]'}`,
+        `[desktop]${fit}${hold}${broll ? `[pic];${cut(split ? 'split' : 'corner', [WIDTH, HEIGHT], 'pic', 'v')}` : '[v]'}`,
         ...(split ? [`[face]${fill([WIDTH / 2, HEIGHT], FOCUS)}[half]`] : []),
-        ...(phone ? [`[phone]${fill(phone)}${broll?.full ? `[phonepic];${cut('alone', phone, 'phonepic', 'vm')}` : '[vm]'}`] : []),
+        ...(phone ? [`[phone]${fill(phone)}${hold}${broll?.full ? `[phonepic];${cut('alone', phone, 'phonepic', 'vm')}` : '[vm]'}`] : []),
       ];
       const inputs = ['-i', file, ...(broll ? ['-i', broll.file] : [])];
       const output = (video, to) => [
         '-map', video, '-map', silent ? `${inputs.length / 2}:a` : '0:a:0',
         ...(silent ? ['-shortest'] : []),
-        '-af', 'aresample=48000:async=1',
+        '-af', `aresample=48000:async=1${end ? ',apad' : ''}`,
+        ...(end ? ['-t', String(end)] : []),
         '-ac', '2',
         '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
         '-c:a', 'aac', '-b:a', '128k',
@@ -244,16 +261,18 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
     try {
       // The b-roll is cut in over the finished picture, as input 2 (see src/finish/finish.py): split
       // screen beside the take, which the finisher fills the left half with ([half]), or full screen,
-      // also in the phone's copy ([phonepic] to [phonecut]).
-      const cutaway = ({ file, start, length, full = false }) => {
+      // also in the phone's copy ([phonepic] to [phonecut]). The finisher lengthens a take whose
+      // b-roll runs past its end (`past_end`).
+      const cutaway = ({ file, start, length, full = false, until }) => {
         const layout = full ? 'corner' : 'split';
         return {
           input: file,
           layout,
-          filter: cutawayFilter({ layout, width: FINISHED[0], height: FINISHED[1], start, length, broll: '2:v' }),
-          mobile_filter: full && phone ? cutawayFilter({ layout: 'alone', width: phone[0], height: phone[1], start, length, pic: 'phonepic', broll: '2:v', out: 'phonecut' }) : null,
+          filter: cutawayFilter({ layout, width: FINISHED[0], height: FINISHED[1], start, length, until, broll: '2:v' }),
+          mobile_filter: full && phone ? cutawayFilter({ layout: 'alone', width: phone[0], height: phone[1], start, length, until, pic: 'phonepic', broll: '2:v', out: 'phonecut' }) : null,
           start,
           length,
+          past_end: start + length > until,
         };
       };
       const report = await finisher.finish(
@@ -285,8 +304,9 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
      * Writes the takes, in order, into one MP4 at `out`, and the phone's copy at `mobileOut` if
      * given. A take is a file name, or {file, answerStart, cues, words, broll, askerVideo} with what
      * finishing uses: where the answer starts after the question, and the transcript's cues and word
-     * timings; b-roll to cut away to, {file, start, length, full}, split screen unless it's `full`
-     * screen; and the asker's video, to find their face.
+     * timings; b-roll to cut away to, {file, start, length, full, pastEnd}, split screen unless it's
+     * `full` screen, and with `pastEnd`, lengthening the take if it runs past its end; and the
+     * asker's video, to find their face.
      * @returns {Promise<{durations: number[], captioned: boolean[], mobile: boolean, focus: (number|null)[][]}>}
      *   how long each part is in the result, in seconds, whether its captions are burned in, whether
      *   the phone's copy was written (the same parts, so the same durations), and for each part,
@@ -304,6 +324,9 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
       };
       try {
         takes = takes.map((t) => (typeof t === 'string' ? { file: t } : t));
+        // B-roll allowed past the end of its take lengthens the take if it does run past: by how
+        // much depends on how long the take is.
+        for (const [i, t] of takes.entries()) if (t.broll?.pastEnd) takes[i] = { ...t, broll: { ...t.broll, until: await mediaDuration(t.file) } };
         const aspect = mobileOut ? await phoneAspect(takes) : null;
         const finished = finisher ? await finish(takes, dir, aspect && phoneSize(1080, aspect)) : null;
         const { parts, mobile, focus = takes.map(() => [null, null]) } = finished ?? (await reencode(takes, dir, aspect && phoneSize(720, aspect)));
@@ -409,7 +432,8 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
     const answers = db
       .prepare(
         `SELECT id, body, asked_with AS askedWith, audio, asker_video AS askerVideo, published_answer_video AS video, published_answer_start AS answerStart,
-                published_broll AS broll, published_broll_start AS brollStart, published_broll_length AS brollLength, published_broll_full AS brollFull
+                published_broll AS broll, published_broll_start AS brollStart, published_broll_length AS brollLength, published_broll_full AS brollFull,
+                published_broll_past_end AS brollPastEnd
          FROM questions WHERE office_hour_id = ? AND published_position IS NOT NULL ORDER BY published_position`,
       )
       .all(officeHourId);
@@ -423,7 +447,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
       const takes = answers.map((a) => {
         const take = texts.get(a.video);
         const asked = { body: a.body, ...(a.askedWith === 'audio' ? texts.get(a.audio) : null) };
-        const broll = a.broll ? { file: join(mediaDir, a.broll), start: a.brollStart, length: a.brollLength, full: Boolean(a.brollFull) } : null;
+        const broll = a.broll ? { file: join(mediaDir, a.broll), start: a.brollStart, length: a.brollLength, full: Boolean(a.brollFull), pastEnd: Boolean(a.brollPastEnd) } : null;
         const askerVideo = a.askerVideo && join(mediaDir, a.askerVideo);
         return { file: join(mediaDir, a.video), answerStart: a.answerStart, broll, askerVideo, ...(take && takeCaptions(asked, take, a.answerStart)) };
       });

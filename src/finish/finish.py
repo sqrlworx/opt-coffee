@@ -31,7 +31,7 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
                 "asker_video": "media/q.mp4" or null,
                 "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
                 "cutaway": {"input": "media/b.mp4", "layout": "split" or "corner", "filter": "...", "mobile_filter": "..." or null,
-                            "start": 2.5, "length": 6} or null}],
+                            "start": 2.5, "length": 6, "past_end": false} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -48,7 +48,8 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
   filling the left half, which is made here, framed to the expert's face (see side_focus in
   captions.py). Full screen ("corner") puts it in the frame with the take in the corner, and in the
   phone's copy too, with `mobile_filter`, from [phonepic], that copy's picture, and [2:v] to
-  [phonecut].
+  [phonecut]. With `past_end`, full-screen b-roll that runs past the end of the take, the take is
+  lengthened to where it ends: its last frame held (under the b-roll), and silence.
 
 With a `mobile_output`, the take is also written there for the mobile app, in the same pass: the
 same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
@@ -300,6 +301,14 @@ def placement(size: tuple[int, int], out: tuple[int, int] = (OUT_W, OUT_H), fill
     return s, (out[0] - w * s) / 2, (out[1] - h * s) / 2
 
 
+def overrun(take: dict, frames: int) -> float:
+    """Seconds the take is lengthened by, for b-roll that runs past its end."""
+    cutaway = take.get("cutaway")
+    if not cutaway or not cutaway.get("past_end"):
+        return 0.0
+    return max(0.0, cutaway["start"] + cutaway["length"] - frames / FPS)
+
+
 def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, mobile_ass: Path | None, fonts: Path, tmp: Path) -> None:
     """Encodes the take to `output`, and to `mobile_output` if it has one: upright, with full-screen
     b-roll but not split-screen b-roll, and with `mobile_ass`, its captions placed for the phone. One
@@ -318,7 +327,9 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
     split = bool(cutaway) and cutaway.get("layout") == "split"
     copies = ["desktop", *(["phone"] if phone else []), *(["face"] if split else [])]
     labels = "".join(f"[{c}]" for c in copies)
-    picture = f"[0:v]setpts=N/{FPS}/TB" + (f",split={len(copies)}{labels};[desktop]" if len(copies) > 1 else ",") + f"{fit_filter(info['size'])},{sharpen}"
+    extra = overrun(take, info["frames"])
+    hold = f",tpad=stop_mode=clone:stop_duration={extra:.3f}" if extra else ""
+    picture = f"[0:v]setpts=N/{FPS}/TB{hold}" + (f",split={len(copies)}{labels};[desktop]" if len(copies) > 1 else ",") + f"{fit_filter(info['size'])},{sharpen}"
     graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain},{burn(ass)}[v]" if cutaway else f"{picture},{grain},{burn(ass)}[v]"
     if split:
         # The take beside its split-screen b-roll, filling the left half, framed to the expert's face
@@ -387,6 +398,7 @@ def main() -> None:
             # Sound and captions here while the pieces render.
             samples = frames * SR // FPS
             dialogue, clean, audio_report = sound.finish(read_audio(take["input"], info["audio"], samples), take.get("answer_start"), voice)
+            dialogue = np.pad(dialogue, ((0, round(overrun(take, frames) * SR)), (0, 0)))  # silence under b-roll past the end
             audio_path = tmp / f"take{i}.f32"
             np.ascontiguousarray(dialogue, np.float32).tofile(audio_path)
             # The expert's face where the phone's copy has it, for where its half crops it.
