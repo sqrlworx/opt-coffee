@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS questions (
   broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
   broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
   broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and shorter than the answer)
-  broll_full     INTEGER NOT NULL DEFAULT 0, -- 1: full screen, for a clip the expert uploaded: it fills the page's frame with the expert in the corner, and the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
+  broll_full     INTEGER NOT NULL DEFAULT 0, -- 1: full screen, for a clip the expert uploaded: all of it in the page's frame, with the expert in the corner, and in the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
   published_position     INTEGER,           -- snapshot taken at publish time: what readers see
   published_answer_video TEXT,
   published_answer_start REAL,

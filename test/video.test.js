@@ -548,20 +548,24 @@ test('ffmpeg cuts away to b-roll split screen: the answer fills the left half an
   }
 });
 
-test('ffmpeg cuts away to full-screen b-roll: it fills the frame, and the answer moves to the top left', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+test('ffmpeg cuts away to full-screen b-roll: all of it shows, over a blurred copy of itself, and the answer moves to the top left', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'forum_video_broll_full_'));
   const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
   const probe = (file, entries) => execFileSync('ffprobe', ['-v', 'error', '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
   try {
+    // A red answer, and blue b-roll the shape of a phone's screen recording, green at its top and bottom.
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
-    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=512x512:rate=24:duration=3', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=360x780:rate=24:duration=3,drawbox=y=0:w=iw:h=60:color=green:t=fill,drawbox=y=ih-60:w=iw:h=60:color=green:t=fill', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'b.mp4'));
     const out = join(dir, 'joined.mp4');
     const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1.5, length: 2, full: true } }], out);
     assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`);
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
-    const [red, blue] = [[255, 0, 0], [0, 0, 255]];
+    const [red, blue, green] = [[255, 0, 0], [0, 0, 255], [0, 128, 0]];
     assert.ok(near(pixel(out, 1, 0.5, 0.5), red));
     assert.ok(near(pixel(out, 2.5, 0.5, 0.5), blue));
+    assert.ok(near(pixel(out, 2.5, 0.5, 0.02), green) && near(pixel(out, 2.5, 0.5, 0.98), green), 'all of it, top to bottom, not cropped to fill the frame');
+    const [r, g, b] = pixel(out, 2.5, 0.9, 0.5);
+    assert.ok(r < 40 && g < 40 && b > 100 && b < 220, `beside it, a blurred, darker copy of it, not the answer: ${[r, g, b]}`);
     assert.ok(near(pixel(out, 2.5, 0.12, 0.17), red), 'the answer, at the top left');
     assert.ok(near(pixel(out, 2.5, 0.12, 0.0535), [255, 255, 255]), 'in a white frame');
     assert.ok(near(pixel(out, 4, 0.5, 0.5), red));
@@ -577,14 +581,16 @@ test("ffmpeg makes the phone's copy upright, each take filling it, with full-scr
   const size = (file) => execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString().trim();
   try {
     // A red answer from a webcam, wider than tall, with blue b-roll split screen; a green one recorded
-    // upright, narrower than the copy; then the red one again, its b-roll full screen.
+    // upright, narrower than the copy; then the red one again, with b-roll full screen, green at its
+    // sides.
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2,drawbox=x=0:w=60:h=ih:color=green:t=fill,drawbox=x=iw-60:w=60:h=ih:color=green:t=fill', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'w.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=660:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
     const joiner = createVideoJoiner();
     const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
     const broll = { file: join(dir, 'b.mp4'), start: 1, length: 2 };
-    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }, { file: join(dir, 'a.mp4'), broll: { ...broll, full: true } }], out, phone);
+    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }, { file: join(dir, 'a.mp4'), broll: { ...broll, file: join(dir, 'w.mp4'), full: true } }], out, phone);
     assert.equal(mobile, true);
     assert.equal(size(phone), '720,960'); // 3:4, as the app records answers
     const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
@@ -593,7 +599,12 @@ test("ffmpeg makes the phone's copy upright, each take filling it, with full-scr
     assert.ok(near(pixel(phone, 2, 0.02, 0.5), red) && near(pixel(phone, 2, 0.98, 0.5), red), 'filled to the edges, its sides cropped');
     assert.ok(near(pixel(out, 5, 0.05, 0.5), black), 'the upright take between bars on the page');
     assert.ok(near(pixel(phone, 5, 0.02, 0.5), green) && near(pixel(phone, 5, 0.5, 0.02), green), "filling the phone's copy");
-    assert.ok(near(pixel(phone, 8, 0.5, 0.5), blue) && near(pixel(phone, 8, 0.02, 0.02), blue), 'full-screen b-roll fills it too');
+    // Full-screen b-roll is in it too: all of it, its sides inside the middle 9:16 that the phone's
+    // upright player shows (x from 0.125 to 0.875), over a blurred, darker copy of itself.
+    assert.ok(near(pixel(phone, 8, 0.5, 0.5), blue));
+    assert.ok(near(pixel(phone, 8, 0.14, 0.5), green) && near(pixel(phone, 8, 0.86, 0.5), green), 'not cropped by the copy, or by the player');
+    const [r, g, b] = pixel(phone, 8, 0.5, 0.05);
+    assert.ok(r < 40 && g < 40 && b > 100 && b < 220, `above it, its blurred copy: ${[r, g, b]}`);
     // When every take is 9:16, as the app recorded answers before, so is the copy: nothing is cropped.
     const tall = join(dir, 'tall.mp4');
     await joiner.join([{ file: join(dir, 'c.mp4') }, { file: join(dir, 'c.mp4') }], join(dir, 'joined_tall.mp4'), tall);

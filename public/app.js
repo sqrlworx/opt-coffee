@@ -580,21 +580,23 @@ function videoPlayer(src, transcript) {
 
 // An answer's video with its b-roll cut in, as it is in the joined video (src/video.js): from
 // `broll.start` for `broll.length` seconds, split screen, the answer filling the left half and the
-// b-roll the right, fading in together over the answer, or, with `broll.full`, full screen, the
-// b-roll filling the frame and the answer moving to a picture at the top left. The b-roll is muted,
-// since the answer's sound carries on, and kept in step with the answer. The video's own controls
-// would be covered, or shrink into that picture, so it gets these instead: play, the time, and a
-// timeline marking where the b-roll is. Without b-roll it's the video as it was. Called again for
-// the same video, it updates the same frame with `broll`.
+// b-roll the right, fading in together over the answer, or, with `broll.full`, full screen, all of
+// the b-roll in the frame, over a blurred copy of itself, and the answer moving to a picture at the
+// top left. The b-roll is muted, since the answer's sound carries on, and kept in step with the
+// answer. The video's own controls would be covered, or shrink into that picture, so it gets these
+// instead: play, the time, and a timeline marking where the b-roll is. Without b-roll it's the
+// video as it was. Called again for the same video, it updates the same frame with `broll`.
 function brollView(video, broll) {
   if (video.brollView) return video.brollView.update(broll);
   const el = h('div', { class: 'broll-view' }, video);
   const clip = h('video', { class: 'broll-clip', preload: 'auto', playsinline: true, 'aria-hidden': 'true' });
   clip.muted = true;
   // The left half of a split, drawn from the answer as it plays, cropped to fill it rather than fitted,
-  // as the joined video has it. It's faded rather than taken out, so it has a size to draw at the
+  // as the joined video has it; and full screen, the blurred copy of the b-roll it sits on, drawn
+  // small from the clip. They're faded rather than taken out, so they have a size to draw at the
   // moment the cut comes up, even paused.
   const half = h('canvas', { class: 'broll-half', 'aria-hidden': 'true' });
+  const back = h('canvas', { class: 'broll-back', 'aria-hidden': 'true' });
   const playBtn = h('button', { type: 'button', class: 'jp-btn', 'aria-label': 'Play', onclick: () => toggle() }, icon('play'));
   const time = h('span', { class: 'jp-time' });
   const fill = h('span', { class: 'jp-fill' });
@@ -616,7 +618,8 @@ function brollView(video, broll) {
       if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
       if (video.paused) clip.pause();
       else if (clip.paused && !clip.ended) clip.play().catch(() => {});
-      if (!current.full) drawHalf();
+      if (current.full) drawFill(back, clip, 0.5, 0.25);
+      else drawFill(half, video, 0.6, devicePixelRatio);
     } else {
       clip.pause();
     }
@@ -626,18 +629,19 @@ function brollView(video, broll) {
     span.style.width = `${total ? (100 * current.length) / total : 0}%`;
     time.textContent = `${fmtDuration(t)} / ${fmtDuration(total)}`;
   }
-  // The answer, filling the left half: the middle across, and more cropped off the top than the
-  // bottom, as the joined video has it without a face to go by (FOCUS in src/video.js).
-  function drawHalf() {
-    const [w, ht] = [Math.round(half.clientWidth * devicePixelRatio), Math.round(half.clientHeight * devicePixelRatio)];
-    const [vw, vh] = [video.videoWidth, video.videoHeight];
-    if (!w || !ht || !vw || video.readyState < 2) return;
-    if (half.width !== w || half.height !== ht) [half.width, half.height] = [w, ht];
-    const scale = Math.max(w / vw, ht / vh);
-    const [sw, sh] = [w / scale, ht / scale];
-    const ctx = half.getContext('2d');
+  // `source` cropped to fill `canvas`, at `scale` pixels to each of its CSS pixels: the middle
+  // across, and `down` of the way down. The answer in the left half has more cropped off the top than
+  // the bottom, as the joined video has it without a face to go by (FOCUS in src/video.js).
+  function drawFill(canvas, source, down, scale) {
+    const [w, ht] = [Math.round(canvas.clientWidth * scale), Math.round(canvas.clientHeight * scale)];
+    const [vw, vh] = [source.videoWidth, source.videoHeight];
+    if (!w || !ht || !vw || source.readyState < 2) return;
+    if (canvas.width !== w || canvas.height !== ht) [canvas.width, canvas.height] = [w, ht];
+    const fit = Math.max(w / vw, ht / vh);
+    const [sw, sh] = [w / fit, ht / fit];
+    const ctx = canvas.getContext('2d');
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) * 0.6, sw, sh, 0, 0, w, ht);
+    ctx.drawImage(source, (vw - sw) / 2, (vh - sh) * down, sw, sh, 0, 0, w, ht);
   }
   // Every frame while it plays, so the cut lands on time; timeupdate is only a few times a second.
   let frame = 0;
@@ -659,6 +663,8 @@ function brollView(video, broll) {
     tick();
   });
   ['timeupdate', 'seeked', 'loadedmetadata', 'durationchange'].forEach((type) => video.addEventListener(type, tick));
+  // A paused clip shows the frame it was sent to only once it has it: the blurred copy follows then.
+  ['seeked', 'loadeddata'].forEach((type) => clip.addEventListener(type, tick));
   video.addEventListener('click', () => current && toggle());
   clip.addEventListener('click', toggle);
 
@@ -692,12 +698,13 @@ function brollView(video, broll) {
       video.controls = !current;
       if (current) {
         if (clip.getAttribute('src') !== current.video) clip.src = current.video;
-        if (!clip.isConnected) el.append(half, clip, controls);
+        if (!clip.isConnected) el.append(half, back, clip, controls);
         tick();
       } else {
         el.classList.remove('is-cut');
         clip.pause();
         half.remove();
+        back.remove();
         clip.remove();
         controls.remove();
       }

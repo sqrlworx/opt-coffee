@@ -22,6 +22,9 @@ const FINISHED = [1920, 1080]; // the size src/finish renders takes at
 const TALL = 9 / 16;
 const UPRIGHT = 3 / 4;
 const phoneSize = (width, aspect) => [width, Math.round(width / aspect / 2) * 2];
+// The phone's upright player, which shows the middle of the copy that shape (STAGE in
+// mobile/src/media/Video.jsx).
+const STAGE = 9 / 16;
 // Finding a question's sound in a video, by lining up how loud each is over time.
 const LOUDNESS_RATE = 8000; // samples per second
 const STEP = 0.005; // seconds between loudness measurements
@@ -56,12 +59,15 @@ export function pipBox(width) {
 /**
  * An ffmpeg filter graph that cuts away to b-roll from `start` for `length` seconds, over the picture
  * ([`pic`], `width`x`height` at 30 fps), fading in and out. The b-roll ([`broll`], any size or frame
- * rate) is cropped to fill its place, which depends on `layout`:
+ * rate) goes in a place that depends on `layout`:
  * - 'split', the page's split screen: the expert on the left half, from [`half`] (their take already
- *   filling `width / 2` x `height`, timed like [`pic`]), and the b-roll on the right half;
- * - 'corner', full screen on the page: the b-roll fills the frame, and the picture moves to the top left;
- * - 'alone', full screen in the phone's copy: the b-roll fills the frame.
- * Its output, [`out`], is timed like [`pic`].
+ *   filling `width / 2` x `height`, timed like [`pic`]), and the b-roll cropped to fill the right half;
+ * - 'corner', full screen on the page: all of the b-roll in the frame, and the picture at the top left;
+ * - 'alone', full screen in the phone's copy: all of the b-roll in the middle of the frame that the
+ *   phone's upright player shows (STAGE).
+ * Full screen, the b-roll is the picture, so none of it is cropped off: it's as big as fits, over a
+ * blurred, darker copy of itself filling the rest of the frame, as src/finish sets a take of another
+ * shape (fit_filter in finish.py). Its output, [`out`], is timed like [`pic`].
  */
 export function cutawayFilter({ layout = 'corner', width, height, start, length, pic = 'pic', half = 'half', broll = 'broll', out = 'cut' }) {
   const t = (secs) => String(Math.round(secs * 1000) / 1000);
@@ -69,6 +75,15 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
   const at = `setpts=PTS-STARTPTS+${t(start)}/TB`;
   const fades = `fade=t=in:st=${t(start)}:d=${t(fade)}:alpha=1,fade=t=out:st=${t(start + length - fade)}:d=${t(fade)}:alpha=1`;
   const fill = (w, h) => `[${broll}]fps=30,scale=${w}:${h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w}:${h},setsar=1,trim=duration=${t(length)},${at}`;
+  // All of the b-roll in `fw` x `fh` (all of the `w` x `h` frame, unless less of it is seen), over
+  // the blurred copy filling the frame.
+  const whole = (w, h, label, [fw, fh] = [w, h]) =>
+    [
+      `[${broll}]fps=30,trim=duration=${t(length)},${at},setsar=1,split=2[${label}_all][${label}_back]`,
+      `[${label}_back]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},gblur=sigma=${Math.round((40 * w) / 1920)},eq=brightness=-0.06:saturation=0.7[${label}_blur]`,
+      `[${label}_all]scale=${fw}:${fh}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos[${label}_fit]`,
+      `[${label}_blur][${label}_fit]overlay=(W-w)/2:(H-h)/2`,
+    ].join(';');
   if (layout === 'split') {
     return [
       `${fill(width / 2, height)},format=yuv420p[split_broll]`,
@@ -77,7 +92,10 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
       `[${pic}][split_both]overlay=0:0:eof_action=pass,format=yuv420p[${out}]`,
     ].join(';');
   }
-  if (layout === 'alone') return `${fill(width, height)},format=yuva420p,${fades}[${out}_broll];[${pic}][${out}_broll]overlay=0:0:eof_action=pass,format=yuv420p[${out}]`;
+  if (layout === 'alone') {
+    const seen = [Math.min(width, Math.round((height * STAGE) / 2) * 2), height];
+    return `${whole(width, height, out, seen)},format=yuva420p,${fades}[${out}_broll];[${pic}][${out}_broll]overlay=0:0:eof_action=pass,format=yuv420p[${out}]`;
+  }
   const { pw, ph, ring, x, y } = pipSize(width);
   const [cw, ch] = [pw + 2 * ring, ph + 2 * ring];
   const radius = Math.round(PIP.radius * width);
@@ -86,7 +104,7 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
   const round = (r) => `geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*clip(${r}+0.5-hypot(max(abs(X+0.5-W/2)-(W/2-${r}),0),max(abs(Y+0.5-H/2)-(H/2-${r}),0)),0,1)'`;
   return [
     `[${pic}]split=2[cut_base][cut_face]`,
-    `${fill(width, height)},format=yuva420p,${fades}[cut_broll]`,
+    `${whole(width, height, 'cut')},format=yuva420p,${fades}[cut_broll]`,
     `[cut_face]trim=start=${t(start)}:duration=${t(length)},${at},crop=min(iw\\,ih*4/3):min(ih\\,iw*3/4),scale=${pw}:${ph}:flags=lanczos,setsar=1,format=rgba,${round(radius)}[cut_pic]`,
     `color=white:s=${cw}x${ch}:r=30:d=${t(length)},${at},format=rgba,${round(radius + ring)}[cut_card]`,
     `[cut_card][cut_pic]overlay=${ring}:${ring}:format=auto,${fades}[cut_framed]`,
@@ -109,12 +127,13 @@ export function cutawayFilter({ layout = 'corner', width, height, start, length,
  * fails, the takes are joined as recorded.
  *
  * A take with b-roll cuts away to it (see cutawayFilter), under the captions: split screen, with the
- * take beside it filling the left half, or full screen, filling the frame with the take in the corner.
+ * take beside it filling the left half, or full screen, all of it in the frame with the take in the
+ * corner.
  *
  * The phone gets a copy of its own, made from the same parts: upright (9:16 or 3:4, see TALL), each
- * take filling it, cropped, with full-screen b-roll filling it too but without split-screen b-roll
- * (the phone plays that in the other half of its split screen), and with the captions, if they're
- * burned in, placed for it.
+ * take filling it, cropped, with full-screen b-roll in it too, all of it where the phone's player
+ * shows, but without split-screen b-roll (the phone plays that in the other half of its split
+ * screen), and with the captions, if they're burned in, placed for it.
  *
  * Returns null when ffmpeg isn't on the PATH.
  */

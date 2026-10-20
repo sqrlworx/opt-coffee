@@ -46,13 +46,14 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
   under the grain and the captions. `start` and `length` are when it plays. Split screen (`layout`
   "split") puts the take beside the clip, from [half], the take filling the left half, which is
   made here, framed to the expert's face (see side_focus in captions.py). Full screen ("corner")
-  fills the frame with the clip and puts the take in the corner, and fills the phone's copy with
-  the clip too, with `mobile_filter`, from [phonepic], that copy's picture, and [2:v] to [phonecut].
+  shows all of the clip in the frame, over a blurred copy of itself, with the take in the corner,
+  and in the phone's copy too, with `mobile_filter`, from [phonepic], that copy's picture, and
+  [2:v] to [phonecut].
 
 With a `mobile_output`, the take is also written there for the mobile app, in the same pass: the
 same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
 take is 9:16), filled and cropped, so that the phone can fill its upright player with it, or either
-half of it (mobile/src/media/split.js). Full-screen b-roll fills it too, but split-screen b-roll
+half of it (mobile/src/media/split.js). Full-screen b-roll is in it too, but split-screen b-roll
 isn't cut in, since the phone plays that clip in the bottom half. The expert has the top half
 whenever the player splits, cropped to frame their face (see half_focus in captions.py), and the
 captions go at the bottom of that, just above the split. The report says where that crop is for
