@@ -72,6 +72,13 @@ export const AudioPlayer = forwardRef(function AudioPlayer({ src }, ref) {
 // meanwhile, rather than playing on and being sent back.
 export const advancing = (media) => !media.paused && !media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
 
+// Whether a video kept in step with another can play on where it's been sent: neither seeking nor
+// waiting for data there. One that's ended, or failed to load, is no use waiting for.
+export const caughtUp = (media) => media.ended || Boolean(media.error) || (!media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA);
+
+// How long a player waits for a video kept in step with it to catch up, before it plays on without.
+export const HOLD_LIMIT = 4000;
+
 // Whether a media element is playing, kept up to date.
 export function usePlaying(ref) {
   const [playing, setPlaying] = useState(false);

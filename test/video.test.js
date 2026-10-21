@@ -705,3 +705,66 @@ test('a finisher is given the b-roll and the filters that cut it in: beside the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("published askers' videos get a copy players can seek in, which players are given; those published before it get theirs on startup", async (t) => {
+  const f = await finishingApp(t);
+  f.joiner.seekable = async (file, out) => writeFileSync(out, `seekable ${readFileSync(file, 'utf8')}`);
+  const expert = await register('seekable_host', f.base);
+  const asker = await register('seekable_asker', f.base);
+  const reader = await register('seekable_reader', f.base);
+  const { officeHour } = await expert('POST', '/api/office-hours', { title: 'On camera', questionsDeadline: inDays(1), answersExpectedAt: inDays(2) });
+  const ids = [];
+  for (const body of ['Asked on camera?', 'Typed?']) {
+    const { question } = await asker('POST', `/api/office-hours/${officeHour.id}/questions`, { body });
+    assert.equal((await expert('PUT', `/api/questions/${question.id}/video`, take(body, 5))).status, 200);
+    ids.push(question.id);
+  }
+  const recording = `${'a'.repeat(32)}.webm`;
+  writeFileSync(join(f.dir, recording), 'recorded');
+  f.db.prepare('UPDATE questions SET asker_video = ? WHERE id = ?').run(recording, ids[0]);
+  await expert('PUT', `/api/office-hours/${officeHour.id}/plan`, { items: ids.map((questionId) => ({ questionId })) });
+  await expert('POST', `/api/office-hours/${officeHour.id}/publish`);
+  await f.app.idle();
+
+  assert.equal(f.joiner.calls[0][0].askerVideo, join(f.dir, recording)); // finishing finds the face in the recording
+  const answers = (await reader('GET', `/api/office-hours/${officeHour.id}`)).answers;
+  const copy = answers.find((q) => q.id === ids[0]).askerVideo;
+  assert.match(copy, /^\/media\/[0-9a-f]{32}\.mp4$/);
+  assert.equal(await (await reader.media(copy)).text(), 'seekable recorded');
+  assert.equal(answers.find((q) => q.id === ids[1]).askerVideo, null);
+  assert.ok(existsSync(join(f.dir, recording))); // kept
+
+  // Published before askers' videos were copied: it's copied on startup.
+  f.db.prepare('UPDATE questions SET asker_video_copy = NULL WHERE id = ?').run(ids[0]);
+  assert.equal((await reader('GET', `/api/office-hours/${officeHour.id}`)).answers.find((q) => q.id === ids[0]).askerVideo, `/media/${recording}`);
+  const restarted = createApp({ db: f.db, moderator: await createModerator({ mode: 'heuristic' }), mediaDir: f.dir, joiner: f.joiner });
+  await restarted.idle();
+  const name = f.db.prepare('SELECT asker_video_copy FROM questions WHERE id = ?').get(ids[0]).asker_video_copy;
+  assert.match(name, /^[0-9a-f]{32}\.mp4$/);
+  assert.equal(readFileSync(join(f.dir, name), 'utf8'), 'seekable recorded');
+  assert.equal(f.joiner.calls.length, 1); // not joined again
+});
+
+test("ffmpeg copies an asker's video as players can seek in it: its duration and index up front, a keyframe every second", { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_seekable_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  const probe = (file, entries, ...more) => execFileSync('ffprobe', ['-v', 'error', ...more, '-show_entries', entries, '-of', 'csv=p=0', file]).toString().trim();
+  try {
+    // As a browser records it: no duration, no index, hardly a keyframe, and as wide as the page
+    // records (an odd number of pixels).
+    ffmpeg('-f', 'lavfi', '-i', 'testsrc=size=241x200:rate=30:duration=3', '-f', 'lavfi', '-i', 'sine=f=440:duration=3', '-c:v', 'libvpx', '-g', '1000', '-c:a', 'libopus', '-shortest', '-f', 'webm', '-live', '1', join(dir, 'asked.webm'));
+    assert.equal(probe(join(dir, 'asked.webm'), 'format=duration'), 'N/A');
+    const out = join(dir, 'copy.mp4');
+    await createVideoJoiner().seekable(join(dir, 'asked.webm'), out);
+    assert.ok(Math.abs(Number(probe(out, 'format=duration')) - 3) < 0.1);
+    assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,240,200']);
+    assert.deepEqual(probe(out, 'frame=pts_time', '-select_streams', 'v', '-skip_frame', 'nokey').split('\n').map((t) => Math.round(Number(t.replace(',', '')))), [0, 1, 2]);
+    const bytes = readFileSync(out);
+    assert.ok(bytes.indexOf('moov') < bytes.indexOf('mdat'), 'the index comes first');
+    assert.deepEqual(readdirSync(dir).sort(), ['asked.webm', 'copy.mp4']); // nothing left over
+    await assert.rejects(createVideoJoiner().seekable(join(dir, 'missing.webm'), join(dir, 'never.mp4')));
+    assert.deepEqual(readdirSync(dir).sort(), ['asked.webm', 'copy.mp4']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

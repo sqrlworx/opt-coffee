@@ -93,6 +93,7 @@ PIECE = 120  # frames rendered per task
 WARMUP = 24  # frames the matte settles over before a piece starts
 SAMPLES = 16  # frames measured for a take's grade
 CRF = 20
+KEYFRAMES = 2 * FPS  # frames between keyframes: a seek decodes from the one before where it lands
 
 
 def log(msg: str) -> None:
@@ -349,7 +350,7 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
         mobile_cut = cutaway and cutaway.get("mobile_filter")
         graph += f";[phone]{fill},{sharpen}" + (f"[phonepic];{mobile_cut};[phonecut]" if mobile_cut else ",") + f"{grain},{burn(mobile_ass)}[vm]"
     settings = [
-        "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-g", str(KEYFRAMES), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
         "-c:a", "aac", "-b:a", "192k", "-ar", str(SR), "-ac", "2",
     ]

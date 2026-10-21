@@ -15,6 +15,9 @@ const TRANSCRIPT_WAIT = 30 * 60_000; // longest a finished join waits for transc
 const TRANSCRIPT_POLL = 1000;
 const WIDTH = 1280;
 const HEIGHT = 720;
+// Frames between keyframes in the joined video, two seconds' worth: a seek decodes from the keyframe
+// before where it lands, and players play the sound meanwhile, over a frozen picture.
+const KEYFRAMES = 60;
 const FINISHED = [1920, 1080]; // the size src/finish renders takes at
 // The mobile app's copy is upright, so that the phone can fill its upright player with it, or either
 // half of it (mobile/src/media/split.js). It's 9:16 when every take is, as the app recorded answers
@@ -201,7 +204,7 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
         '-af', `aresample=48000:async=1${end ? ',apad' : ''}`,
         ...(end ? ['-t', String(end)] : []),
         '-ac', '2',
-        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+        '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-g', String(KEYFRAMES),
         '-c:a', 'aac', '-b:a', '128k',
         to,
       ];
@@ -364,6 +367,28 @@ export function createVideoJoiner({ finisher = null, log = console.warn } = {}) 
       return found;
     },
 
+    /**
+     * Writes the asker's video `file` to `out` as players load it: an MP4 with its duration and
+     * index up front and a keyframe every second, so a player can start anywhere in it right away.
+     * Browsers record without a duration or an index, so a player has to read to the end of the
+     * recording to find how long it is before it can show a moment in it, which keeps the asker's
+     * picture black for seconds after skipping to their question. The size and the sound are kept.
+     */
+    async seekable(file, out) {
+      try {
+        await ffmpeg([
+          '-i', file, '-map', '0:v:0', '-map', '0:a:0?',
+          '-vf', 'crop=trunc(iw/2)*2:trunc(ih/2)*2', '-fpsmax', '30', // H.264 needs an even size; the page records 1215×1080
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced)',
+          '-c:a', 'aac', '-b:a', '96k',
+          '-movflags', '+faststart', '-f', 'mp4', `${out}.part`,
+        ]);
+        await rename(`${out}.part`, out);
+      } finally {
+        rmSync(`${out}.part`, { force: true });
+      }
+    },
+
     /** Whether `file` is taller than wide, as the phone's copy is; false if it can't be read. */
     async upright(file) {
       try {
@@ -406,6 +431,9 @@ function correlation(a, b, offset) {
  * anything pending, or published before joining existed. It also finds the questions in videos
  * joined before that was done (see joiner.locate), and joins again those whose phone's copy is from
  * before it was upright (see joiner.upright), or framed the expert's face.
+ *
+ * Before joining, each published question asked on camera gets a copy of the asker's video that
+ * players can seek in (see joiner.seekable), and on startup, so do those published before that.
  *
  * When the joiner finishes takes, joining waits for transcripts still being made, so captions can
  * be burned in, and `refresh()` makes the video again after a transcript is corrected.
@@ -486,9 +514,31 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
     });
   }
 
-  /** Queues joining a published office hour's answers, in their published order. */
+  // Copies the askers' videos of the published questions asked on camera that have none yet, of
+  // `officeHourId` or of every office hour, for players to load instead (see joiner.seekable). The
+  // recordings are kept, for finishing to find the askers' faces in. One that fails is played as
+  // recorded, and tried again on the next startup.
+  async function copyAskerVideos(officeHourId = null) {
+    if (!joiner.seekable) return;
+    const rows = db
+      .prepare(`SELECT id, asker_video FROM questions WHERE asker_video IS NOT NULL AND asker_video_copy IS NULL AND published_position IS NOT NULL${officeHourId == null ? '' : ' AND office_hour_id = ?'}`)
+      .all(...(officeHourId == null ? [] : [officeHourId]));
+    for (const q of rows) {
+      const name = `${randomBytes(16).toString('hex')}.mp4`;
+      try {
+        await joiner.seekable(join(mediaDir, q.asker_video), join(mediaDir, name));
+        db.prepare('UPDATE questions SET asker_video_copy = ? WHERE id = ?').run(name, q.id);
+      } catch (err) {
+        rmSync(join(mediaDir, name), { force: true });
+        log(`[video] copying the asker's video of question ${q.id} failed, so players load it as recorded: ${err.message}`);
+      }
+    }
+  }
+
+  /** Queues joining a published office hour's answers, in their published order, after copying its askers' videos. */
   function joinAnswers(officeHourId) {
     db.prepare("UPDATE office_hours SET video_status = 'pending' WHERE id = ?").run(officeHourId);
+    enqueue(() => copyAskerVideos(officeHourId));
     enqueue(() => render(officeHourId));
   }
 
@@ -524,6 +574,7 @@ export function createVideoJobs({ db, joiner, mediaDir, log = console.error, tra
   function resume() {
     const waiting = db.prepare("SELECT id FROM office_hours WHERE published_at IS NOT NULL AND (video_status IS NULL OR video_status = 'pending')").all();
     waiting.forEach((oh) => joinAnswers(oh.id));
+    enqueue(() => copyAskerVideos()); // published before they were copied
     const joined = db.prepare("SELECT id, video_chapters FROM office_hours WHERE video_status = 'ready'").all();
     joined.filter((oh) => JSON.parse(oh.video_chapters).some((c) => c.length < 5)).forEach((oh) => relocate(oh.id));
     if (joiner.upright) joined.forEach((oh) => refreshPhoneCopy(oh.id));

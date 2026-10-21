@@ -222,8 +222,9 @@ function questionView(db, q, viewer) {
     askedWith: q.asked_with,
     audio: mediaUrl(q.audio),
     audioStatus: q.audio_status,
-    // Asked on camera: the asker's video. Its sound is `audio`, and the transcript is of that.
-    askerVideo: mediaUrl(q.asker_video),
+    // Asked on camera: the asker's video, or once it's published, its copy that players can seek in.
+    // Its sound is `audio`, and the transcript is of that.
+    askerVideo: mediaUrl(q.asker_video_copy ?? q.asker_video),
     audioTranscript,
     // How the mouth moves saying `audio`, for the fox that says the question in the joined video.
     lipSync: q.lip_sync ? `/api/questions/${q.id}/lip-sync` : null,
@@ -450,7 +451,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
    * are public; draft answers and b-roll reach only the expert.
    */
   function canSeeMedia(name, user) {
-    if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ?').get(name, name)) return true;
+    if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ? OR asker_video_copy = ?').get(name, name, name)) return true;
     if (db.prepare('SELECT 1 FROM office_hours WHERE video = ? OR video_mobile = ?').get(name, name)) return true; // only set once published
     const owner = db
       .prepare(

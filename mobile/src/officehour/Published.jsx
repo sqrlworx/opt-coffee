@@ -9,7 +9,7 @@ import { useApp } from '../context.js';
 import { fmtDuration, plural } from '../format.js';
 import { useWatchQuestion } from '../hooks.js';
 import { AnswerVideo } from '../media/AnswerVideo.jsx';
-import { JointPlayer } from '../media/JointPlayer.jsx';
+import { INTO_ANSWER, JointPlayer } from '../media/JointPlayer.jsx';
 import { QuestionText } from '../media/transcript.jsx';
 import { DOCKED_TALL, STAGE, STAGE_TALL } from '../media/Video.jsx';
 import { color, font, TOP_BAR_HEIGHT } from '../theme.js';
@@ -55,7 +55,7 @@ export function PublishedAnswers({ oh, data }) {
             <View ref={dock} style={styles.dock}>
               <JointPlayer ref={player} answers={answers} video={data.video} onCurrent={setCurrent} tall={DOCK_TALL} />
             </View>
-            <SkipTo listRef={list} answers={answers} video={data.video} current={current} play={(t) => player.current?.play(t)} onUpdate={replace} />
+            <SkipTo listRef={list} answers={answers} video={data.video} current={current} play={(t) => player.current?.play(t + INTO_ANSWER)} onUpdate={replace} />
           </>
         ) : (
           <View style={{ gap: 36 }}>

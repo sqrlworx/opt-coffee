@@ -569,6 +569,15 @@ function advancing(media) {
   return !media.paused && !media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA;
 }
 
+// Whether a video kept in step with another can play on where it's been sent: neither seeking nor
+// waiting for data there. One that's ended, or failed to load, is no use waiting for.
+function caughtUp(media) {
+  return media.ended || Boolean(media.error) || (!media.seeking && media.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA);
+}
+
+// How long a player waits for a video kept in step with it to catch up, before it plays on without.
+const HOLD_LIMIT = 4000;
+
 // Marks a video `upright` once its picture turns out taller than wide, as the mobile app records,
 // so the styles made for 16:9 don't crop it.
 function markUpright(video) {
@@ -1280,6 +1289,7 @@ function jointPlayer(answers, { src, chapters }) {
   const play = (t) => {
     if (t != null) seek(t);
     listen();
+    release();
     video.play().catch(() => {});
   };
 
@@ -1312,7 +1322,7 @@ function jointPlayer(answers, { src, chapters }) {
     for (const v of samples) sum += ((v - 128) / 128) ** 2;
     return Math.min(1, Math.sqrt(sum / samples.length) * 5); // speech is around 0.05-0.2 RMS
   }
-  const toggle = () => (video.paused || video.ended ? play() : video.pause());
+  const toggle = () => (held ? (release(), showPaused()) : video.paused || video.ended ? play() : video.pause());
   function setCaptions(on) {
     captionsOn = on;
     ccBtn.setAttribute('aria-pressed', String(on));
@@ -1342,6 +1352,7 @@ function jointPlayer(answers, { src, chapters }) {
     if (!faces.has(q.id)) {
       const f = markUpright(fixDuration(h('video', { class: 'jp-face', src: q.askerVideo, preload: 'metadata', playsinline: true }), { firstFrame: true }));
       f.muted = true;
+      ['seeked', 'canplay', 'playing', 'error'].forEach((type) => f.addEventListener(type, tick)); // see hold
       faces.set(q.id, f);
     }
     return faces.get(q.id);
@@ -1352,15 +1363,45 @@ function jointPlayer(answers, { src, chapters }) {
       shownFace?.pause();
       setChildren(faceSlot, f);
       shownFace = f;
+      gaveUp = false;
     }
     if (f) {
-      // Seek only once the browser knows how long it is (see fixDuration), and when it has drifted.
-      if (Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
-      if (!advancing(video)) f.pause();
+      // Seek only once the browser knows how long it is (see fixDuration), and when it has drifted,
+      // but not again while it's still seeking: each seek starts its loading over.
+      if (!f.seeking && Number.isFinite(f.duration) && Math.abs(f.currentTime - at) > 0.3) f.currentTime = Math.min(at, f.duration);
+      // While the player is held up for it, it plays, so it loads what comes next: iPhones only load
+      // a paused video's frame.
+      if (!advancing(video) && !held) f.pause();
       else if (f.paused && !f.ended) f.play().catch(() => {}); // it may end a moment before the question does
     }
     asking.classList.toggle('has-face', Boolean(f));
+    hold(f);
   }
+
+  // The asker's video holds the player up, picture and sound, while it can't play yet, as after
+  // skipping to a question whose video hadn't loaded, rather than the question playing on with the
+  // asker frozen. It's paused meanwhile, but counts as playing. After HOLD_LIMIT it plays on without
+  // it, until another question comes up or the viewer moves.
+  let held = false;
+  let gaveUp = false;
+  let holdTimer = 0;
+  function hold(f) {
+    const wait = Boolean(f) && !gaveUp && !caughtUp(f);
+    if (wait && !video.paused) {
+      held = true;
+      video.pause();
+      clearTimeout(holdTimer);
+      holdTimer = setTimeout(() => ((gaveUp = true), tick()), HOLD_LIMIT);
+    } else if (held && !wait) {
+      release();
+      video.play().catch(() => {});
+    }
+  }
+  function release() {
+    held = false;
+    clearTimeout(holdTimer);
+  }
+  video.addEventListener('seeking', () => (gaveUp = false));
 
   // The questions' lip sync, for the fox. Each loads while the answer before it plays.
   const lipSyncs = new Map(); // question id -> {fps, frames}; null while it loads, or if it couldn't
@@ -1420,10 +1461,13 @@ function jointPlayer(answers, { src, chapters }) {
     cancelAnimationFrame(frame);
     loop();
   });
-  video.addEventListener('pause', () => {
+  function showPaused() {
     el.classList.remove('playing');
     setChildren(playBtn, icon('play'));
     playBtn.setAttribute('aria-label', 'Play (k)');
+  }
+  video.addEventListener('pause', () => {
+    if (!held) showPaused();
     tick();
   });
   video.addEventListener('volumechange', () => setChildren(muteBtn, icon(video.muted ? 'muted' : 'sound')));
@@ -1495,6 +1539,12 @@ function jointPlayer(answers, { src, chapters }) {
   };
 }
 
+// Skip to lands this far into an answer, on its first frame. Each answer starts on a keyframe, about
+// 20 ms after its chapter does: joining (src/video.js) shifts the picture by the sound's encoder
+// delay. Sent to a moment before that, the browser would decode the answer before from its last
+// keyframe, seconds of video, while the sound played on over a frozen picture.
+const INTO_ANSWER = 0.04;
+
 // The questions under the video, to skip to: each where it starts, its number, and the moderator's
 // few words for it, or the question cut short, in two lines at most. Each is one thing to click,
 // which plays it from the question; the one being played is highlighted. Summaries are written once
@@ -1505,7 +1555,7 @@ function skipTo(player) {
   const watching = new Set();
   const list = h('ol', { class: 'st-list' });
   for (const part of player.parts) {
-    const item = h('button', { type: 'button', class: 'st-item', title: `Play from ${fmtDuration(part.start)}`, onclick: () => player.play(part.start) });
+    const item = h('button', { type: 'button', class: 'st-item', title: `Play from ${fmtDuration(part.start)}`, onclick: () => player.play(part.start + INTO_ANSWER) });
     items.set(part.q.id, item);
     list.append(h('li', {}, item));
     draw(part);

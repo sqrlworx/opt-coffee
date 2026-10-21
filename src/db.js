@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS questions (
   asked_with     TEXT NOT NULL DEFAULT 'text' CHECK (asked_with IN ('text', 'audio')),  -- 'audio' also for questions asked on camera
   audio          TEXT,                      -- the question as speech: the asker's recording, or the text read aloud (file in the media dir)
   asker_video    TEXT,                      -- a question asked on camera: the asker's video (file in the media dir); its sound is also in audio
+  asker_video_copy TEXT,                    -- once it's published, asker_video as players load it: an MP4 they can start anywhere in right away (see joiner.seekable); NULL until made
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
   voice          TEXT,                      -- the Kokoro voice a typed question is read aloud in; NULL = the server's default
   lip_sync       TEXT,                      -- how the mouth moves saying audio, for the fox that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
@@ -182,6 +183,8 @@ function migrate(db) {
     // Questions can be asked on camera.
     db.exec('ALTER TABLE questions ADD COLUMN asker_video TEXT');
   }
+  // Published askers' videos get a copy players can seek in; ones published before that get theirs on startup.
+  if (!columns.has('asker_video_copy')) db.exec('ALTER TABLE questions ADD COLUMN asker_video_copy TEXT');
   // Questions' speech gained lip sync; questions with audio get theirs on startup.
   if (!columns.has('lip_sync')) db.exec('ALTER TABLE questions ADD COLUMN lip_sync TEXT');
   // Askers pick the voice their typed question is read aloud in.

@@ -30,7 +30,13 @@ import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
 import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
-import { advancing, backStyle, drawBack, fixDuration, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+import { advancing, backStyle, caughtUp, drawBack, fixDuration, HOLD_LIMIT, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
+
+// Skip to lands this far into an answer, on its first frame. Each answer starts on a keyframe, about
+// 20 ms after its chapter does: joining (src/video.js) shifts the picture by the sound's encoder
+// delay. Sent to a moment before that, the browser would decode the answer before from its last
+// keyframe, seconds of video, while the sound played on over a frozen picture.
+export const INTO_ANSWER = 0.04;
 
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
@@ -86,6 +92,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     }
     showFace(m.asking?.askerVideo ? face(m.part) : null, m.at);
     showClip(m.cut ? clip(m.part.q) : null, m.clipAt);
+    hold([r.shownFace, r.shownClip].filter(Boolean));
     if (m.cut && clipBack.current) drawBack(clipBack.current, r.shownClip);
     r.level = m.asking && r.analyser && !v.paused ? 0.6 * r.level + 0.4 * loudness() : 0.85 * r.level;
     const bubble = Boolean(m.asking && !m.asking.askerVideo);
@@ -103,7 +110,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       r.current = current;
       onCurrent?.(current);
     }
-    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, asker: r.asker, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused, started: r.started };
+    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, asker: r.asker, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused || r.held, started: r.started };
     setView((prev) => (same(prev, next) ? prev : next));
   }, []);
 
@@ -114,6 +121,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     if (!r.faces.has(q.id)) {
       const el = sideVideo(q.askerVideo, 'cover', '#111');
       el.style.objectPosition = focusPosition(askerFocus);
+      ['seeked', 'canplay', 'playing', 'error'].forEach((type) => el.addEventListener(type, tick)); // see hold
       r.faces.set(q.id, el);
     }
     return r.faces.get(q.id);
@@ -125,17 +133,19 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     const r = rt.current;
     if (!r.clips.has(q.id)) {
       const el = sideVideo(q.broll.video, 'contain', 'transparent');
-      ['seeked', 'loadeddata'].forEach((type) => el.addEventListener(type, tick));
+      ['seeked', 'loadeddata', 'canplay', 'playing', 'error'].forEach((type) => el.addEventListener(type, tick)); // and see hold
       r.clips.set(q.id, el);
     }
     return r.clips.get(q.id);
   }
   // Kept in step with the joined video: it plays and pauses with it, holds still while the joined
-  // video waits for data (see advancing), and seeks once it's drifted.
+  // video waits for data (see advancing), and seeks once it's drifted, but not again while it's
+  // still seeking: each seek starts its loading over. While the joined video is held up for it (see
+  // hold), it plays, so it loads what comes next: iPhones only load a paused video's frame.
   function follow(el, at, limit) {
     const v = videoRef.current;
-    if (Number.isFinite(el.duration) && Math.abs(el.currentTime - at) > limit) el.currentTime = Math.min(Math.max(0, at), el.duration);
-    if (!advancing(v)) el.pause();
+    if (!el.seeking && Number.isFinite(el.duration) && Math.abs(el.currentTime - at) > limit) el.currentTime = Math.min(Math.max(0, at), el.duration);
+    if (!advancing(v) && !rt.current.held) el.pause();
     else if (el.paused && !el.ended) el.play().catch(() => {}); // it may end a moment before its part does
   }
   function showFace(f, at) {
@@ -144,6 +154,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       r.shownFace?.pause();
       faceSlot.current?.replaceChildren(...(f ? [f] : []));
       r.shownFace = f;
+      r.gaveUp = false;
     }
     if (f) follow(f, at, 0.3);
   }
@@ -153,8 +164,33 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       r.shownClip?.pause();
       clipSlot.current?.replaceChildren(...(c ? [c] : []));
       r.shownClip = c;
+      r.gaveUp = false;
     }
     if (c) follow(c, at, 0.25);
+  }
+
+  // The asker's half and the b-roll clip hold the joined video up, picture and sound, while they
+  // can't play yet, as after skipping to a question whose video hadn't loaded, rather than it playing
+  // on with them frozen. It's paused meanwhile, but counts as playing. After HOLD_LIMIT it plays on
+  // without them, until another comes up or the viewer moves.
+  function hold(els) {
+    const r = rt.current;
+    const v = videoRef.current;
+    const wait = !r.gaveUp && els.some((el) => !caughtUp(el));
+    if (wait && !v.paused) {
+      r.held = true;
+      v.pause();
+      clearTimeout(r.holdTimer);
+      r.holdTimer = setTimeout(() => ((r.gaveUp = true), tick()), HOLD_LIMIT);
+    } else if (r.held && !wait) {
+      release();
+      v.play().catch(() => {});
+    }
+  }
+  function release() {
+    const r = rt.current;
+    r.held = false;
+    clearTimeout(r.holdTimer);
   }
 
   // In the page's video (one joined before the phone had a copy of its own), the expert is cropped
@@ -223,14 +259,15 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   const play = (t) => {
     if (t != null) seek(t);
     listen();
+    release();
     videoRef.current.play().catch(() => {});
   };
-  const toggle = () => (videoRef.current.paused || videoRef.current.ended ? play() : videoRef.current.pause());
+  const toggle = () => (rt.current.held ? (release(), tick()) : videoRef.current.paused || videoRef.current.ended ? play() : videoRef.current.pause());
   useImperativeHandle(ref, () => ({ play, parts }), [parts]);
 
   useEffect(() => {
     const v = videoRef.current;
-    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, bubbleFox: fox(bubbleCanvas.current, FOX.bubble), asker: '', current: undefined, frame: 0 };
+    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, held: false, gaveUp: false, holdTimer: 0, bubbleFox: fox(bubbleCanvas.current, FOX.bubble), asker: '', current: undefined, frame: 0 };
     const r = rt.current;
     const unfix = fixDuration(v, { firstFrame: true });
     // Every frame while it plays, so the split and the captions land on time; timeupdate is only a
@@ -245,14 +282,18 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       loop();
     };
     const onVolume = () => setMuted(v.muted);
+    const onSeeking = () => (r.gaveUp = false);
     v.addEventListener('play', onPlay);
+    v.addEventListener('seeking', onSeeking);
     v.addEventListener('pause', tick);
     v.addEventListener('volumechange', onVolume);
     ['timeupdate', 'seeked', 'loadedmetadata'].forEach((type) => v.addEventListener(type, tick));
     return () => {
       unfix();
       cancelAnimationFrame(r.frame);
+      clearTimeout(r.holdTimer);
       v.removeEventListener('play', onPlay);
+      v.removeEventListener('seeking', onSeeking);
       v.removeEventListener('pause', tick);
       v.removeEventListener('volumechange', onVolume);
       ['timeupdate', 'seeked', 'loadedmetadata'].forEach((type) => v.removeEventListener(type, tick));
