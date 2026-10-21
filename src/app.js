@@ -1507,7 +1507,12 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   }
 
   async function serveStatic(req, res, pathname, dir = PUBLIC_DIR) {
-    const rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+    let rel;
+    try {
+      rel = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+    } catch {
+      return sendJson(res, 400, { error: 'Bad request' }); // a malformed %-escape names no file
+    }
     const file = normalize(join(dir, rel));
     try {
       if (!file.startsWith(dir) || rel.split(/[\\/]/).includes('..')) throw new Error('outside public dir');

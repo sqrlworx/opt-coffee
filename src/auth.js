@@ -44,7 +44,16 @@ export function parseCookies(header = '') {
   const out = {};
   for (const part of header.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0) out[part.slice(0, i).trim()] = decodeCookie(part.slice(i + 1).trim());
   }
   return out;
+}
+
+// Another app on the same host can leave a cookie that isn't %-encoded; it's kept as sent.
+function decodeCookie(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
 }

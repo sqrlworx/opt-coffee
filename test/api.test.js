@@ -223,6 +223,15 @@ test('explore lists open office hours and people; static shell is served', async
   assert.doesNotMatch(await traversal.text(), /"name": "off-hours"/);
 });
 
+test('a malformed path or cookie is turned away, and the server goes on serving', async () => {
+  assert.equal((await fetch(`${base}/%E0%A4%A`)).status, 400);
+  // Another app on the same host can leave a cookie that isn't %-encoded.
+  const cookie = { Cookie: 'other=100%; sid=nope' };
+  assert.equal((await fetch(`${base}/media/${'a'.repeat(32)}.mp4`, { headers: cookie })).status, 404);
+  assert.equal((await fetch(`${base}/api/explore`, { headers: cookie })).status, 200);
+  assert.equal((await fetch(`${base}/`)).status, 200);
+});
+
 test('the mobile app is served at /m/ once it is built', async () => {
   const mobileDir = mkdtempSync(join(tmpdir(), 'forum_mobile_'));
   const mobileServer = createServer(createApp({ db, moderator: await createModerator({ mode: 'heuristic' }), mobileDir }));
