@@ -4,7 +4,7 @@ import { api } from '../api.js';
 import { useApp } from '../context.js';
 import { plural } from '../format.js';
 import { useLoad } from '../hooks.js';
-import { go } from '../router.js';
+import { go, searchHash } from '../router.js';
 import { color } from '../theme.js';
 import { Avatar, Button, Card, Chip, Disclosure, Empty, Field, H1, Loading, Muted, Row, SectionTitle, Serif } from '../ui/index.jsx';
 import { CardList, SubscribeButton } from '../officehour/common.jsx';
@@ -33,7 +33,9 @@ export default function ProfilePage({ params }) {
         {u.expertise.length ? (
           <Row wrap gap={6}>
             {u.expertise.map((t) => (
-              <Chip key={t}>{t}</Chip>
+              <Chip key={t} to={searchHash(t)}>
+                {t}
+              </Chip>
             ))}
           </Row>
         ) : null}

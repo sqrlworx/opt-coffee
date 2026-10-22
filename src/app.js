@@ -10,6 +10,7 @@ import { cuesFromWords, questionCaptions, saidInAnswer, takeCaptions, toVtt } fr
 import { createBrollJobs } from './broll/jobs.js';
 import { createSpeechJobs } from './speech/jobs.js';
 import { SAMPLE_TEXT } from './speech/voices.js';
+import { match, snippet, terms, words } from './search.js';
 import { createVideoJobs } from './video.js';
 
 const PUBLIC_DIR = fileURLToPath(new URL('../public/', import.meta.url));
@@ -27,6 +28,7 @@ const MAX_BROLL_VIDEO = 500_000_000; // an uploaded b-roll clip: a minute or two
 const MAX_BROLL_SECONDS = MAX_ANSWER_START; // of it kept, at most: as long as the longest take
 const MAX_FILE_NAME = 200; // characters kept of an uploaded file's name
 const MAX_SEEDS = 20; // seed questions added at once
+const MAX_SEARCH = 200; // characters of a search on Explore
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.png': 'image/png',
   '.webm': 'video/webm', '.mp4': 'video/mp4', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.vtt': 'text/vtt; charset=utf-8',
@@ -690,19 +692,106 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       .prepare("SELECT * FROM office_hours WHERE published_at IS NOT NULL AND video_status IS NOT 'pending' ORDER BY published_at DESC LIMIT 20")
       .all()
       .map((oh) => serializeOfficeHour(db, oh, user));
-    const people = db
+    const people = explorePeople()
+      .slice(0, 30)
+      .map((u) => personCard(u, user));
+    return { open, published, people };
+  });
+
+  // Searches office hours by title, description, topic and host, and people by name and expertise,
+  // among those Explore lists. Best matches first (see src/search.js), then office hours taking
+  // questions, then the newest. `status` narrows the office hours to those taking questions (`open`)
+  // or `answered`, and leaves people out; `counts` says how many match in each. `match` on each
+  // result has the parts of its text that matched, to highlight. `suggestions` complete the search
+  // with topics to search for.
+  route('GET', '/api/search', ({ user, url }) => {
+    const query = String(url.searchParams.get('q') ?? '').slice(0, MAX_SEARCH);
+    const status = ['open', 'answered'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : 'all';
+    const searched = terms(query);
+    if (!searched.length) return { officeHours: [], people: [], counts: { all: 0, open: 0, answered: 0 }, suggestions: [] };
+
+    // Readers see an office hour whose video is still being made as closed.
+    const seenAs = (oh) => (processing(oh) && user?.id !== oh.expert_id ? 'closed' : statusOf(oh));
+    const matched = db
+      .prepare(
+        `SELECT oh.*, u.display_name, u.username FROM office_hours oh JOIN users u ON u.id = oh.expert_id
+         ORDER BY oh.created_at DESC, oh.id DESC`,
+      )
+      .all()
+      .map((oh) => ({
+        oh,
+        status: seenAs(oh),
+        m: match(searched, [
+          { key: 'title', text: oh.title, weight: 3 },
+          { key: 'topic', text: oh.topic, weight: 3 },
+          { key: 'host', text: oh.display_name, weight: 2 },
+          { key: 'username', text: oh.username, weight: 2 },
+          { key: 'description', text: oh.description, weight: 1 },
+        ]),
+      }))
+      .filter((r) => r.m);
+    const counts = {
+      all: matched.length,
+      open: matched.filter((r) => r.status === 'open').length,
+      answered: matched.filter((r) => r.status === 'published').length,
+    };
+    const shown = matched
+      .filter((r) => status === 'all' || r.status === (status === 'open' ? 'open' : 'published'))
+      .sort((a, b) => b.m.score - a.m.score || (b.status === 'open') - (a.status === 'open'));
+    const officeHours = shown.slice(0, 50).map(({ oh, m: { ranges } }) => ({
+      ...serializeOfficeHour(db, oh, user),
+      match: { title: ranges.title ?? [], topic: ranges.topic ?? [], host: ranges.host ?? [], snippet: snippet(oh.description, ranges.description) },
+    }));
+
+    const listed = explorePeople();
+    const people =
+      status !== 'all'
+        ? []
+        : listed
+            .map((u) => {
+              const tags = publicUser(u).expertise;
+              const fields = [{ key: 'name', text: u.display_name, weight: 3 }, { key: 'username', text: u.username, weight: 2 }, ...tags.map((tag, i) => ({ key: `tag${i}`, text: tag, weight: 2 }))];
+              return { u, tags, m: match(searched, fields) };
+            })
+            .filter((r) => r.m)
+            .sort((a, b) => b.m.score - a.m.score)
+            .slice(0, 30)
+            .map(({ u, tags, m: { ranges } }) => ({ ...personCard(u, user), match: { displayName: ranges.name ?? [], expertise: tags.map((_, i) => ranges[`tag${i}`] ?? []) } }));
+
+    // Topics office hours are about and people know about, each once, except the one searched for.
+    // A suggestion has to match the whole search by itself; the closest and shortest come first.
+    const topics = new Map();
+    const addTopic = (text) => {
+      const key = words(text).join(' ');
+      if (key && key !== searched.join(' ') && !topics.has(key)) topics.set(key, text);
+    };
+    db.prepare("SELECT DISTINCT topic FROM office_hours WHERE topic IS NOT NULL AND topic != ''").all().forEach(({ topic }) => addTopic(topic));
+    listed.forEach((u) => publicUser(u).expertise.forEach(addTopic));
+    const suggestions = [...topics.values()]
+      .map((text) => ({ text, m: match(searched, [{ key: 'text', text, weight: 1 }]) }))
+      .filter((r) => r.m)
+      .sort((a, b) => b.m.score - a.m.score || a.text.length - b.text.length)
+      .slice(0, 5)
+      .map(({ text, m }) => ({ text, ranges: m.ranges.text }));
+
+    return { officeHours, people, counts, suggestions };
+  });
+
+  // People Explore lists: those with expertise or who've hosted, most subscribed first.
+  function explorePeople() {
+    return db
       .prepare(
         `SELECT u.*,
            (SELECT COUNT(*) FROM subscriptions s WHERE s.target_type = 'expert' AND s.target_id = u.id) AS subscribers,
            (SELECT COUNT(*) FROM office_hours oh WHERE oh.expert_id = u.id) AS hosted
          FROM users u
          WHERE u.expertise != '' OR EXISTS (SELECT 1 FROM office_hours oh WHERE oh.expert_id = u.id)
-         ORDER BY subscribers DESC, hosted DESC, u.id LIMIT 30`,
+         ORDER BY subscribers DESC, hosted DESC, u.id`,
       )
-      .all()
-      .map((u) => ({ ...publicUser(u), subscribers: u.subscribers, hosted: u.hosted, subscribed: isSubscribed(db, user, 'expert', u.id) }));
-    return { open, published, people };
-  });
+      .all();
+  }
+
+  const personCard = (u, viewer) => ({ ...publicUser(u), subscribers: u.subscribers, hosted: u.hosted, subscribed: isSubscribed(db, viewer, 'expert', u.id) });
 
   // --- office hours ---
 

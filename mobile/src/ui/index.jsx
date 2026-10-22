@@ -5,7 +5,7 @@ import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 
 import { useApp } from '../context.js';
 import { countdownParts, fmtDay, relative } from '../format.js';
 import { useMounted, useNow } from '../hooks.js';
-import { go } from '../router.js';
+import { go, searchHash } from '../router.js';
 import { color, font, radius, TOUCH } from '../theme.js';
 
 // ---------- text ----------
@@ -37,6 +37,24 @@ export function Link({ to, style, children, ...props }) {
       {children}
     </Text>
   );
+}
+
+// `text`, with the parts a search matched ([start, end] pairs) highlighted, inside a Text.
+export function Marked({ text, ranges }) {
+  if (!ranges?.length) return text;
+  const out = [];
+  let at = 0;
+  ranges.forEach(([start, end], i) => {
+    out.push(
+      text.slice(at, start),
+      <Text key={i} style={s.mark}>
+        {text.slice(start, end)}
+      </Text>,
+    );
+    at = end;
+  });
+  out.push(text.slice(at));
+  return <>{out}</>;
 }
 
 export const UserLink = ({ user, style }) => (
@@ -173,7 +191,7 @@ export function Segmented({ options, value, onChange, label, stretch = false }) 
 
 // ---------- fields ----------
 
-export function Field({ label, hint, style, inputStyle, multiline = false, rows = 3, ...props }) {
+export function Field({ label, hint, style, inputStyle, multiline = false, rows = 3, onFocus, onBlur, ...props }) {
   const [focused, setFocused] = useState(false);
   return (
     <View style={[{ gap: 6 }, style]}>
@@ -182,8 +200,8 @@ export function Field({ label, hint, style, inputStyle, multiline = false, rows 
         multiline={multiline}
         numberOfLines={multiline ? rows : undefined}
         placeholderTextColor={color.muted}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onFocus={(e) => (setFocused(true), onFocus?.(e))}
+        onBlur={(e) => (setFocused(false), onBlur?.(e))}
         style={[s.input, multiline && { minHeight: 24 * rows + 24, textAlignVertical: 'top' }, focused && s.inputFocused, inputStyle]}
         {...props}
       />
@@ -215,15 +233,33 @@ export function Checkbox({ checked, onChange, label, children, style, disabled =
 
 // ---------- chips, badges, tags ----------
 
-export function Chip({ children, muted = false, accent = false }) {
-  return (
+// `to` makes it a link, with room around it to tap.
+export function Chip({ children, muted = false, accent = false, to }) {
+  const chip = (
     <View style={[s.chip, accent && { backgroundColor: 'transparent', paddingHorizontal: 0 }]}>
       <Text style={[s.chipText, muted && { color: color.muted }, accent && s.chipAccent]}>{children}</Text>
     </View>
   );
+  if (!to) return chip;
+  return (
+    <Pressable role="link" href={`#${to.replace(/^#/, '')}`} onPress={(e) => (e.preventDefault?.(), go(to))} style={({ pressed }) => [s.chipTarget, pressed && { opacity: 0.6 }]}>
+      {chip}
+    </Pressable>
+  );
 }
 
-export const TopicChip = ({ oh, accent }) => (oh.topic ? <Chip accent={accent}>{oh.topic}</Chip> : <Chip muted accent={accent}>Open topic</Chip>);
+// A topic, which searches Explore for it when tapped (`link`); `ranges` are the parts a search
+// matched, highlighted.
+export const TopicChip = ({ oh, accent, ranges, link = true }) =>
+  oh.topic ? (
+    <Chip accent={accent} to={link ? searchHash(oh.topic) : undefined}>
+      <Marked text={oh.topic} ranges={ranges} />
+    </Chip>
+  ) : (
+    <Chip muted accent={accent}>
+      Open topic
+    </Chip>
+  );
 
 // Status reads as text with a dot: the accent while questions are open, a ring once they've closed.
 export function StatusBadge({ oh }) {
@@ -342,6 +378,8 @@ export const s = StyleSheet.create({
   boxOn: { backgroundColor: color.accent, borderColor: color.accent },
   tick: { color: color.accentInk, fontSize: 14, lineHeight: 16, fontWeight: '700' },
   chip: { backgroundColor: color.surface, borderRadius: radius.pill, paddingVertical: 3, paddingHorizontal: 11, alignSelf: 'flex-start' },
+  chipTarget: { alignSelf: 'flex-start', paddingVertical: (TOUCH - 24) / 2, marginVertical: -(TOUCH - 24) / 2, cursor: 'pointer' },
+  mark: { backgroundColor: color.accentSoft, borderRadius: 3 },
   chipText: { fontFamily: font.sans, fontSize: 12, lineHeight: 18, fontWeight: '500', color: color.ink2 },
   chipAccent: { color: color.accent, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1.6, fontSize: 12 },
   badge: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 1 },

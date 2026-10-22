@@ -265,7 +265,7 @@ function Planner({ data, reload }) {
       <View style={{ gap: 14 }}>
         <Row gap={14} style={{ justifyContent: 'space-between' }}>
           <View style={{ flexShrink: 1 }}>
-            <TopicChip oh={oh} accent />
+            <TopicChip oh={oh} accent link={false} />
           </View>
           <Button small title="View public page" onPress={() => go(`#/oh/${oh.id}`)} />
         </Row>

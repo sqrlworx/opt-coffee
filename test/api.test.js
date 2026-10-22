@@ -223,6 +223,72 @@ test('explore lists open office hours and people; static shell is served', async
   assert.doesNotMatch(await traversal.text(), /"name": "off-hours"/);
 });
 
+test('search finds office hours by title, description, topic and host, and people by name and expertise', async () => {
+  const host = await register('saoirse');
+  await host.call('PATCH', '/api/me', { displayName: 'Saoirse Byrne', bio: '', expertise: 'sourdough, fermentation' });
+  const announce = (title, topic, description) =>
+    host.call('POST', '/api/office-hours', { title, topic, description, questionsDeadline: inDays(2), answersExpectedAt: inDays(3) });
+  const bread = (await announce('Bread baking at home', 'Baking', 'Starters, hydration and shaping loaves.')).officeHour;
+  const pickles = (await announce('Pickling basics', 'Preserving', 'Brines and crocks.')).officeHour;
+  const call = client();
+  const search = async (q, status) => {
+    const res = await call('GET', `/api/search?q=${encodeURIComponent(q)}${status ? `&status=${status}` : ''}`);
+    assert.equal(res.status, 200);
+    return { ...res, ohs: res.officeHours.map((oh) => oh.id), names: res.people.map((p) => p.username) };
+  };
+
+  assert.deepEqual((await search('bread')).ohs, [bread.id]); // title
+  assert.deepEqual((await search('HYDRATION')).ohs, [bread.id]); // description, any case
+  assert.deepEqual((await search('preserv')).ohs, [pickles.id]); // topic, the start of a word
+  assert.deepEqual((await search('serving')).ohs, []); // not the middle of one
+  assert.deepEqual((await search('saoirse')).ohs, [pickles.id, bread.id]); // host; as good a match, so newest first
+  assert.deepEqual((await search('Byrne pickling')).ohs, [pickles.id]); // every word has to match
+  assert.deepEqual((await search('picklng')).ohs, [pickles.id]); // a typo
+  assert.deepEqual((await search('hydartion')).ohs, [bread.id]); // two letters swapped
+  assert.deepEqual((await search('zebra')).ohs, []);
+
+  assert.deepEqual((await search('fermentaton')).names, ['saoirse']); // expertise, with a typo
+  assert.deepEqual((await search('saoirse')).names, ['saoirse']);
+  const blank = await search('  ');
+  assert.deepEqual([blank.ohs, blank.names, blank.suggestions], [[], [], []]);
+
+  // A match in the title beats a newer one in a description.
+  const sauce = (await announce('Hot sauce', 'Ferments', 'Pickling peppers, then blending.')).officeHour;
+  assert.deepEqual((await search('pickling')).ohs, [pickles.id, sauce.id]);
+
+  // What matched, to highlight; a match in the description comes with a snippet of it.
+  let res = await search('bread hydr');
+  assert.deepEqual(res.officeHours[0].match, { title: [[0, 5]], topic: [], host: [], snippet: { text: 'Starters, hydration and shaping loaves.', ranges: [[10, 14]] } });
+  res = await search('ferment');
+  assert.deepEqual(res.officeHours[0].match.topic, [[0, 7]]);
+  assert.deepEqual(res.people[0].match, { displayName: [], expertise: [[], [[0, 7]]] });
+
+  // Narrowed to office hours taking questions or answered, with how many match each way.
+  db.prepare('UPDATE office_hours SET published_at = ?, closed_at = ? WHERE id = ?').run(inDays(-0.01), inDays(-0.02), bread.id);
+  res = await search('saoirse');
+  assert.deepEqual(res.counts, { all: 3, open: 2, answered: 1 });
+  assert.deepEqual(res.ohs, [sauce.id, pickles.id, bread.id]);
+  res = await search('saoirse', 'answered');
+  assert.deepEqual([res.ohs, res.names], [[bread.id], []]);
+  assert.deepEqual((await search('saoirse', 'open')).ohs, [sauce.id, pickles.id]);
+  assert.deepEqual((await search('saoirse', 'nonsense')).ohs, [sauce.id, pickles.id, bread.id]);
+  // While its video is being made, readers see it as closed, and the expert as published.
+  db.prepare("UPDATE office_hours SET video_status = 'pending' WHERE id = ?").run(bread.id);
+  assert.deepEqual((await search('saoirse')).counts, { all: 3, open: 2, answered: 0 });
+  assert.deepEqual((await host.call('GET', '/api/search?q=saoirse')).counts, { all: 3, open: 2, answered: 1 });
+
+  // Suggestions complete the search with topics, from office hours and people's expertise, each
+  // matching it by itself; not people or office hours.
+  const suggested = async (q) => (await search(q)).suggestions.map((s) => s.text);
+  assert.deepEqual(await suggested('prese'), ['Preserving']);
+  assert.deepEqual(await suggested('ferment'), ['Ferments', 'fermentation']);
+  assert.deepEqual(await suggested('sour'), ['sourdough']);
+  assert.deepEqual(await suggested('saoir'), []);
+  assert.deepEqual(await suggested('pick'), []);
+  assert.deepEqual(await suggested('baking'), []); // not the topic already searched
+  assert.deepEqual((await search('ferm')).suggestions[0], { text: 'Ferments', ranges: [[0, 4]] });
+});
+
 test('a malformed path or cookie is turned away, and the server goes on serving', async () => {
   assert.equal((await fetch(`${base}/%E0%A4%A`)).status, 400);
   // Another app on the same host can leave a cookie that isn't %-encoded.

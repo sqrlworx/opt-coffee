@@ -65,6 +65,13 @@ Recording needs camera and microphone access, and browsers only allow that on `l
 - Feed cards are teasers that link to the office hour page. You can't ask questions or read answers in the feed. Published cards show the answer count and the first three question titles.
 - Asking a question automatically subscribes you to that office hour, so you see the answer.
 
+**Search.** Explore has a search box over its lists. As you type, they give way to the office hours and people that match (`GET /api/search?q=`), and the search goes in the URL (`#/explore?q=…`), so going back or reloading keeps it. Office hours are searched by title, description, topic and host (name or username), people by name, username and expertise, among those Explore lists. Every word searched has to match the start of a word in any of those, so a word still being typed matches (`src/search.js`). Matching ignores case and accents and allows typos: one in a word of four to seven letters, two from eight; shorter words have to be spelled right. A word of five letters or more can also be a typo off the start of a word.
+- *Ranking* is light: each word searched scores its best match, 4 for the whole word, 3 for its start, 2 for the word with a typo, 1 for its start with a typo, times 3 in a title, topic, person's name or expertise, 2 in a host's name or a username, and 1 in a description, summed. Best first; then office hours taking questions, then the newest. At most 50 office hours and 30 people.
+- *Highlighting:* results come with the parts of their text that matched (`match`, as `[start, end]` pairs), which are highlighted. An office hour matched in its description shows a snippet of it around the first match, which cards otherwise leave out.
+- *Status:* **All**, **Taking questions** or **Answered** (`status=open` / `answered`, kept in the URL too) narrows the office hours, and leaves people out. Each says how many match (`counts`). Readers count an office hour whose video is still being made as closed, as they see it.
+- *Suggestions* under the box complete the search with topics as it's typed (`suggestions`): up to five, from office hours' topics and people's expertise, each matching the whole search by itself, closest and shortest first, leaving out the topic already searched for. Picking one searches for it. On the page, ↑/↓ pick one, Enter takes it (or, with none picked, searches), and Esc closes them.
+- *Topics* are links to search for them, wherever a topic or a person's expertise shows (cards, an office hour's page, profiles), except in the planner. A card still opens its office hour from anywhere else on it.
+
 **Anonymous questions.** When enabled, the author is stored, so the asker can still see "you (hidden)". It is never returned to anyone else, including the expert. A question asked out loud or on camera is public, so the ask form warns that the voice or face may be recognizable.
 
 **Moderator** (`src/moderator/`): an LLM, Muse or Claude, when one is set up (see `FORUM_MODERATOR`), and heuristics otherwise, which also stand in whenever the LLM fails.
@@ -139,6 +146,7 @@ server.js               entry point
 src/app.js              HTTP routes (JSON API, video upload/streaming, static files)
 src/db.js               SQLite schema
 src/auth.js             scrypt passwords, cookie sessions
+src/search.js           Explore's search: keyword matching, forgiving of typos
 src/moderator/          heuristic.js · llm.js (prompts) · muse.js · claude.js · index.js (facade, fallback, caching)
 src/speech/             worker.py (Whisper + Kokoro) · index.js (worker processes) · jobs.js (background queue) · captions.js (cues, WebVTT) · lipsync.py (how the mouth moves) · voices.js (the voices askers pick from)
 src/broll/              broll.py (writing up the shot with Qwen3, filming it with LTX-Video; run with uv) · shot.md (how a shot is written up) · gemini.js (Veo filming it, and Gemini writing it up, with a key) · openai.js (GPT and gpt-image planning the shot instead, with a key) · index.js (running it, getting uploaded videos ready, how long a recording is) · jobs.js (making b-roll and placing it, in the background)
@@ -147,7 +155,7 @@ src/finish/             finishing the joined video: finish.py (entry, run with u
 public/                 vanilla-JS single-page app (hash routing), and fox.webp and fox.js, the fox the players draw
 mobile/                 the mobile app (React Native Web, built with Vite; served at /m/): src/pages · src/officehour · src/manage (planner, recording session) · src/media (players, split screen, transcripts) · test/
 scripts/seed.js         demo data
-test/                   node:test — serving the mobile app, moderator unit tests, API lifecycle tests, speech tests (with a fake engine, and lip sync with uv if installed), video tests (fake joiners, plus real ffmpeg if installed), finishing tests (caption and sound decisions, with uv if installed), b-roll tests (with a fake generator; making a real clip takes minutes, so it isn't run, but getting an uploaded one ready with ffmpeg is, if installed)
+test/                   node:test — serving the mobile app, search and moderator unit tests, API lifecycle tests, speech tests (with a fake engine, and lip sync with uv if installed), video tests (fake joiners, plus real ffmpeg if installed), finishing tests (caption and sound decisions, with uv if installed), b-roll tests (with a fake generator; making a real clip takes minutes, so it isn't run, but getting an uploaded one ready with ffmpeg is, if installed)
 ```
 
 ## Not built yet

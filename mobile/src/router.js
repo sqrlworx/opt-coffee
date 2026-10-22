@@ -22,6 +22,9 @@ export function match(hash) {
   return { name: 'notFound', params: {}, query, auth: false, path };
 }
 
+// Explore, searching for `q`, among off hours with `status` (`open`, `answered` or `all`).
+export const searchHash = (q, status = 'all') => `#/explore?q=${encodeURIComponent(q)}${status === 'all' ? '' : `&status=${status}`}`;
+
 export function go(hash) {
   if (location.hash === hash) window.dispatchEvent(new HashChangeEvent('hashchange'));
   else location.hash = hash;

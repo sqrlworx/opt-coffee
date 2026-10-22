@@ -181,8 +181,30 @@ function statusBadge(oh) {
   return h('span', { class: 'badge badge-published' }, `Answered ${relative(oh.publishedAt)}`);
 }
 
-function topicChip(oh) {
-  return oh.topic ? h('span', { class: 'chip' }, oh.topic) : h('span', { class: 'chip chip-muted' }, 'Open topic');
+// A topic, which searches Explore for it when clicked (`link`); `ranges` are the parts a search
+// matched, highlighted.
+function topicChip(oh, { ranges, link = true } = {}) {
+  if (!oh.topic) return h('span', { class: 'chip chip-muted' }, 'Open topic');
+  return link ? topicLink(oh.topic, ranges) : h('span', { class: 'chip' }, oh.topic);
+}
+
+function topicLink(topic, ranges) {
+  return h('a', { class: 'chip chip-link', href: searchHref(topic), title: `Search for “${topic}”` }, marked(topic, ranges));
+}
+
+const searchHref = (q, status = 'all') => `#/explore?q=${encodeURIComponent(q)}${status === 'all' ? '' : `&status=${status}`}`;
+
+// `text`, with the parts a search matched ([start, end] pairs) highlighted.
+function marked(text, ranges) {
+  if (!ranges?.length) return text;
+  const out = [];
+  let at = 0;
+  for (const [start, end] of ranges) {
+    out.push(text.slice(at, start), h('mark', {}, text.slice(start, end)));
+    at = end;
+  }
+  out.push(text.slice(at));
+  return out;
 }
 
 function subscribeButton({ type, id, subscribed, label }) {
@@ -1618,13 +1640,17 @@ function processingNote(oh) {
   return el;
 }
 
+// The whole card opens the office hour (its title's link covers it), except the topic, which searches
+// for it. A search result's `match` highlights what matched, with a snippet of its description.
 function ohCard(oh) {
+  const m = oh.match;
   return h(
-    'a',
-    { class: 'card card-link oh-card', href: `#/oh/${oh.id}` },
-    h('div', { class: 'row gap-sm wrap' }, topicChip(oh), statusBadge(oh)),
-    h('h3', {}, oh.title),
-    h('p', { class: 'muted small' }, `with ${oh.expert.displayName} · ${oh.questionCount} question${oh.questionCount === 1 ? '' : 's'}`),
+    'div',
+    { class: 'card card-link oh-card' },
+    h('div', { class: 'row gap-sm wrap' }, topicChip(oh, { ranges: m?.topic }), statusBadge(oh)),
+    h('h3', {}, h('a', { class: 'card-target', href: `#/oh/${oh.id}` }, marked(oh.title, m?.title))),
+    m?.snippet ? h('p', { class: 'small snippet' }, marked(m.snippet.text, m.snippet.ranges)) : null,
+    h('p', { class: 'muted small' }, 'with ', marked(oh.expert.displayName, m?.host), ` · ${oh.questionCount} question${oh.questionCount === 1 ? '' : 's'}`),
   );
 }
 
@@ -1684,33 +1710,170 @@ function feedItem(item) {
   );
 }
 
-async function explorePage() {
-  const { open, published, people } = await api('GET', '/api/explore');
+// Explore lists what's open, what's been answered and who's hosting. Searching swaps those for what
+// matches, best first, as it's typed, narrowed to off hours taking questions or answered if asked,
+// with topics suggested under the box to complete it. The search is kept in the URL
+// (#/explore?q=…&status=…), so going back to it or reloading searches again.
+async function explorePage(_, query) {
+  let status = ['open', 'answered'].includes(query.get('status')) ? query.get('status') : 'all';
+  const initial = query.get('q') ?? '';
+  const search = (q) => api('GET', `/api/search?q=${encodeURIComponent(q)}${status === 'all' ? '' : `&status=${status}`}`);
+  const [{ open, published, people }, first] = await Promise.all([api('GET', '/api/explore'), initial.trim() ? search(initial) : null]);
+  const section = (title, cards) => h('section', {}, h('h2', { class: 'section-title' }, title), h('div', { class: 'grid' }, cards));
+  const browse = h(
+    'div',
+    {},
+    h('section', {}, h('h2', { class: 'section-title' }, 'Taking questions now'), open.length ? h('div', { class: 'grid' }, open.map(ohCard)) : empty('No off hours are open right now.')),
+    h('section', {}, h('h2', { class: 'section-title' }, 'Recently answered'), published.length ? h('div', { class: 'grid' }, published.map(ohCard)) : empty('Nothing answered yet.')),
+    section('People', people.map(personCard)),
+  );
+  const results = h('div', {});
+  const filters = h('div', { class: 'ask-modes', role: 'group', 'aria-label': 'Show' });
+  const list = h('ul', { class: 'search-suggestions', id: 'search-suggestions', role: 'listbox', 'aria-label': 'Suggestions', hidden: true });
+
+  let found = null; // the results shown
+  let suggesting = false; // something's been typed since a suggestion was picked, so they show
+  let active = -1; // the suggestion picked out with the arrow keys
+
+  const show = (q, res) => {
+    found = res;
+    browse.hidden = Boolean(res);
+    results.hidden = filters.hidden = !res;
+    renderSuggestions();
+    if (!res) return;
+    const { officeHours, people, counts } = res;
+    const filter = (value, label) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          class: 'ask-mode',
+          'aria-pressed': String(value === status),
+          onclick: () => {
+            status = value;
+            run();
+          },
+        },
+        label,
+        value === 'all' ? null : h('span', { class: 'count' }, counts[value]),
+      );
+    setChildren(filters, filter('all', 'All'), filter('open', 'Taking questions'), filter('answered', 'Answered'));
+    const none = status === 'all' ? `Nothing matches “${q.trim()}”.` : `No off hours ${status === 'open' ? 'taking questions' : 'answered'} match “${q.trim()}”.`;
+    setChildren(
+      results,
+      !officeHours.length && !people.length ? empty(none) : null,
+      officeHours.length ? section('Off hours', officeHours.map(ohCard)) : null,
+      people.length ? section('People', people.map(personCard)) : null,
+    );
+  };
+
+  const renderSuggestions = () => {
+    const items = suggesting ? found?.suggestions ?? [] : [];
+    if (active >= items.length) active = -1;
+    list.hidden = !items.length;
+    input.setAttribute('aria-expanded', String(items.length > 0));
+    if (active >= 0) input.setAttribute('aria-activedescendant', `search-suggestion-${active}`);
+    else input.removeAttribute('aria-activedescendant');
+    setChildren(
+      list,
+      items.map((item, i) =>
+        h(
+          'li',
+          {
+            id: `search-suggestion-${i}`,
+            role: 'option',
+            class: 'search-suggestion',
+            'aria-selected': String(i === active),
+            onmousedown: (e) => e.preventDefault(), // keeps the focus in the box
+            onclick: () => pick(item),
+          },
+          marked(item.text, item.ranges),
+        ),
+      ),
+    );
+  };
+  // A suggested topic is searched for.
+  const pick = (item) => {
+    suggesting = false;
+    active = -1;
+    input.value = item.text;
+    run();
+  };
+
+  let seq = 0;
+  let timer;
+  const run = async () => {
+    clearTimeout(timer);
+    if (!input.isConnected) return; // left Explore meanwhile
+    const q = input.value;
+    const mine = ++seq;
+    history.replaceState(null, '', q.trim() ? searchHref(q, status) : '#/explore');
+    if (!q.trim()) return show(q, null);
+    try {
+      const res = await search(q);
+      if (mine === seq) show(q, res);
+    } catch (err) {
+      if (mine === seq) toast(err.message, 'error');
+    }
+  };
+  const input = h('input', {
+    type: 'search',
+    value: initial,
+    placeholder: 'Search topics, hosts and off hours',
+    'aria-label': 'Search topics, hosts and off hours',
+    role: 'combobox',
+    'aria-autocomplete': 'list',
+    'aria-controls': 'search-suggestions',
+    'aria-expanded': 'false',
+    autocomplete: 'off',
+    oninput: () => {
+      suggesting = true;
+      active = -1;
+      clearTimeout(timer);
+      timer = setTimeout(run, 200);
+    },
+    onkeydown: (e) => {
+      const items = list.hidden ? [] : found?.suggestions ?? [];
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && items.length) {
+        e.preventDefault();
+        active = e.key === 'ArrowDown' ? (active + 1) % items.length : (active <= 0 ? items.length : active) - 1;
+        renderSuggestions();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        if (items[active]) return pick(items[active]);
+        suggesting = false;
+        run();
+      } else if (e.key === 'Escape' && items.length) {
+        e.preventDefault(); // closes the suggestions, rather than clearing the box
+        suggesting = false;
+        renderSuggestions();
+      }
+    },
+    onblur: () => {
+      suggesting = false;
+      renderSuggestions();
+    },
+  });
+  show(initial, first);
+
   return h(
     'div',
     {},
     h('div', { class: 'page-head' }, h('h1', {}, 'Explore'), me ? h('a', { class: 'btn btn-primary', href: '#/oh/new' }, '+ Host off hours') : null),
-    h('section', {}, h('h2', { class: 'section-title' }, 'Taking questions now'), open.length ? h('div', { class: 'grid' }, open.map(ohCard)) : empty('No off hours are open right now.')),
-    h('section', {}, h('h2', { class: 'section-title' }, 'Recently answered'), published.length ? h('div', { class: 'grid' }, published.map(ohCard)) : empty('Nothing answered yet.')),
-    h(
-      'section',
-      {},
-      h('h2', { class: 'section-title' }, 'People'),
-      h(
-        'div',
-        { class: 'grid' },
-        people.map((p) =>
-          h(
-            'div',
-            { class: 'card person' },
-            h('a', { href: `#/u/${p.username}` }, h('h3', {}, p.displayName)),
-            h('p', { class: 'muted small' }, `@${p.username} · ${p.subscribers} subscriber${p.subscribers === 1 ? '' : 's'} · ${p.hosted} off hour${p.hosted === 1 ? '' : 's'}`),
-            h('div', { class: 'row gap-sm wrap' }, p.expertise.map((t) => h('span', { class: 'chip' }, t))),
-            me && me.id !== p.id ? subscribeButton({ type: 'expert', id: p.id, subscribed: p.subscribed }) : null,
-          ),
-        ),
-      ),
-    ),
+    h('div', { class: 'explore-tools' }, h('div', { class: 'explore-search' }, input, list), filters),
+    browse,
+    results,
+  );
+}
+
+function personCard(p) {
+  return h(
+    'div',
+    { class: 'card person' },
+    h('a', { href: `#/u/${p.username}` }, h('h3', {}, marked(p.displayName, p.match?.displayName))),
+    h('p', { class: 'muted small' }, `@${p.username} · ${p.subscribers} subscriber${p.subscribers === 1 ? '' : 's'} · ${p.hosted} off hour${p.hosted === 1 ? '' : 's'}`),
+    h('div', { class: 'row gap-sm wrap' }, p.expertise.map((t, i) => topicLink(t, p.match?.expertise[i]))),
+    me && me.id !== p.id ? subscribeButton({ type: 'expert', id: p.id, subscribed: p.subscribed }) : null,
   );
 }
 
@@ -2650,7 +2813,7 @@ async function managePage({ id }) {
     h(
       'div',
       { class: 'card oh-header' },
-      h('div', { class: 'row gap-sm wrap space-between' }, topicChip(oh), h('a', { class: 'btn btn-outline', href: `#/oh/${oh.id}` }, 'View public page')),
+      h('div', { class: 'row gap-sm wrap space-between' }, topicChip(oh, { link: false }), h('a', { class: 'btn btn-outline', href: `#/oh/${oh.id}` }, 'View public page')),
       h('h1', {}, oh.title),
       h('p', { class: 'muted small' }, `Answers expected ${fmtDate(oh.answersExpectedAt)}`, h('br'), `moderator: ${data.moderator}`),
       oh.status === 'open'
@@ -2808,7 +2971,7 @@ async function profilePage({ username }) {
     { class: 'card profile' },
     h('div', { class: 'row gap' }, h('span', { class: 'avatar avatar-lg' }, u.displayName.charAt(0).toUpperCase()), h('div', {}, h('h1', {}, u.displayName), h('p', { class: 'muted small' }, `@${u.username} · ${data.subscriberCount} subscriber${data.subscriberCount === 1 ? '' : 's'}`))),
     u.bio ? h('p', { class: 'desc' }, u.bio) : null,
-    u.expertise.length ? h('div', { class: 'row gap-sm wrap' }, u.expertise.map((t) => h('span', { class: 'chip' }, t))) : null,
+    u.expertise.length ? h('div', { class: 'row gap-sm wrap' }, u.expertise.map((t) => topicLink(t))) : null,
     data.isMe ? null : subscribeButton({ type: 'expert', id: u.id, subscribed: data.subscribed }),
   );
 

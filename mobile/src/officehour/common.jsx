@@ -4,9 +4,9 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { api } from '../api.js';
 import { useApp } from '../context.js';
 import { plural } from '../format.js';
-import { go } from '../router.js';
+import { go, searchHash } from '../router.js';
 import { color, radius } from '../theme.js';
-import { Button, Chip, H3, Link, Muted, Row, Serif, Sheet, Small, StatusBadge, TopicChip } from '../ui/index.jsx';
+import { Button, Chip, H3, Link, Marked, Muted, Row, Serif, Sheet, Small, StatusBadge, TopicChip } from '../ui/index.jsx';
 
 export function SubscribeButton({ type, id, subscribed: initially, label, small = false, primary = false }) {
   const { me, requireLogin } = useApp();
@@ -44,7 +44,9 @@ export function ExpertName({ oh }) {
         {expert.expertise?.length ? (
           <Row wrap gap={6}>
             {expert.expertise.map((t) => (
-              <Chip key={t}>{t}</Chip>
+              <Chip key={t} to={searchHash(t)}>
+                {t}
+              </Chip>
             ))}
           </Row>
         ) : null}
@@ -64,16 +66,25 @@ export function ExpertName({ oh }) {
   );
 }
 
+// A search result's `match` highlights what matched, with a snippet of its description.
 export function OhCard({ oh }) {
+  const m = oh.match;
   return (
     <Pressable onPress={() => go(`#/oh/${oh.id}`)} role="link" href={`#/oh/${oh.id}`} style={({ pressed }) => [styles.ohCard, pressed && { transform: [{ scale: 0.99 }] }]}>
       <Row wrap gap={8}>
-        <TopicChip oh={oh} />
+        <TopicChip oh={oh} ranges={m?.topic} />
         <StatusBadge oh={oh} />
       </Row>
-      <H3>{oh.title}</H3>
+      <H3>
+        <Marked text={oh.title} ranges={m?.title} />
+      </H3>
+      {m?.snippet ? (
+        <Small style={{ color: color.ink2 }}>
+          <Marked text={m.snippet.text} ranges={m.snippet.ranges} />
+        </Small>
+      ) : null}
       <Small style={{ color: color.muted }}>
-        with {oh.expert.displayName} · {plural(oh.questionCount, 'question')}
+        with <Marked text={oh.expert.displayName} ranges={m?.host} /> · {plural(oh.questionCount, 'question')}
       </Small>
     </Pressable>
   );
