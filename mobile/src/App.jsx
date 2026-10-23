@@ -63,6 +63,7 @@ export default function App() {
         brollOn: server.broll, // experts can add b-roll to their answers, by uploading it
         makesBroll: server.makesBroll, // and have it made from a description
         brollModel: server.brollModel, // by this model, which films it
+        avatarsOn: server.avatars, // people can make characters for their profile pictures
         voices: server.voices ?? [],
         voice: server.voice,
         setMe: (user) => setServer((s) => ({ ...s, user })),

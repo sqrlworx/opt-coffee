@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { openDb } from './src/db.js';
 import { createApp } from './src/app.js';
+import { createAvatars } from './src/avatar/index.js';
 import { createBroll } from './src/broll/index.js';
 import { createModerator } from './src/moderator/index.js';
 import { createSpeech } from './src/speech/index.js';
@@ -19,10 +20,11 @@ speech?.warmup();
 const finisher = createFinisher();
 const joiner = createVideoJoiner({ finisher });
 const broll = createBroll();
+const avatars = createAvatars();
 // Lets anyone log in as any user without a password. Local development only.
 const devLogin = process.argv.includes('--dev') || process.env.FORUM_DEV_LOGIN === '1';
 
-createServer(createApp({ db, moderator, devLogin, mediaDir, speech, joiner, broll })).listen(port, () => {
-  console.log(`off hours listening on http://localhost:${port} (moderator: ${moderator.name}; speech: ${speech?.name ?? 'off'}; joining answer videos: ${joiner ? (finisher ? 'on, finished' : 'on') : 'off'}; b-roll: ${broll?.name ?? 'off'})`);
+createServer(createApp({ db, moderator, devLogin, mediaDir, speech, joiner, broll, avatars })).listen(port, () => {
+  console.log(`off hours listening on http://localhost:${port} (moderator: ${moderator.name}; speech: ${speech?.name ?? 'off'}; joining answer videos: ${joiner ? (finisher ? 'on, finished' : 'on') : 'off'}; b-roll: ${broll?.name ?? 'off'}; characters: ${avatars?.name ?? 'off'})`);
   if (devLogin) console.warn('dev login is ON: anyone can switch to any user. Never enable this in production.');
 });

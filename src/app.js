@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createSession, destroySession, hashPassword, parseCookies, userForSession, verifyPassword } from './auth.js';
 import { transaction } from './db.js';
 import { cuesFromWords, questionCaptions, saidInAnswer, takeCaptions, toVtt } from './speech/captions.js';
+import { createAvatarJobs } from './avatar/jobs.js';
 import { createBrollJobs } from './broll/jobs.js';
 import { createSpeechJobs } from './speech/jobs.js';
 import { SAMPLE_TEXT } from './speech/voices.js';
@@ -29,6 +30,7 @@ const MAX_BROLL_SECONDS = MAX_ANSWER_START; // of it kept, at most: as long as t
 const MAX_FILE_NAME = 200; // characters kept of an uploaded file's name
 const MAX_SEEDS = 20; // seed questions added at once
 const MAX_SEARCH = 200; // characters of a search on Explore
+const MAX_AVATAR_PROMPT = 300; // characters describing the character someone wants for their profile picture
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.png': 'image/png',
   '.webm': 'video/webm', '.mp4': 'video/mp4', '.weba': 'audio/webm', '.m4a': 'audio/mp4', '.ogg': 'audio/ogg', '.vtt': 'text/vtt; charset=utf-8',
@@ -36,7 +38,7 @@ const MIME = {
 // What MediaRecorder produces: WebM in Chrome/Firefox, MP4 in Safari (and newer Chrome), Ogg in Firefox.
 const VIDEO_TYPES = { 'video/webm': 'webm', 'video/mp4': 'mp4' };
 const AUDIO_TYPES = { 'audio/webm': 'weba', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg' };
-const MEDIA_NAME = /^[0-9a-f]{32}\.(webm|mp4|weba|m4a|ogg)$/;
+const MEDIA_NAME = /^[0-9a-f]{32}\.(webm|mp4|weba|m4a|ogg|webp)$/;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -90,15 +92,22 @@ export function statusOf(oh, at = now()) {
   return 'open';
 }
 
-function publicUser(u) {
+// `avatar` is their profile picture, if they've picked a character for it (see src/avatar/).
+function publicUser(db, u) {
+  const avatar = u.avatar_id ? db.prepare('SELECT picture FROM avatars WHERE id = ?').get(u.avatar_id) : null;
   return {
     id: u.id,
     username: u.username,
     displayName: u.display_name,
     bio: u.bio,
     expertise: u.expertise.split(',').map((t) => t.trim()).filter(Boolean),
+    avatar: mediaUrl(avatar?.picture),
   };
 }
+
+/** A character as its user sees it: its profile picture, and its `rig` to animate it (see public/fox.js), with `src`, the picture it's drawn over. */
+const avatarView = (a) => ({ id: a.id, picture: mediaUrl(a.picture), rig: rigOf(a.rig, a.base) });
+const rigOf = (rig, base) => ({ ...JSON.parse(rig), src: mediaUrl(base) });
 
 function isSubscribed(db, viewer, type, id) {
   if (!viewer) return false;
@@ -128,7 +137,7 @@ function serializeOfficeHour(db, oh, viewer) {
     status: hidden ? 'closed' : statusOf(oh),
     processing: processing(oh) && isExpert,
     questionCount: n,
-    expert: publicUser(expert),
+    expert: publicUser(db, expert),
     // A follow-up picks up an earlier office hour's discussion.
     followUpOf: oh.follow_up_of ? db.prepare('SELECT id, title FROM office_hours WHERE id = ?').get(oh.follow_up_of) ?? null : null,
     isExpert,
@@ -164,10 +173,10 @@ function answerTranscriptOf(db, name, answerStart) {
 function loadQuestions(db, ohId, viewer) {
   const rows = db
     .prepare(
-      `SELECT q.*, u.username, u.display_name,
+      `SELECT q.*, u.username, u.display_name, a.rig AS avatar_rig, a.base AS avatar_base,
               (SELECT COUNT(*) FROM votes v WHERE v.question_id = q.id) AS votes,
               EXISTS (SELECT 1 FROM votes v WHERE v.question_id = q.id AND v.user_id = ?) AS voted
-       FROM questions q LEFT JOIN users u ON u.id = q.author_id
+       FROM questions q LEFT JOIN users u ON u.id = q.author_id LEFT JOIN avatars a ON a.id = q.published_avatar
        WHERE q.office_hour_id = ?
        ORDER BY q.id`,
     )
@@ -243,11 +252,12 @@ function questionView(db, q, viewer) {
     publishedBroll: q.published_broll
       ? { video: mediaUrl(q.published_broll), start: q.published_broll_start, length: q.published_broll_length, full: Boolean(q.published_broll_full), pastEnd: Boolean(q.published_broll_past_end) }
       : null,
+    publishedAvatar: q.avatar_rig ? rigOf(q.avatar_rig, q.avatar_base) : null,
   };
 }
 
 function stripPrivate(q) {
-  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, broll, publishedBroll, ...rest } = q;
+  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, broll, publishedBroll, publishedAvatar, ...rest } = q;
   return rest;
 }
 
@@ -256,7 +266,9 @@ function stripPrivate(q) {
  * question; `questionCues` caption the question until then, timed from the start of the take.
  * `broll` is cut away to during the answer, from `start` for `length` seconds into the take, split
  * screen or, with `full`, full screen; with `pastEnd`, full screen, it may run past the end of the
- * take, which the joined video lengthens for it.
+ * take, which the joined video lengthens for it. `avatar` is the rig of the asker's character, which
+ * says the question in the joined video instead of the fox, if it was their profile picture when the
+ * answers were published (and they asked under their name, but not on camera).
  */
 const publishedAnswer = (q) => ({
   ...stripPrivate(q),
@@ -265,6 +277,7 @@ const publishedAnswer = (q) => ({
   questionCues: q.publishedQuestionCues,
   transcript: q.publishedAnswerTranscript,
   broll: q.publishedBroll,
+  avatar: q.publishedAvatar,
 });
 
 /** What readers see: the snapshot taken at the last publish, in the expert's order. */
@@ -349,8 +362,9 @@ function workingAnswers(questions) {
 // `speech` (src/speech/index.js) is optional; without it there are no spoken questions,
 // read-aloud audio or transcripts. So is `joiner` (src/video.js); without it published answers
 // aren't joined into one video. And `broll` (src/broll/index.js); without it experts can't add
-// b-roll to their answers. `mobileDir` is the mobile app's build, served at /m/.
-export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null, broll = null, mobileDir = MOBILE_DIR }) {
+// b-roll to their answers. And `avatars` (src/avatar/index.js); without them people can't make
+// characters for their profile pictures. `mobileDir` is the mobile app's build, served at /m/.
+export function createApp({ db, moderator, devLogin = false, mediaDir = 'media', speech = null, joiner = null, broll = null, avatars = null, mobileDir = MOBILE_DIR }) {
   mkdirSync(mediaDir, { recursive: true });
   const speechJobs = speech ? createSpeechJobs({ db, speech, mediaDir }) : null;
   speechJobs?.resume();
@@ -358,6 +372,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   videoJobs?.resume();
   const brollJobs = broll ? createBrollJobs({ db, broll, moderator, mediaDir }) : null;
   brollJobs?.resume();
+  const avatarJobs = avatars ? createAvatarJobs({ db, avatars, mediaDir }) : null;
+  avatarJobs?.resume();
   const routes = [];
   // `raw` routes get the request body unread (ctx.req) instead of parsed JSON.
   const route = (method, pattern, handler, { auth = false, raw = false } = {}) =>
@@ -427,6 +443,44 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     };
   }
 
+  /**
+   * Deletes characters, and their pictures, that are no longer anyone's profile picture, offered to
+   * them, or saying a published question.
+   */
+  function pruneAvatars(ids) {
+    const used = db.prepare('SELECT 1 FROM avatars WHERE id = ? AND (offered = 1 OR id IN (SELECT avatar_id FROM users) OR id IN (SELECT published_avatar FROM questions))');
+    for (const id of ids) {
+      const a = id && !used.get(id) && db.prepare('SELECT * FROM avatars WHERE id = ?').get(id);
+      if (!a) continue;
+      db.prepare('DELETE FROM avatars WHERE id = ?').run(id);
+      for (const name of [a.picture, a.base]) rmSync(join(mediaDir, name), { force: true });
+    }
+  }
+
+  /** Discards the characters offered to a user that they didn't pick. */
+  function discardOffered(userId) {
+    const ids = db.prepare('SELECT id FROM avatars WHERE user_id = ? AND offered = 1').all(userId).map((a) => a.id);
+    db.prepare('UPDATE avatars SET offered = 0 WHERE user_id = ? AND offered = 1').run(userId);
+    pruneAvatars(ids);
+  }
+
+  /**
+   * The characters a user asked for, as they see them: `status` drawing them ('pending', 'ready'
+   * once `options` are offered to pick from, 'failed' with `error` to show them, or null when none
+   * are asked for), `prompt`, what they asked for, and `current`, the one that's their picture.
+   */
+  function avatarState(userId) {
+    const u = db.prepare('SELECT avatar_id, avatar_prompt, avatar_status, avatar_error FROM users WHERE id = ?').get(userId);
+    const current = u.avatar_id ? db.prepare('SELECT * FROM avatars WHERE id = ?').get(u.avatar_id) : null;
+    return {
+      status: u.avatar_status,
+      prompt: u.avatar_prompt,
+      error: u.avatar_status === 'failed' ? u.avatar_error : null,
+      options: db.prepare('SELECT * FROM avatars WHERE user_id = ? AND offered = 1 ORDER BY id').all(userId).map(avatarView),
+      current: current ? avatarView(current) : null,
+    };
+  }
+
   /** Deletes b-roll clips that no draft or published answer points to any more. */
   function pruneBroll(names) {
     const used = db.prepare('SELECT 1 FROM questions WHERE broll_video = ? OR published_broll = ?');
@@ -450,9 +504,12 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
 
   /**
    * Who may fetch a media file: questions' audio and video and published answers (and their b-roll)
-   * are public; draft answers and b-roll reach only the expert.
+   * are public; draft answers and b-roll reach only the expert. Characters' pictures are public,
+   * except those of characters offered to someone, who hasn't picked them, which reach only them.
    */
   function canSeeMedia(name, user) {
+    const avatar = db.prepare('SELECT user_id, offered FROM avatars WHERE picture = ? OR base = ?').get(name, name);
+    if (avatar) return !avatar.offered || avatar.user_id === user?.id;
     if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ? OR asker_video_copy = ?').get(name, name, name)) return true;
     if (db.prepare('SELECT 1 FROM office_hours WHERE video = ? OR video_mobile = ?').get(name, name)) return true; // only set once published
     const owner = db
@@ -553,7 +610,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       .prepare('INSERT INTO users (username, display_name, password_hash, created_at) VALUES (?, ?, ?, ?)')
       .run(username, displayName, hashPassword(password), now());
     setSession(Number(lastInsertRowid));
-    return { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid)) };
+    return { user: publicUser(db, db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid)) };
   });
 
   route('POST', '/api/auth/login', ({ body, setSession }) => {
@@ -562,7 +619,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       throw new HttpError(401, 'Wrong username or password');
     }
     setSession(user.id);
-    return { user: publicUser(user) };
+    return { user: publicUser(db, user) };
   });
 
   route('POST', '/api/auth/logout', ({ clearSession }) => {
@@ -573,9 +630,9 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   // `devSession`: the dev user switcher logged this user in, rather than their password.
   // `voices` read typed questions aloud, each with a `sample` to preview it; `voice` is the viewer's.
   // `broll`: experts can add b-roll to their answers, uploading it, and `makesBroll`: have it made,
-  // filmed by `brollModel`.
+  // filmed by `brollModel`. `avatars`: people can make characters for their profile pictures.
   route('GET', '/api/me', ({ user }) => ({
-    user: user ? publicUser(user) : null,
+    user: user ? publicUser(db, user) : null,
     devLogin,
     devSession: Boolean(user?.dev_session),
     speech: Boolean(speech),
@@ -584,6 +641,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     brollModel: broll?.generate ? broll.model : null,
     voices: speech ? speech.voices.map((v) => ({ ...v, sample: `/media/voices/${v.id}.m4a` })) : [],
     voice: speech ? voiceOf(user) : null,
+    avatars: Boolean(avatars),
   }));
 
   // Dev-only user switcher: log in as anyone without a password. Off unless explicitly enabled.
@@ -596,7 +654,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(body.username ?? ''));
       if (!user) throw new HttpError(404, 'User not found');
       setSession(user.id, { dev: true });
-      return { user: publicUser(user) };
+      return { user: publicUser(db, user) };
     });
   }
 
@@ -608,7 +666,59 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const bio = str(body.bio, 'Bio', { max: 1000 });
       const expertise = parseExpertise(body.expertise).join(',');
       db.prepare('UPDATE users SET display_name = ?, bio = ?, expertise = ? WHERE id = ?').run(displayName, bio, expertise, user.id);
-      return { user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) };
+      return { user: publicUser(db, db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)) };
+    },
+    { auth: true },
+  );
+
+  // --- characters for profile pictures ---
+
+  route('GET', '/api/me/avatar', ({ user }) => ({ avatar: avatarState(user.id) }), { auth: true });
+
+  // Asks for three characters to pick one from as the user's profile picture: what they want it to
+  // be is `prompt`, or nothing for ideas from their profile. They're drawn in the background
+  // (src/avatar/jobs.js), and offered once they're ready, replacing any offered before.
+  route(
+    'POST',
+    '/api/me/avatar',
+    ({ user, body }) => {
+      if (!avatarJobs) throw new HttpError(503, "Characters can't be made on this server");
+      const prompt = str(body.prompt, 'Description', { max: MAX_AVATAR_PROMPT }).replace(/\s+/g, ' ');
+      if (user.avatar_status === 'pending') throw new HttpError(409, 'Your characters are still being drawn');
+      discardOffered(user.id);
+      db.prepare("UPDATE users SET avatar_prompt = ?, avatar_status = 'pending', avatar_error = NULL WHERE id = ?").run(prompt, user.id);
+      avatarJobs.make(user.id);
+      return { avatar: avatarState(user.id) };
+    },
+    { auth: true },
+  );
+
+  // Picks one of the characters offered (`id`) as the user's profile picture. The others are discarded.
+  route(
+    'PUT',
+    '/api/me/avatar',
+    ({ user, body }) => {
+      const picked = db.prepare('SELECT id FROM avatars WHERE id = ? AND user_id = ? AND offered = 1').get(Number(body.id), user.id);
+      if (!picked) throw new HttpError(404, "That character isn't one you were offered");
+      transaction(db, () => {
+        db.prepare('UPDATE avatars SET offered = 0 WHERE id = ?').run(picked.id);
+        db.prepare('UPDATE users SET avatar_id = ?, avatar_status = NULL, avatar_error = NULL WHERE id = ?').run(picked.id, user.id);
+      });
+      discardOffered(user.id);
+      pruneAvatars([user.avatar_id]);
+      return { user: publicUser(db, db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)), avatar: avatarState(user.id) };
+    },
+    { auth: true },
+  );
+
+  // Goes back to the user's initial as their profile picture. Answers already published keep their character.
+  route(
+    'DELETE',
+    '/api/me/avatar',
+    ({ user }) => {
+      db.prepare('UPDATE users SET avatar_id = NULL WHERE id = ?').run(user.id);
+      pruneAvatars([user.avatar_id]);
+      return { user: publicUser(db, db.prepare('SELECT * FROM users WHERE id = ?').get(user.id)), avatar: avatarState(user.id) };
     },
     { auth: true },
   );
@@ -626,7 +736,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       .prepare("SELECT COUNT(*) AS n FROM subscriptions WHERE target_type = 'expert' AND target_id = ?")
       .get(u.id);
     return {
-      user: publicUser(u),
+      user: publicUser(db, u),
       subscriberCount: n,
       subscribed: isSubscribed(db, viewer, 'expert', u.id),
       isMe: viewer?.id === u.id,
@@ -749,7 +859,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         ? []
         : listed
             .map((u) => {
-              const tags = publicUser(u).expertise;
+              const tags = publicUser(db, u).expertise;
               const fields = [{ key: 'name', text: u.display_name, weight: 3 }, { key: 'username', text: u.username, weight: 2 }, ...tags.map((tag, i) => ({ key: `tag${i}`, text: tag, weight: 2 }))];
               return { u, tags, m: match(searched, fields) };
             })
@@ -766,7 +876,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       if (key && key !== searched.join(' ') && !topics.has(key)) topics.set(key, text);
     };
     db.prepare("SELECT DISTINCT topic FROM office_hours WHERE topic IS NOT NULL AND topic != ''").all().forEach(({ topic }) => addTopic(topic));
-    listed.forEach((u) => publicUser(u).expertise.forEach(addTopic));
+    listed.forEach((u) => publicUser(db, u).expertise.forEach(addTopic));
     const suggestions = [...topics.values()]
       .map((text) => ({ text, m: match(searched, [{ key: 'text', text, weight: 1 }]) }))
       .filter((r) => r.m)
@@ -791,7 +901,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       .all();
   }
 
-  const personCard = (u, viewer) => ({ ...publicUser(u), subscribers: u.subscribers, hosted: u.hosted, subscribed: isSubscribed(db, viewer, 'expert', u.id) });
+  const personCard = (u, viewer) => ({ ...publicUser(db, u), subscribers: u.subscribers, hosted: u.hosted, subscribed: isSubscribed(db, viewer, 'expert', u.id) });
 
   // --- office hours ---
 
@@ -1122,7 +1232,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const existing = db.prepare('SELECT body FROM questions WHERE office_hour_id = ?').all(oh.id).map((r) => r.body);
       const exclude = Array.isArray(body.exclude) ? body.exclude.filter((s) => typeof s === 'string').slice(0, 50) : [];
       const questions = await moderator.suggestQuestions(
-        publicUser(user),
+        publicUser(db, user),
         { title: oh.title, topic: oh.topic, description: oh.description },
         { existing: existing.concat(exclude), round: Number(body.round) || 0 },
       );
@@ -1416,10 +1526,13 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const [unused, unusedBroll] = transaction(db, () => {
         // B-roll goes with an answer if it's made and placed.
         const placed = "broll_status = 'ready' AND broll_start IS NOT NULL";
+        // The asker's character says a question they asked under their name, unless they're on camera.
+        const said = "source = 'asker' AND is_anonymous = 0 AND asker_video IS NULL";
         const snapshot = db.prepare(
           `UPDATE questions SET published_position = ?, published_answer_video = answer_video, published_answer_start = answer_start,
              published_broll = IIF(${placed}, broll_video, NULL), published_broll_start = IIF(${placed}, broll_start, NULL), published_broll_length = IIF(${placed}, broll_length, NULL),
-             published_broll_full = IIF(${placed}, broll_full, NULL), published_broll_past_end = IIF(${placed}, broll_full AND broll_past_end, NULL)
+             published_broll_full = IIF(${placed}, broll_full, NULL), published_broll_past_end = IIF(${placed}, broll_full AND broll_past_end, NULL),
+             published_avatar = IIF(${said}, (SELECT avatar_id FROM users WHERE users.id = questions.author_id), NULL)
            WHERE id = ?`,
         );
         working.forEach(([id], i) => snapshot.run(i + 1, id));
@@ -1632,8 +1745,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     res.end(JSON.stringify(payload));
   }
 
-  // `idle()` resolves when background speech, video and b-roll work is done (for tests).
-  return Object.assign(handle, { idle: () => Promise.all([speechJobs?.idle(), videoJobs?.idle(), brollJobs?.idle()]) });
+  // `idle()` resolves when background speech, video, b-roll and character work is done (for tests).
+  return Object.assign(handle, { idle: () => Promise.all([speechJobs?.idle(), videoJobs?.idle(), brollJobs?.idle(), avatarJobs?.idle()]) });
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://localhost');

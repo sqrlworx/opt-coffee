@@ -1,7 +1,7 @@
 // The building blocks of every screen, in React Native: text, buttons, fields, chips, sheets. Sized
 // for fingers (44-point targets) and set like the page: serif headings, hairlines, one accent.
 import { useEffect, useState } from 'react';
-import { Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useApp } from '../context.js';
 import { countdownParts, fmtDay, relative } from '../format.js';
 import { useMounted, useNow } from '../hooks.js';
@@ -282,7 +282,9 @@ export function Tag({ children, you = false, mod = false, expert = false }) {
   return <Text style={[s.tag, you && s.tagYou, mod && { color: color.ink2 }, expert && s.tagExpert]}>{children}</Text>;
 }
 
-export function Avatar({ name, size = 40 }) {
+// A user's profile picture: `uri`, the character they picked, or else the initial of their `name`.
+export function Avatar({ name, uri, size = 40 }) {
+  if (uri) return <Image source={{ uri }} style={[s.avatar, { width: size, height: size }]} />;
   return (
     <View style={[s.avatar, { width: size, height: size }]}>
       <Text style={[s.serif, { fontSize: size * 0.45, lineHeight: size }]}>{name.charAt(0).toUpperCase()}</Text>

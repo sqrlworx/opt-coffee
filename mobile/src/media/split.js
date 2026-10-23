@@ -3,8 +3,8 @@
 // recording) or beside it (the expert beside split-screen b-roll), a phone splits the player in two:
 // the expert in the top half, and the asker or the b-roll in the bottom half, each at full width.
 // This is the arithmetic for that, kept apart from React so it can be tested (test/split.test.js).
-// The fox saying a question nobody asked on camera doesn't split it: the expert keeps the whole
-// player, the fox in a bubble over them (JointPlayer.jsx).
+// The fox (or the asker's character) saying a question nobody asked on camera doesn't split it: the
+// expert keeps the whole player, the fox in a bubble over them (JointPlayer.jsx).
 
 // Where a layer sits on the stage, an upright player (9:16): `top` and `bottom` are its halves, and
 // `full` is all of it, for a lone picture before or after a split. A stage wider than tall

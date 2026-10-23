@@ -47,7 +47,7 @@ function FeedItem({ item }) {
   return (
     <View style={styles.card}>
       <Row gap={12}>
-        <Avatar name={oh.expert.displayName} />
+        <Avatar name={oh.expert.displayName} uri={oh.expert.avatar} />
         <View style={{ flex: 1 }}>
           <T>
             <UserLink user={oh.expert} style={{ fontWeight: '600' }} />

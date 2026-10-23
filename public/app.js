@@ -1,6 +1,6 @@
 // off hours — single-page client. No framework: a tiny h() helper and hash routing.
 
-import { fox, blinkAt } from './fox.js';
+import { babble, blinkAt, character, FOX } from './fox.js';
 
 const $app = document.getElementById('app');
 const $nav = document.getElementById('nav');
@@ -13,6 +13,7 @@ let makesBroll = false; // and have it made from a description
 let brollModel = null; // by this model, which films it
 let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
 let myVoice = null; // the one the user last picked (or the default)
+let avatarsOn = false; // people can make characters for their profile pictures
 let devUsers = null;
 let pageCleanup = null; // set by a page that holds resources (like the camera) to release on navigation
 
@@ -172,6 +173,12 @@ function action(fn) {
 
 function userLink(user) {
   return h('a', { href: `#/u/${user.username}`, class: 'user-link' }, user.displayName);
+}
+
+// A user's profile picture: the character they picked (see characterMaker), or their initial.
+function avatar(user, { large = false } = {}) {
+  const cls = `avatar${large ? ' avatar-lg' : ''}`;
+  return user.avatar ? h('img', { class: cls, src: user.avatar, alt: '' }) : h('span', { class: cls }, user.displayName.charAt(0).toUpperCase());
 }
 
 function statusBadge(oh) {
@@ -1243,7 +1250,8 @@ function icon(name) {
 // at the bottom, except for answers whose captions are burned into the video (`captions` on their
 // chapter, when the server finished it). While a question is being played, a picture at the top
 // left shows who asked: the asker's video for a question asked on camera, from the moment it starts
-// and kept in step with the question, and otherwise the fox saying it. `chapters` place each answer in the video, and where
+// and kept in step with the question, and otherwise the asker's character saying it, if it has one
+// (`avatar`), or else the fox. `chapters` place each answer in the video, and where
 // its question's sound starts in it (`questionStart`), which the fox and the asker's video follow;
 // its question's cues and its transcript's are timed from the start of its take. `update(q)` picks
 // up a transcript that's ready or corrected.
@@ -1264,9 +1272,9 @@ function jointPlayer(answers, { src, chapters }) {
 
   const video = fixDuration(h('video', { class: 'jp-video', src, preload: 'metadata', playsinline: true }), { firstFrame: true });
   const caption = h('span', { class: 'jp-caption', hidden: true });
-  const stand = fox(h('canvas', { class: 'jp-fox' })); // stands in for an asker who wasn't on camera
+  const standSlot = h('span', { class: 'jp-stand-slot' }); // the character standing in for an asker who wasn't on camera
   const faceSlot = h('span', { class: 'jp-face-slot' });
-  const pip = h('span', { class: 'jp-pip' }, stand.el, faceSlot);
+  const pip = h('span', { class: 'jp-pip' }, standSlot, faceSlot);
   const asker = h('span', { class: 'jp-asker' });
   const asking = h('div', { class: 'jp-asking', 'aria-hidden': 'true' }, pip, asker);
   const btn = (label, text, onclick) => h('button', { type: 'button', class: 'jp-btn', title: label, 'aria-label': label, onclick }, text);
@@ -1361,7 +1369,7 @@ function jointPlayer(answers, { src, chapters }) {
     el.classList.toggle('is-fullscreen', on);
     setChildren(fullscreenBtn, icon(on ? 'exitFullscreen' : 'fullscreen'));
     fullscreenBtn.setAttribute('aria-label', on ? 'Exit fullscreen (f)' : 'Fullscreen (f)');
-    tick(); // the fox is redrawn at its new size
+    tick(); // the character is redrawn at its new size
   };
   el.addEventListener('fullscreenchange', onFullscreen);
   el.addEventListener('webkitfullscreenchange', onFullscreen);
@@ -1425,6 +1433,15 @@ function jointPlayer(answers, { src, chapters }) {
   }
   video.addEventListener('seeking', () => (gaveUp = false));
 
+  // Who says a question nobody asked on camera: the asker's character, or the fox. Each is drawn on
+  // a canvas of its own, its picture loading while the answer before it plays.
+  const stands = new Map(); // its picture -> its drawer
+  function stand(q) {
+    const rig = q.avatar ?? FOX;
+    if (!stands.has(rig.src)) stands.set(rig.src, character(h('canvas', { class: 'jp-stand' }), rig));
+    return stands.get(rig.src);
+  }
+
   // The questions' lip sync, for the fox. Each loads while the answer before it plays.
   const lipSyncs = new Map(); // question id -> {fps, frames}; null while it loads, or if it couldn't
   function lipSync(q) {
@@ -1448,12 +1465,17 @@ function jointPlayer(answers, { src, chapters }) {
     if (q && q !== askingFor) {
       askingFor = q;
       asker.textContent = askerLabel(q);
+      if (!q.askerVideo) {
+        setChildren(standSlot, stand(q).el);
+        pip.style.background = (q.avatar ?? FOX).backdrop;
+      }
     }
     asking.classList.toggle('show', Boolean(q));
     const i = parts.indexOf(part);
     for (const p of [parts[i], parts[i + 1]]) {
       if (!started || !p) continue;
       if (p.q.askerVideo) face(p.q).preload = 'auto';
+      else stand(p.q);
       lipSync(p.q);
     }
     // How far into the question's sound, which starts a little after its take does.
@@ -1462,7 +1484,7 @@ function jointPlayer(answers, { src, chapters }) {
     level = q && analyser && !video.paused ? 0.6 * level + 0.4 * loudness() : 0.85 * level;
     if (q && !q.askerVideo) {
       const sync = lipSync(q);
-      stand.draw(sync ? (sync.frames[Math.floor(at * sync.fps)] ?? [0, 1, 0]) : [level, 1, level], blinkAt(q.id, at), at);
+      stand(q).draw(sync ? (sync.frames[Math.floor(at * sync.fps)] ?? [0, 1, 0]) : [level, 1, level], blinkAt(q.id, at), at);
     }
     fill.style.width = `${pct(t)}%`;
     time.textContent = `${fmtDuration(t)} / ${fmtDuration(total)}`;
@@ -1679,7 +1701,7 @@ function feedItem(item) {
   const head = h(
     'div',
     { class: 'feed-head' },
-    h('span', { class: 'avatar' }, oh.expert.displayName.charAt(0).toUpperCase()),
+    avatar(oh.expert),
     h(
       'div',
       {},
@@ -2969,7 +2991,7 @@ async function profilePage({ username }) {
   const header = h(
     'div',
     { class: 'card profile' },
-    h('div', { class: 'row gap' }, h('span', { class: 'avatar avatar-lg' }, u.displayName.charAt(0).toUpperCase()), h('div', {}, h('h1', {}, u.displayName), h('p', { class: 'muted small' }, `@${u.username} · ${data.subscriberCount} subscriber${data.subscriberCount === 1 ? '' : 's'}`))),
+    h('div', { class: 'row gap' }, avatar(u, { large: true }), h('div', {}, h('h1', {}, u.displayName), h('p', { class: 'muted small' }, `@${u.username} · ${data.subscriberCount} subscriber${data.subscriberCount === 1 ? '' : 's'}`))),
     u.bio ? h('p', { class: 'desc' }, u.bio) : null,
     u.expertise.length ? h('div', { class: 'row gap-sm wrap' }, u.expertise.map((t) => topicLink(t))) : null,
     data.isMe ? null : subscribeButton({ type: 'expert', id: u.id, subscribed: data.subscribed }),
@@ -2979,6 +3001,7 @@ async function profilePage({ username }) {
     'div',
     { class: 'stack' },
     header,
+    data.isMe && avatarsOn ? characterMaker() : null,
     data.isMe ? profileEditor(u) : null,
     h('section', {}, h('h2', { class: 'section-title' }, 'Upcoming & open'), upcoming.length ? h('div', { class: 'grid' }, upcoming.map(ohCard)) : empty('No upcoming off hours.', data.isMe ? h('a', { class: 'btn btn-outline', href: '#/oh/new' }, 'Host one') : null)),
     past.length ? h('section', {}, h('h2', { class: 'section-title' }, 'Answered'), h('div', { class: 'grid' }, past.map(ohCard))) : null,
@@ -3001,6 +3024,113 @@ function profileEditor(u) {
     })({ currentTarget: form.querySelector('button') });
   });
   return h('details', { class: 'card' }, h('summary', {}, 'Edit profile'), form);
+}
+
+// Making a character for the user's profile picture, which also says their questions in the video
+// of the answers (see jointPlayer). They say what it should be, or leave it to their profile; three
+// are drawn in the background, which takes a minute or so, and they pick one. Each is animated as
+// the players will animate it, blinking, and the one they're looking at talks.
+function characterMaker() {
+  const box = h('div', { class: 'form' });
+  const el = h('details', { class: 'card' }, h('summary', {}, 'Your character'), box);
+  const prompt = h('textarea', { rows: 2, maxlength: 300, placeholder: 'Like “an owl in a green scarf”, or leave it empty for ideas from your profile' });
+  let picked = null; // the option being looked at
+  let polling = false;
+
+  function show(state) {
+    if (!prompt.value && state.prompt) prompt.value = state.prompt;
+    const pending = state.status === 'pending';
+    const draw = h('button', { type: 'button', class: state.options.length ? 'btn btn-outline' : 'btn btn-primary', disabled: pending }, state.options.length || state.current ? 'Draw three more' : 'Draw three characters');
+    draw.addEventListener(
+      'click',
+      action(async () => {
+        const res = await api('POST', '/api/me/avatar', { prompt: prompt.value });
+        show(res.avatar);
+      }),
+    );
+    picked = state.options.find((o) => o.id === picked?.id) ?? state.options[0] ?? null;
+    const tiles = state.options.map((o, i) => {
+      const tile = h('button', { type: 'button', class: 'character-tile', 'aria-label': `Character ${i + 1}`, 'aria-pressed': String(o === picked) });
+      tile.append(characterPreview(o.rig, () => o === picked).el);
+      tile.addEventListener('click', () => {
+        picked = o;
+        for (const t of tiles) t.setAttribute('aria-pressed', String(t === tile));
+      });
+      return tile;
+    });
+    const use = h('button', { type: 'button', class: 'btn btn-primary' }, 'Use this one');
+    use.addEventListener(
+      'click',
+      action(async () => {
+        ({ user: me } = await api('PUT', '/api/me/avatar', { id: picked.id }));
+        toast('Your profile picture is your new character', 'success');
+        render();
+      }),
+    );
+    const remove = h('button', { type: 'button', class: 'link-btn' }, 'Go back to my initial');
+    remove.addEventListener(
+      'click',
+      action(async () => {
+        ({ user: me } = await api('DELETE', '/api/me/avatar'));
+        render();
+      }),
+    );
+    setChildren(
+      box,
+      h('p', { class: 'muted small' }, 'A cartoon character drawn for your profile picture. When you type a question, it says it in the video of the answers.'),
+      state.options.length
+        ? [h('div', { class: 'character-tiles', role: 'group', 'aria-label': 'Pick a character' }, tiles), h('div', { class: 'row gap-sm wrap' }, use, h('span', { class: 'muted small' }, 'or draw others:'))]
+        : null,
+      h('label', {}, 'What should it be?', prompt),
+      h('div', { class: 'row gap-sm wrap' }, draw, pending ? h('span', { class: 'muted small' }, 'Drawing three characters… this takes a minute or so.') : null),
+      state.error ? h('p', { class: 'notice' }, state.error) : null,
+      state.current && !state.options.length ? h('div', {}, remove) : null,
+    );
+    if (pending) poll();
+  }
+
+  // While they're being drawn, checks back every few seconds, until it's done or the page is left.
+  function poll() {
+    if (polling) return;
+    polling = true;
+    const tick = async () => {
+      if (!el.isConnected) return;
+      try {
+        const { avatar: state } = await api('GET', '/api/me/avatar', null, { timeout: 10_000 });
+        if (state.status !== 'pending') {
+          polling = false;
+          el.open = true;
+          return show(state);
+        }
+      } catch {
+        // failed or hung: try again on the next tick
+      }
+      setTimeout(tick, 3000);
+    };
+    setTimeout(tick, 3000);
+  }
+
+  api('GET', '/api/me/avatar').then(({ avatar: state }) => {
+    el.open = state.status != null; // drawing them, or some to pick from, or why it failed
+    show(state);
+  }, (err) => toast(err.message, 'error'));
+  return el;
+}
+
+// A character drawn from its `rig`, its head in a circle, as the phone's player shows it: it
+// blinks and sways, and talks while `talking()`. It stops once it leaves the page.
+function characterPreview(rig, talking) {
+  const drawer = character(h('canvas', { class: 'character-preview' }), rig, 'bubble');
+  const seed = Math.floor(Math.random() * 2 ** 31);
+  const start = performance.now();
+  const loop = (now) => {
+    const t = (now - start) / 1000;
+    if (drawer.el.isConnected) drawer.draw(talking() ? babble(t) : [0, 1, 0], blinkAt(seed, t % 60), t);
+    if (drawer.el.isConnected || now - start < 1000) requestAnimationFrame(loop); // it's put on the page a moment after it's made
+  };
+  requestAnimationFrame(loop);
+  drawer.el.style.background = rig.backdrop;
+  return drawer;
 }
 
 function loginPage(_, query) {
@@ -3038,7 +3168,7 @@ function loginPage(_, query) {
 
 // Who's logged in, their voice, and what the server can do.
 async function loadMe() {
-  ({ user: me, devLogin, devSession, speech, broll: brollOn, makesBroll, brollModel, voices, voice: myVoice } = await api('GET', '/api/me'));
+  ({ user: me, devLogin, devSession, speech, broll: brollOn, makesBroll, brollModel, voices, voice: myVoice, avatars: avatarsOn } = await api('GET', '/api/me'));
 }
 
 // Dev-only: switch between users without logging in. Shown when the server runs with --dev, until

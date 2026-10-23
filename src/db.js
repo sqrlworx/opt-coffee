@@ -9,7 +9,25 @@ CREATE TABLE IF NOT EXISTS users (
   bio           TEXT NOT NULL DEFAULT '',
   expertise     TEXT NOT NULL DEFAULT '',   -- comma-separated tags
   voice         TEXT,                       -- the voice they last picked to read their typed questions aloud; NULL = the server's default
+  avatar_id     INTEGER REFERENCES avatars(id) ON DELETE SET NULL,  -- their character: their profile picture, which says their questions in the joined video; NULL = their initial
+  avatar_prompt TEXT,                       -- what they last asked their character to be ('' for nothing in particular)
+  avatar_status TEXT,                       -- drawing the characters they asked for: 'pending' | 'ready' (offered to pick from) | 'failed'; NULL = none asked for, or picked
+  avatar_error  TEXT,                       -- why drawing them failed, to show them
   created_at    TEXT NOT NULL
+);
+
+-- Characters drawn for people's profile pictures (src/avatar/), which players animate saying
+-- their questions as they do the fox. Three are offered at a time; the one picked is kept for as
+-- long as it's their picture, or a published answer has it saying the question.
+CREATE TABLE IF NOT EXISTS avatars (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused, so a character no longer offered can't be picked as a newer one
+  user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  character  TEXT NOT NULL,                 -- what it was drawn from: the LLM's description of it
+  picture    TEXT NOT NULL,                 -- the profile picture: its head and shoulders, square (WebP in the media dir)
+  base       TEXT NOT NULL,                 -- all of it with its eyes and mouth painted out, which players draw them over (WebP in the media dir)
+  rig        TEXT NOT NULL,                 -- JSON: where its eyes and mouth go in base, and what of it to show (see public/fox.js), without its src
+  offered    INTEGER NOT NULL DEFAULT 0,    -- 1: one of the characters offered to its user, not picked (yet)
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -51,7 +69,7 @@ CREATE TABLE IF NOT EXISTS questions (
   asker_video_copy TEXT,                    -- once it's published, asker_video as players load it: an MP4 they can start anywhere in right away (see joiner.seekable); NULL until made
   audio_status   TEXT,                      -- reading a typed question aloud: 'pending' | 'ready' | 'failed'; NULL when speech is off
   voice          TEXT,                      -- the Kokoro voice a typed question is read aloud in; NULL = the server's default
-  lip_sync       TEXT,                      -- how the mouth moves saying audio, for the fox that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
+  lip_sync       TEXT,                      -- how the mouth moves saying audio, for the fox (or the asker's character) that says it in the joined video: JSON {fps, frames: [[open, width, energy], ...]}; NULL until made
   created_at     TEXT NOT NULL,
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir
@@ -74,7 +92,8 @@ CREATE TABLE IF NOT EXISTS questions (
   published_broll_start  REAL,
   published_broll_length REAL,
   published_broll_full   INTEGER,
-  published_broll_past_end INTEGER
+  published_broll_past_end INTEGER,
+  published_avatar INTEGER REFERENCES avatars(id) ON DELETE SET NULL  -- the asker's character when it was published, which says the question instead of the fox: only for one they asked under their name, not on camera
 );
 CREATE INDEX IF NOT EXISTS questions_by_oh ON questions(office_hour_id);
 
@@ -222,8 +241,19 @@ function migrate(db) {
       ALTER TABLE questions ADD COLUMN published_broll_past_end INTEGER;
     `);
   }
+  // Published questions can be said by the asker's character.
+  if (!columns.has('published_avatar')) db.exec('ALTER TABLE questions ADD COLUMN published_avatar INTEGER REFERENCES avatars(id) ON DELETE SET NULL');
   const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
   if (!userColumns.has('voice')) db.exec('ALTER TABLE users ADD COLUMN voice TEXT');
+  if (!userColumns.has('avatar_id')) {
+    // People can make a character for their profile picture.
+    db.exec(`
+      ALTER TABLE users ADD COLUMN avatar_id INTEGER REFERENCES avatars(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN avatar_prompt TEXT;
+      ALTER TABLE users ADD COLUMN avatar_status TEXT;
+      ALTER TABLE users ADD COLUMN avatar_error TEXT;
+    `);
+  }
   // The dev user switcher is shown only to sessions it made.
   const sessionColumns = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name));
   if (!sessionColumns.has('dev')) db.exec('ALTER TABLE sessions ADD COLUMN dev INTEGER NOT NULL DEFAULT 0');

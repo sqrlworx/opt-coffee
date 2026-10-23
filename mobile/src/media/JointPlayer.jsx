@@ -7,9 +7,9 @@
 // starts, kept in step with the question. While an answer's split-screen b-roll plays, all of the
 // clip is, in step, on a blurred copy of itself where its shape leaves room. The rest of the time
 // the joined video has the whole stage, full-screen b-roll included, which the server cuts into it. The halves crop the expert and the asker to frame their faces, where the server found
-// them (the chapters' expertFocus and askerFocus). Any other question doesn't split: the fox says
-// it in a bubble at the top left, over the expert, with the asker's name under it, where the page
-// shows the asker's picture.
+// them (the chapters' expertFocus and askerFocus). Any other question doesn't split: the asker's
+// character says it, if it has one (`avatar`), or else the fox, in a bubble at the top left, over the
+// expert, with the asker's name under it, where the page shows the asker's picture.
 //
 // It has its own controls (a video's own would shrink into one half), which fade while it plays
 // until the stage is tapped. While it's too narrow for all of them, as when it shrinks docked under
@@ -24,7 +24,7 @@
 // video while it plays alone. So are burned-in ones while b-roll covers them, in a video joined
 // before there were copies for phones.
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { blinkAt, FOX, fox } from '../../../public/fox.js';
+import { blinkAt, character, FOX } from '../../../public/fox.js';
 import { api } from '../api.js';
 import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
@@ -41,11 +41,10 @@ export const INTO_ANSWER = 0.04;
 // How far down the stage a lone picture's captions come, where the phone's 3:4 copy burns them in
 // (src/finish/captions.py).
 const LOW = 0.8;
-// The fox's bubble is the colour of its picture's own background (public/fox.webp), so whatever room
-// is left around the fox doesn't show.
-const FOX_BACKDROP = '#f9f9f9';
 
-const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, asker: '', focus: null, pip: false, second: 0, playing: false, started: false };
+// The bubble is the colour of its character's picture's own background (`backdrop`), so whatever
+// room is left around the character doesn't show.
+const INITIAL = { split: null, caption: null, isQuestion: false, bubble: false, backdrop: FOX.backdrop, asker: '', focus: null, pip: false, second: 0, playing: false, started: false };
 const same = (a, b) => Object.keys(a).every((k) => a[k] === b[k]);
 
 export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onCurrent, tall }, ref) {
@@ -88,6 +87,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       if (!r.started || !p) continue;
       if (p.q.askerVideo) face(p).preload = 'auto';
       if (p.q.broll?.video && !p.q.broll.full) clip(p.q).preload = 'auto';
+      if (!p.q.askerVideo) speaker(p.q);
       lipSync(p.q);
     }
     showFace(m.asking?.askerVideo ? face(m.part) : null, m.at);
@@ -98,11 +98,11 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     const bubble = Boolean(m.asking && !m.asking.askerVideo);
     if (bubble) {
       const sync = lipSync(m.asking);
-      r.bubbleFox.draw(sync ? (sync.frames[Math.floor(m.at * sync.fps)] ?? [0, 1, 0]) : [r.level, 1, r.level], blinkAt(m.asking.id, m.at), m.at);
+      speaker(m.asking).draw(sync ? (sync.frames[Math.floor(m.at * sync.fps)] ?? [0, 1, 0]) : [r.level, 1, r.level], blinkAt(m.asking.id, m.at), m.at);
     }
     const pip = v.videoWidth > v.videoHeight; // the page's video, with the b-roll cut in
     if (m.cut && pip) drawCrop();
-    if (m.asking) r.asker = askerLabel(m.asking); // kept while the half or the bubble fades out
+    if (m.asking) [r.asker, r.backdrop] = [askerLabel(m.asking), (m.asking.avatar ?? FOX).backdrop]; // kept while the half or the bubble fades out
     if (fillRef.current) fillRef.current.style.width = `${total ? (100 * t) / total : 0}%`;
     // Which answer is playing, for Skip to under the player: nothing before it's played.
     const current = v.paused && t < 0.05 ? null : (m.part?.q.id ?? null);
@@ -110,7 +110,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       r.current = current;
       onCurrent?.(current);
     }
-    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, asker: r.asker, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused || r.held, started: r.started };
+    const next = { split: m.split, caption: cue?.[2] ?? null, isQuestion: Boolean(m.asking), bubble, backdrop: r.backdrop, asker: r.asker, focus: m.part?.expertFocus ?? null, pip, second: Math.floor(t), playing: !v.paused || r.held, started: r.started };
     setView((prev) => (same(prev, next) ? prev : next));
   }, []);
 
@@ -210,6 +210,15 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     ctx.drawImage(v, sx + cx, sy + cy, cw, ch, 0, 0, w, h);
   }
 
+  // Who says a question nobody asked on camera, in the bubble: the asker's character, or the fox. Each
+  // draws on the bubble's canvas, its picture loading while the answer before it plays.
+  function speaker(q) {
+    const r = rt.current;
+    const rig = q.avatar ?? FOX;
+    if (!r.speakers.has(rig.src)) r.speakers.set(rig.src, character(bubbleCanvas.current, rig, 'bubble'));
+    return r.speakers.get(rig.src);
+  }
+
   // The questions' lip sync, for the fox. Each loads while the answer before it plays.
   function lipSync(q) {
     const r = rt.current;
@@ -267,7 +276,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
 
   useEffect(() => {
     const v = videoRef.current;
-    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, held: false, gaveUp: false, holdTimer: 0, bubbleFox: fox(bubbleCanvas.current, FOX.bubble), asker: '', current: undefined, frame: 0 };
+    rt.current = { started: false, captionsOn: true, analyser: null, samples: null, level: 0, audio: null, faces: new Map(), clips: new Map(), lipSyncs: new Map(), shownFace: null, shownClip: null, held: false, gaveUp: false, holdTimer: 0, speakers: new Map(), asker: '', backdrop: FOX.backdrop, current: undefined, frame: 0 };
     const r = rt.current;
     const unfix = fixDuration(v, { firstFrame: true });
     // Every frame while it plays, so the split and the captions land on time; timeupdate is only a
@@ -352,10 +361,10 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
       <div style={layer(view.split ? 'top' : 'full', wide, { z: 3, extra: { display: 'flex', alignItems: 'flex-end', justifyContent: 'center', boxSizing: 'border-box', padding: '0 6%', ...captionLow } })} aria-hidden="true">
         {view.caption ? <span style={{ ...captionStyle, fontStyle: view.isQuestion ? 'italic' : 'normal', transform: `translateY(${captionShift})` }}>{view.caption}</span> : null}
       </div>
-      {/* Faded rather than taken out, so the fox has a size to draw at the moment it comes in. */}
+      {/* Faded rather than taken out, so the character has a size to draw at the moment it comes in. */}
       <div style={{ position: 'absolute', inset: 0, zIndex: 4, containerType: 'size', pointerEvents: 'none' }} aria-hidden="true">
         <div style={{ ...bubbleGroup, opacity: view.bubble ? 1 : 0, transform: view.bubble ? 'none' : 'scale(0.85)' }}>
-          <div style={bubbleCircle}>
+          <div style={{ ...bubbleCircle, background: view.backdrop }}>
             <canvas ref={bubbleCanvas} style={{ display: 'block', width: '100%', height: '100%', borderRadius: '50%' }} />
           </div>
           {view.asker ? <span style={bubbleName}>{view.asker}</span> : null}
@@ -418,13 +427,13 @@ function sideVideo(src, fit, background) {
 const pill = { padding: '3px 11px', borderRadius: 999, background: 'rgba(0,0,0,0.5)', color: '#fff', font: "600 13px/1.4 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", whiteSpace: 'nowrap' };
 // At the bottom left of the asker's half, risen clear of the controls while they're shown.
 const askerPill = { ...pill, position: 'absolute', left: 10, transition: 'bottom 0.25s' };
-// The fox's bubble, at the top left: two-fifths of the stage's width, or less of a sideways one's
+// The bubble, at the top left: two-fifths of the stage's width, or less of a sideways one's
 // height, where it sits beside the picture. The asker's name is centred under it: a name wider than
 // the bubble moves it in a little, and a much longer one is cut short. It grows from the corner as it
 // comes in, as the page's picture of the asker does.
 const BUBBLE = 'min(40cqw, 30cqh)';
 const bubbleGroup = { position: 'absolute', top: 12, left: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, transformOrigin: 'top left', transition: 'opacity 0.3s, transform 0.3s' };
-const bubbleCircle = { width: BUBBLE, aspectRatio: '1', borderRadius: '50%', overflow: 'hidden', background: FOX_BACKDROP, boxShadow: '0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(255,255,255,0.85)' };
+const bubbleCircle = { width: BUBBLE, aspectRatio: '1', borderRadius: '50%', overflow: 'hidden', boxShadow: '0 4px 16px rgba(0,0,0,0.4), 0 0 0 2px rgba(255,255,255,0.85)' };
 const bubbleName = { ...pill, boxSizing: 'border-box', maxWidth: `calc(${BUBBLE} + 64px)`, overflow: 'hidden', textOverflow: 'ellipsis' };
 const captionStyle = { padding: '2px 9px', borderRadius: 5, background: 'rgba(0,0,0,0.62)', color: '#fff', font: "600 15px/1.35 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", textAlign: 'center', textWrap: 'balance', transition: 'transform 0.3s' };
 const controlsBar = { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 5, paddingTop: 28, paddingBottom: 2, background: 'linear-gradient(transparent, rgba(0,0,0,0.7))', transition: 'opacity 0.25s' };

@@ -336,15 +336,15 @@ textarea { resize: vertical; }
 .jp-caption { padding: 0.15em 0.55em; border-radius: 0.3em; background: rgba(0, 0, 0, 0.62); color: #fff; font-size: clamp(14px, 2.6cqw, 36px); font-weight: 600; line-height: 1.35; text-align: center; text-wrap: balance; }
 .jp-caption.is-question { font-style: italic; }
 /* While a question is played: who asked, at the top left. Their picture sits above their name: the
-   asker's video for a question asked on camera, once it has a frame to show, and otherwise the
-   fox saying the question (drawn on a canvas). */
+   asker's video for a question asked on camera, once it has a frame to show, and otherwise their
+   character, or the fox, saying the question (drawn on a canvas, on its picture's background). */
 .jp-asking { position: absolute; top: 3cqw; left: 3cqw; display: flex; flex-direction: column; align-items: flex-start; gap: 0.5em; font-size: clamp(12px, 1.6cqw, 20px); pointer-events: none; opacity: 0; transform: scale(0.85); transform-origin: top left; transition: opacity 0.3s, transform 0.3s; }
 .jp-asking.show { opacity: 1; transform: none; }
 .jp-pip { position: relative; display: block; width: 11em; aspect-ratio: 4 / 3; overflow: hidden; border-radius: 0.6em; background: #f3f3f3; box-shadow: 0 0.3em 1.2em rgba(0, 0, 0, 0.45), 0 0 0 2px rgba(255, 255, 255, 0.85); }
-.jp-fox { position: absolute; inset: 0; width: 100%; height: 100%; }
+.jp-stand-slot, .jp-stand { position: absolute; inset: 0; width: 100%; height: 100%; }
 .jp-face-slot { position: absolute; inset: 0; }
 .jp-asking:not(.has-face) .jp-face-slot { display: none; } /* it keeps loading while hidden */
-.jp-asking.has-face .jp-fox { visibility: hidden; }
+.jp-asking.has-face .jp-stand-slot { visibility: hidden; }
 .jp-face { display: block; width: 100%; height: 100%; object-fit: cover; background: #111; }
 .jp-face.upright { object-fit: contain; } /* all of one from a phone held upright, not a 4:3 slice of it */
 .jp-asker { padding: 0.25em 0.7em; border-radius: 999px; background: rgba(0, 0, 0, 0.45); color: #fff; font-weight: 600; white-space: nowrap; }
@@ -381,6 +381,12 @@ textarea { resize: vertical; }
 .feed-head { display: flex; gap: 12px; align-items: center; font-size: 0.92rem; }
 .avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--surface); color: var(--ink); display: grid; place-items: center; font-family: var(--serif); font-size: 1.15rem; flex-shrink: 0; }
 .avatar-lg { width: 72px; height: 72px; font-size: 2rem; }
+img.avatar { object-fit: cover; }
+/* The characters drawn for someone to pick one as their profile picture. */
+.character-tiles { display: flex; flex-wrap: wrap; gap: 16px; }
+.character-tile { padding: 4px; border: none; border-radius: 50%; background: none; cursor: pointer; box-shadow: 0 0 0 2px transparent; transition: box-shadow 0.15s; }
+.character-tile[aria-pressed=true] { box-shadow: 0 0 0 3px var(--accent); }
+.character-preview { display: block; width: 140px; height: 140px; border-radius: 50%; }
 .feed-item { gap: 16px; }
 .feed-title { display: grid; gap: 10px; }
 .feed-title a { color: inherit; text-decoration: none; }
