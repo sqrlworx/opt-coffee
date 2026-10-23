@@ -74,28 +74,34 @@ CREATE TABLE IF NOT EXISTS questions (
   plan_position  INTEGER,                   -- expert's working answer order; NULL = not selected
   answer_video   TEXT,                      -- expert's working (draft) video answer: file name in the media dir
   answer_start   REAL,                      -- seconds into answer_video where the answer begins (after the question is played); NULL = from the start
-  broll_prompt   TEXT,                      -- the expert's description of b-roll to cut away to during the answer; for a clip they uploaded, what it shows, if they said
-  broll_shot     TEXT,                      -- the shot that was filmed for it: the description written up as something a video model can film
-  broll_upload   TEXT,                      -- b-roll the expert uploaded instead: their file's name; NULL when it's made from broll_prompt
-  broll_status   TEXT,                      -- making it (or getting an upload ready) and placing it in the take: 'pending' | 'ready' | 'failed'; NULL = no b-roll
-  broll_video    TEXT,                      -- the b-roll clip (file in the media dir); named when it's asked for, so it may not exist until ready
-  broll_start    REAL,                      -- seconds into answer_video where it cuts away to the b-roll
-  broll_length   REAL,                      -- seconds the b-roll plays for, from its start (no longer than the clip, and within the answer unless it runs past its end)
-  broll_full     INTEGER NOT NULL DEFAULT 0, -- 1: full screen, for a clip the expert uploaded: all of it in the page's frame, with the expert in the corner, and in the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
-  broll_past_end INTEGER NOT NULL DEFAULT 0, -- 1: full screen, it plays to its end even past the end of the answer, which gets longer; 0: it stops a little before the answer ends
-  broll_chosen   REAL,                      -- seconds into answer_video where the expert chose to cut away to it; NULL = where the moderator places it
-  broll_seconds  REAL,                      -- how long the clip is, measured when it was placed
   published_position     INTEGER,           -- snapshot taken at publish time: what readers see
   published_answer_video TEXT,
   published_answer_start REAL,
-  published_broll        TEXT,              -- the b-roll as published, if it was ready and placed: its clip, start, length, whether it's full screen and runs past the end
-  published_broll_start  REAL,
-  published_broll_length REAL,
-  published_broll_full   INTEGER,
-  published_broll_past_end INTEGER,
   published_avatar INTEGER REFERENCES avatars(id) ON DELETE SET NULL  -- the asker's character when it was published, which says the question instead of the fox: only for one they asked under their name, not on camera
 );
 CREATE INDEX IF NOT EXISTS questions_by_oh ON questions(office_hour_id);
+
+-- B-roll the expert cuts away to during an answer (src/broll/): any number of clips, each made from
+-- a description or uploaded, and placed in the take where it doesn't overlap the others. Like the
+-- answer, it's theirs alone until it's published with it, and final then.
+CREATE TABLE IF NOT EXISTS brolls (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused, so a clip that's gone can't be taken for a newer one
+  question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+  prompt      TEXT,                         -- the expert's description of it; for a clip they uploaded, what it shows, if they said
+  shot        TEXT,                         -- the shot that was filmed for it: the description written up as something a video model can film
+  upload      TEXT,                         -- a clip the expert uploaded: their file's name; NULL when it's made from prompt
+  status      TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'failed')),  -- making it (or getting an upload ready) and placing it in the take
+  video       TEXT NOT NULL,                -- the clip (file in the media dir); named when it's asked for, so it may not exist until ready
+  start       REAL,                         -- seconds into the answer's take where it cuts away to the clip; NULL = not placed (no room for it)
+  length      REAL,                         -- seconds the clip plays for, from its start (no longer than the clip, and within the answer unless it runs past its end)
+  full        INTEGER NOT NULL DEFAULT 0,   -- 1: full screen, for a clip the expert uploaded: all of it in the page's frame, with the expert in the corner, and in the phone's whole player; 0: split screen, the expert beside it on the page and above it on the phone
+  past_end    INTEGER NOT NULL DEFAULT 0,   -- 1: full screen, it plays to its end even past the end of the answer, which gets longer; 0: it stops a little before the answer ends
+  chosen      REAL,                         -- seconds into the take where the expert chose to cut away to it; NULL = where the moderator places it
+  seconds     REAL,                         -- how long the clip is, measured when it was placed
+  published   INTEGER NOT NULL DEFAULT 0,   -- 1: published with its answer, made and placed, and so final and public
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS brolls_by_question ON brolls(question_id);
 
 -- Speech-to-text for a recording: an answer video or a question asked out loud. Keyed by file, so
 -- a draft answer and its published snapshot share one transcript.
@@ -158,13 +164,14 @@ CREATE INDEX IF NOT EXISTS subscriptions_by_target ON subscriptions(target_type,
 export function openDb(path = ':memory:') {
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  const hadBrolls = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'brolls'").get());
   db.exec(SCHEMA);
-  migrate(db);
+  migrate(db, { hadBrolls });
   return db;
 }
 
 // Bring databases created by earlier versions up to the current schema.
-function migrate(db) {
+function migrate(db, { hadBrolls }) {
   const columns = new Set(db.prepare('PRAGMA table_info(questions)').all().map((c) => c.name));
   if (!columns.has('published_position')) {
     // Before drafts existed, the working answers *were* the published ones.
@@ -208,37 +215,19 @@ function migrate(db) {
   if (!columns.has('lip_sync')) db.exec('ALTER TABLE questions ADD COLUMN lip_sync TEXT');
   // Askers pick the voice their typed question is read aloud in.
   if (!columns.has('voice')) db.exec('ALTER TABLE questions ADD COLUMN voice TEXT');
-  if (!columns.has('broll_status')) {
-    // Experts can add b-roll to their answers.
+  if (!hadBrolls && columns.has('broll_status')) {
+    // An answer had one b-roll clip, in its question's columns; now it has any number, in brolls.
+    // The old columns stay, no longer read. Ones added after b-roll itself may not be there.
+    const old = (name, otherwise = 'NULL') => (columns.has(name) ? name : otherwise);
     db.exec(`
-      ALTER TABLE questions ADD COLUMN broll_prompt TEXT;
-      ALTER TABLE questions ADD COLUMN broll_status TEXT;
-      ALTER TABLE questions ADD COLUMN broll_video TEXT;
-      ALTER TABLE questions ADD COLUMN broll_start REAL;
-      ALTER TABLE questions ADD COLUMN broll_length REAL;
-      ALTER TABLE questions ADD COLUMN published_broll TEXT;
-      ALTER TABLE questions ADD COLUMN published_broll_start REAL;
-      ALTER TABLE questions ADD COLUMN published_broll_length REAL;
-    `);
-  }
-  // B-roll is written up as a shot before it's filmed.
-  if (!columns.has('broll_shot')) db.exec('ALTER TABLE questions ADD COLUMN broll_shot TEXT');
-  // Experts can upload b-roll of their own.
-  if (!columns.has('broll_upload')) db.exec('ALTER TABLE questions ADD COLUMN broll_upload TEXT');
-  if (!columns.has('broll_full')) {
-    // B-roll they upload can be full screen instead of split screen.
-    db.exec(`
-      ALTER TABLE questions ADD COLUMN broll_full INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE questions ADD COLUMN published_broll_full INTEGER;
-    `);
-  }
-  if (!columns.has('broll_chosen')) {
-    // Experts can choose where b-roll cuts in, and let full-screen b-roll run past the end of the answer.
-    db.exec(`
-      ALTER TABLE questions ADD COLUMN broll_past_end INTEGER NOT NULL DEFAULT 0;
-      ALTER TABLE questions ADD COLUMN broll_chosen REAL;
-      ALTER TABLE questions ADD COLUMN broll_seconds REAL;
-      ALTER TABLE questions ADD COLUMN published_broll_past_end INTEGER;
+      INSERT INTO brolls (question_id, prompt, shot, upload, status, video, start, length, full, past_end, chosen, seconds, published, created_at)
+      SELECT id, broll_prompt, ${old('broll_shot')}, ${old('broll_upload')}, 'ready', published_broll, published_broll_start, published_broll_length,
+             COALESCE(${old('published_broll_full')}, 0), COALESCE(${old('published_broll_past_end')}, 0), ${old('broll_chosen')}, ${old('broll_seconds')}, 1, created_at
+      FROM questions WHERE published_broll IS NOT NULL;
+      INSERT INTO brolls (question_id, prompt, shot, upload, status, video, start, length, full, past_end, chosen, seconds, created_at)
+      SELECT id, broll_prompt, ${old('broll_shot')}, ${old('broll_upload')}, broll_status, broll_video, broll_start, broll_length,
+             ${old('broll_full', 0)}, ${old('broll_past_end', 0)}, ${old('broll_chosen')}, ${old('broll_seconds')}, created_at
+      FROM questions WHERE broll_status IS NOT NULL AND broll_video IS NOT NULL AND broll_video IS NOT published_broll;
     `);
   }
   // Published questions can be said by the asker's character.

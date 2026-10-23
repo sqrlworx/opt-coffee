@@ -71,7 +71,7 @@ export function PublishedAnswers({ oh, data }) {
                     </Row>
                   </View>
                 </Row>
-                <AnswerVideo src={q.video} captions={q.transcript?.captions} broll={q.broll} />
+                <AnswerVideo src={q.video} captions={q.transcript?.captions} brolls={q.brolls} />
               </View>
             ))}
           </View>

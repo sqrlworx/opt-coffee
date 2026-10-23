@@ -14,7 +14,8 @@ export const color = {
   accentInk: '#ffffff',
   accentSoft: '#f3e5dc',
   accentRing: 'rgba(168, 68, 31, 0.25)',
-  brollSpan: 'rgba(226, 132, 96, 0.9)', // the accent, lightened for a dark timeline
+  brollSpan: 'rgb(226, 132, 96)', // the accent, lightened for a dark timeline: b-roll that's been played
+  brollSpanAhead: 'rgba(226, 132, 96, 0.5)', // and b-roll still to play, see-through as the timeline is
 };
 
 export const font = {

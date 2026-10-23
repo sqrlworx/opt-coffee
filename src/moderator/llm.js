@@ -123,7 +123,7 @@ export function createLlmModerator(name, ask) {
       return ask(prompt, SUMMARY_SCHEMA);
     },
 
-    async placeBroll({ description, question, cues, length, from, to, full = false }) {
+    async placeBroll({ description, question, cues, windows, others = [], full = false }) {
       const looks = full
         ? "it fills the screen, the expert's picture moves to a small window in the corner (on a phone it isn't seen at all), and the expert keeps talking."
         : 'the screen splits, the expert on one side and the b-roll on the other, and the expert keeps talking.';
@@ -131,12 +131,15 @@ export function createLlmModerator(name, ask) {
         `Pick where to cut away to b-roll in one answer from an office hour's video. While the b-roll plays, ${looks}`,
         '',
         `<question>\n${question}\n</question>`,
-        `<b_roll seconds="${length.toFixed(1)}">\n${description}\n</b_roll>`,
+        `<b_roll>\n${description}\n</b_roll>`,
+        ...(others.length
+          ? ['<other_b_roll>', ...others.map((o) => `[${secs(o.start)}-${secs(o.start + o.length)}] ${o.description || '(not described)'}`), '</other_b_roll>']
+          : []),
         '<answer_transcript>',
         ...cues.map(([start, end, text]) => `[${secs(start)}-${secs(end)}] ${text}`),
         '</answer_transcript>',
         '',
-        `start: when the b-roll starts, in seconds, between ${secs(from)} and ${secs(to)}. Cut away as the expert starts talking about what the b-roll shows, at the start of a sentence or phrase, so it illustrates what they're saying while they say it. If nothing in the answer matches it, pick a moment where it still fits, such as an example or a description, rather than an emotional or personal moment where the viewer wants to see the expert's face.`,
+        `start: when the b-roll starts, in seconds, ${windows.length > 1 ? 'in one of these ranges' : 'between'} ${windows.map((w) => `${secs(w.from)} and ${secs(w.to)} (it plays for ${secs(w.length)})`).join('; ')}.${others.length ? ' The other b-roll is already cut in where it says, and these ranges keep clear of it.' : ''} Cut away as the expert starts talking about what the b-roll shows, at the start of a sentence or phrase, so it illustrates what they're saying while they say it. If nothing in the answer matches it, pick a moment where it still fits, such as an example or a description, rather than an emotional or personal moment where the viewer wants to see the expert's face.`,
       ].join('\n');
       return ask(prompt, BROLL_SCHEMA);
     },

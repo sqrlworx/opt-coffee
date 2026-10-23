@@ -30,8 +30,8 @@ The server (src/finish/index.js) runs this once per office hour with a job file:
     {"takes": [{"input": "media/a.mp4", "output": "/tmp/x/0.mp4", "mobile_output": "/tmp/x/0m.mp4" or null, "mobile_size": [1080, 1440],
                 "asker_video": "media/q.mp4" or null,
                 "answer_start": 4.95, "cues": [[start, end, "text"], ...] or null, "words": [[start, end, " word"], ...] or null,
-                "cutaway": {"input": "media/b.mp4", "layout": "split" or "corner", "filter": "...", "mobile_filter": "..." or null,
-                            "start": 2.5, "length": 6, "past_end": false} or null}],
+                "cutaways": {"inputs": ["media/b.mp4", ...], "filter": "...", "mobile_filter": "..." or null,
+                             "halves": [[2.5, 6], ...], "end": 14.2 or null} or null}],
      "voice": "studio" or "natural", "workers": 0}
 
 Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without re-encoding:
@@ -41,15 +41,16 @@ Every take becomes a 1920x1080, 30 fps H.264/AAC part, so the parts join without
   then a broadcast voice chain, with question and answer each at -16 LUFS;
 - captions (captions.py), when the take has a transcript: a few words at a time, a colour per
   speaker, louder words bigger and key words heavier or in italics;
-- b-roll, when the take has a cutaway: its clip, and the ffmpeg filter graph that cuts away to it
-  (made by src/video.js), from [pic], the finished picture, and [2:v], the clip, to [cut]. It goes
-  under the grain and the captions. `start` and `length` are when it plays. All of the clip shows,
-  over a blurred copy of itself. Split screen (`layout` "split") puts it beside [half], the take
-  filling the left half, which is made here, framed to the expert's face (see side_focus in
-  captions.py). Full screen ("corner") puts it in the frame with the take in the corner, and in the
-  phone's copy too, with `mobile_filter`, from [phonepic], that copy's picture, and [2:v] to
-  [phonecut]. With `past_end`, full-screen b-roll that runs past the end of the take, the take is
-  lengthened to where it ends: its last frame held (under the b-roll), and silence.
+- b-roll, when the take has cutaways: their clips, and the ffmpeg filter graph that cuts away to
+  each in turn (made by src/video.js), from [pic], the finished picture, and [2:v], [3:v] and so
+  on, the clips, to [cut]. It goes under the grain and the captions. All of each clip shows, over a
+  blurred copy of itself. Split screen puts it beside the take filling the left half, [half0],
+  [half1] and so on, one for each clip split screen, which are made here, each framed to the
+  expert's face while it plays (`halves`: when each of those clips starts, and for how long; see
+  side_focus in captions.py). Full screen puts it in the frame with the take in the corner, and in
+  the phone's copy too, with `mobile_filter`, from [phonepic], that copy's picture, and the clips to
+  [phonecut]. With an `end`, where full-screen b-roll that runs past the end of the take ends, the
+  take is lengthened to there: its last frame held (under the b-roll), and silence.
 
 With a `mobile_output`, the take is also written there for the mobile app, in the same pass: the
 same finished picture and sound, but upright, `mobile_size` (1080x1440, or 1080x1920 when every
@@ -304,10 +305,8 @@ def placement(size: tuple[int, int], out: tuple[int, int] = (OUT_W, OUT_H), fill
 
 def overrun(take: dict, frames: int) -> float:
     """Seconds the take is lengthened by, for b-roll that runs past its end."""
-    cutaway = take.get("cutaway")
-    if not cutaway or not cutaway.get("past_end"):
-        return 0.0
-    return max(0.0, cutaway["start"] + cutaway["length"] - frames / FPS)
+    end = (take.get("cutaways") or {}).get("end")
+    return max(0.0, end - frames / FPS) if end else 0.0
 
 
 def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, ass: Path | None, mobile_ass: Path | None, fonts: Path, tmp: Path) -> None:
@@ -322,32 +321,36 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
     def burn(script: Path | None) -> str:
         return ",".join([*([f"ass={_escape(script)}:fontsdir={_escape(fonts)}"] if script else []), "format=yuv420p"])
 
-    cutaway = take.get("cutaway")
+    cutaways = take.get("cutaways")
     phone = take.get("mobile_output")
     pw, ph = take.get("mobile_size") or (0, 0)
-    split = bool(cutaway) and cutaway.get("layout") == "split"
-    copies = ["desktop", *(["phone"] if phone else []), *(["face"] if split else [])]
+    halves = (cutaways or {}).get("halves") or []
+    copies = ["desktop", *(["phone"] if phone else []), *(["face"] if halves else [])]
     labels = "".join(f"[{c}]" for c in copies)
     extra = overrun(take, info["frames"])
     hold = f",tpad=stop_mode=clone:stop_duration={extra:.3f}" if extra else ""
     picture = f"[0:v]setpts=N/{FPS}/TB{hold}" + (f",split={len(copies)}{labels};[desktop]" if len(copies) > 1 else ",") + f"{fit_filter(info['size'])},{sharpen}"
-    graph = f"{picture}[pic];{cutaway['filter']};[cut]{grain},{burn(ass)}[v]" if cutaway else f"{picture},{grain},{burn(ass)}[v]"
-    if split:
-        # The take beside its split-screen b-roll, filling the left half, framed to the expert's face
-        # while the b-roll plays.
+    graph = f"{picture}[pic];{cutaways['filter']};[cut]{grain},{burn(ass)}[v]" if cutaways else f"{picture},{grain},{burn(ass)}[v]"
+    if halves:
+        # The take beside each clip of split-screen b-roll, filling the left half, framed to the
+        # expert's face while that clip plays.
         size, track = info["size"], info["track"]
-        face = None
-        if track is not None:
-            during = track[int(cutaway["start"] * FPS) : int((cutaway["start"] + cutaway["length"]) * FPS)]
-            x, y, w, h = np.median(during if len(during) else track, axis=0)
-            face = (x / size[0], y / size[1], w / size[0], h / size[1])
-        across, down = captions.side_focus(face, size[0] / size[1])
         hw = OUT_W // 2
-        graph += f";[face]scale={hw}:{OUT_H}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={hw}:{OUT_H}:(iw-ow)*{across}:(ih-oh)*{down},{sharpen}[half]"
+        if len(halves) > 1:
+            graph += f";[face]split={len(halves)}" + "".join(f"[face{i}]" for i in range(len(halves)))
+        for i, (start, length) in enumerate(halves):
+            face = None
+            if track is not None:
+                during = track[int(start * FPS) : int((start + length) * FPS)]
+                x, y, w, h = np.median(during if len(during) else track, axis=0)
+                face = (x / size[0], y / size[1], w / size[0], h / size[1])
+            across, down = captions.side_focus(face, size[0] / size[1])
+            source = f"face{i}" if len(halves) > 1 else "face"
+            graph += f";[{source}]scale={hw}:{OUT_H}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={hw}:{OUT_H}:(iw-ow)*{across}:(ih-oh)*{down},{sharpen}[half{i}]"
     if phone:
         fill = f"scale={pw}:{ph}:force_original_aspect_ratio=increase:flags=lanczos+accurate_rnd+full_chroma_int,crop={pw}:{ph}"
         # Full-screen b-roll fills the phone's copy too.
-        mobile_cut = cutaway and cutaway.get("mobile_filter")
+        mobile_cut = cutaways and cutaways.get("mobile_filter")
         graph += f";[phone]{fill},{sharpen}" + (f"[phonepic];{mobile_cut};[phonecut]" if mobile_cut else ",") + f"{grain},{burn(mobile_ass)}[vm]"
     settings = [
         "-c:v", "libx264", "-preset", "medium", "-crf", str(CRF), "-g", str(KEYFRAMES), "-profile:v", "high", "-level:v", "4.1", "-pix_fmt", "yuv420p", "-r", str(FPS),
@@ -357,7 +360,7 @@ def encode(index: int, take: dict, info: dict, pieces: list[str], audio: Path, a
     ffmpeg(
         "-f", "concat", "-safe", "0", "-i", str(listing),
         "-f", "f32le", "-ar", str(SR), "-ac", "2", "-i", str(audio),
-        *(["-i", cutaway["input"]] if cutaway else []),
+        *itertools.chain.from_iterable(["-i", clip] for clip in (cutaways or {}).get("inputs", [])),
         "-filter_complex", graph,
         "-map", "[v]", "-map", "1:a", *settings, take["output"],
         *(["-map", "[vm]", "-map", "1:a", *settings, phone] if phone else []),

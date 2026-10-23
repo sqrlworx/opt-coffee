@@ -11,6 +11,7 @@ let speech = false; // server can transcribe recordings and read text aloud
 let brollOn = false; // experts can add b-roll to their answers: upload it
 let makesBroll = false; // and have it made from a description
 let brollModel = null; // by this model, which films it
+const MAX_BROLLS = 8; // b-roll clips in one answer, as the server allows
 let voices = []; // the voices typed questions can be read aloud in: [{ id, name, accent, sample }]
 let myVoice = null; // the one the user last picked (or the default)
 let avatarsOn = false; // people can make characters for their profile pictures
@@ -623,22 +624,34 @@ function videoPlayer(src, transcript) {
   return video;
 }
 
-// An answer's video with its b-roll cut in, as it is in the joined video (src/video.js): from
-// `broll.start` for `broll.length` seconds, split screen, the answer filling the left half and all of
-// the b-roll in the right, fading in together over the answer, or, with `broll.full`, full screen,
-// all of the b-roll in the frame and the answer moving to a picture at the top left. Either way the
-// b-roll sits on a blurred copy of itself where its shape leaves room. It's muted, since the
+// An answer's video with its b-roll cut in, as it is in the joined video (src/video.js): each clip
+// in `brolls` from its `start` for `length` seconds, split screen, the answer filling the left half
+// and all of the b-roll in the right, fading in together over the answer, or, with `full`, full
+// screen, all of the b-roll in the frame and the answer moving to a picture at the top left. Either
+// way the b-roll sits on a blurred copy of itself where its shape leaves room. It's muted, since the
 // answer's sound carries on, and kept in step with the answer. Full-screen b-roll the expert let run
 // past the end of the answer plays on once the answer has ended, the answer's picture fading out of
 // the corner, as the joined video has it: the timeline runs to its end, and the clip keeps the time
 // while it plays alone. The video's own controls would be covered, or shrink into that picture, so it
-// gets these instead: play, the time, and a timeline marking where the b-roll is. Without b-roll it's
-// the video as it was. Called again for the same video, it updates the same frame with `broll`.
-function brollView(video, broll) {
-  if (video.brollView) return video.brollView.update(broll);
+// gets these instead: play, the time, and a timeline marking where each clip is. Without b-roll it's
+// the video as it was. Called again for the same video, it updates the same frame with `brolls`.
+function brollView(video, brolls) {
+  if (video.brollView) return video.brollView.update(brolls);
   const el = h('div', { class: 'broll-view' }, video);
-  const clip = h('video', { class: 'broll-clip', preload: 'auto', playsinline: true, 'aria-hidden': 'true' });
-  clip.muted = true;
+  // A <video> for each clip, so each is loaded before its cut comes up.
+  const clips = new Map(); // clip's URL -> its <video>
+  const clipFor = (b) => {
+    if (!clips.has(b.video)) {
+      const clip = h('video', { class: 'broll-clip', src: b.video, preload: 'auto', playsinline: true, 'aria-hidden': 'true' });
+      clip.muted = true;
+      ['play', 'pause'].forEach((type) => clip.addEventListener(type, () => over && showPlaying()));
+      // A paused clip shows the frame it was sent to only once it has it: the blurred copy follows then.
+      ['seeked', 'loadeddata'].forEach((type) => clip.addEventListener(type, tick));
+      clip.addEventListener('click', toggle);
+      clips.set(b.video, clip);
+    }
+    return clips.get(b.video);
+  };
   // The left half of a split, drawn from the answer as it plays, cropped to fill it rather than fitted,
   // as the joined video has it; and the blurred copy the b-roll sits on, drawn small from the clip,
   // in a box that keeps its blurred edges in. They're faded rather than taken out, so they have a
@@ -649,19 +662,21 @@ function brollView(video, broll) {
   const playBtn = h('button', { type: 'button', class: 'jp-btn', 'aria-label': 'Play', onclick: () => toggle() }, icon('play'));
   const time = h('span', { class: 'jp-time' });
   const fill = h('span', { class: 'jp-fill' });
-  const span = h('span', { class: 'broll-span', title: 'B-roll' });
-  const bar = h('div', { class: 'jp-bar', role: 'slider', tabindex: '0', 'aria-label': 'Seek' }, fill, span);
+  const bar = h('div', { class: 'jp-bar', role: 'slider', tabindex: '0', 'aria-label': 'Seek' }, fill);
   const controls = h('div', { class: 'broll-controls' }, playBtn, time, bar);
-  let current = null;
-  let over = false; // the answer has ended, and its b-roll plays on past it
+  let cuts = []; // the placed clips, in the order they play
+  let shown = null; // the clip cut to now, or last, which stays while the cut fades back out
+  let over = false; // the answer has ended, and its last clip plays on past it
 
   const length = () => (Number.isFinite(video.duration) ? video.duration : 0);
-  const runsPast = () => Boolean(current && length() && current.start + current.length > length() + 0.05);
-  const total = () => (runsPast() ? current.start + current.length : length());
-  const now = () => (over ? current.start + clip.currentTime : video.currentTime);
-  const playing = () => (over ? !clip.paused : !video.paused);
+  const last = () => cuts.at(-1);
+  const runsPast = () => Boolean(last() && length() && last().start + last().length > length() + 0.05);
+  const total = () => (runsPast() ? last().start + last().length : length());
+  const now = () => (over ? last().start + clipFor(last()).currentTime : video.currentTime);
+  const playing = () => (over ? !clipFor(last()).paused : !video.paused);
   const toggle = () => {
     if (!over) return video.paused || video.ended ? video.play().catch(() => {}) : video.pause();
+    const clip = clipFor(last());
     if (!clip.paused) return clip.pause();
     if (clip.ended || now() >= total() - 0.05) {
       seek(0); // at the end of the b-roll: from the start again
@@ -677,12 +692,12 @@ function brollView(video, broll) {
       over = true;
       video.pause();
       video.currentTime = length();
-      clip.currentTime = t - current.start;
-      if (wasPlaying) clip.play().catch(() => {});
+      clipFor(last()).currentTime = t - last().start;
+      if (wasPlaying) clipFor(last()).play().catch(() => {});
     } else {
       if (over) {
         over = false;
-        clip.pause();
+        clipFor(last()).pause();
         if (wasPlaying) video.play().catch(() => {});
       }
       video.currentTime = t;
@@ -690,13 +705,20 @@ function brollView(video, broll) {
     tick();
   }
   function tick() {
-    if (!current) return;
+    if (!cuts.length) return;
     if (over && !runsPast()) over = false;
     const t = now();
-    const cut = over || (t >= current.start && t < current.start + current.length);
-    el.classList.toggle('is-cut', cut);
+    const current = over ? last() : (cuts.find((b) => t >= b.start && t < b.start + b.length) ?? null);
+    if (current && current !== shown) {
+      shown = current;
+      el.classList.toggle('is-full', Boolean(shown.full));
+      for (const [src, clip] of clips) clip.classList.toggle('is-on', src === shown.video);
+    }
+    el.classList.toggle('is-cut', Boolean(current));
     el.classList.toggle('is-over', over);
-    if (cut) {
+    for (const b of cuts) if (b !== current) clipFor(b).pause();
+    if (current) {
+      const clip = clipFor(current);
       if (!over) {
         const at = t - current.start;
         if (Number.isFinite(clip.duration) && Math.abs(clip.currentTime - at) > 0.25) clip.currentTime = Math.min(at, clip.duration);
@@ -705,14 +727,30 @@ function brollView(video, broll) {
       }
       drawFill(blur, clip, 0.5, 0.25);
       if (!current.full) drawFill(half, video, 0.6, devicePixelRatio);
-    } else {
-      clip.pause();
     }
     const all = total();
-    fill.style.width = `${all ? (100 * Math.min(t, all)) / all : 0}%`;
-    span.style.left = `${all ? (100 * current.start) / all : 0}%`;
-    span.style.width = `${all ? (100 * current.length) / all : 0}%`;
+    const played = all ? Math.min(t, all) / all : 0;
+    fill.style.width = `${100 * played}%`;
+    bar.style.setProperty('--played', played);
     time.textContent = `${fmtDuration(t)} / ${fmtDuration(all)}`;
+    showSpans(all);
+  }
+  // Where each clip is on the timeline.
+  let spansFor = null;
+  function showSpans(all) {
+    const key = `${all}:${cuts.map((b) => `${b.start},${b.length}`).join(';')}`;
+    if (key === spansFor) return;
+    spansFor = key;
+    bar.querySelectorAll('.broll-span').forEach((span) => span.remove());
+    for (const b of cuts) {
+      const span = h('span', { class: 'broll-span', title: 'B-roll' });
+      const [from, width] = all ? [b.start / all, Math.min(b.length, all - b.start) / all] : [0, 0];
+      span.style.left = `${100 * from}%`;
+      span.style.width = `${100 * width}%`;
+      span.style.setProperty('--from', from);
+      span.style.setProperty('--width', width || 1);
+      bar.append(span); // over the played part
+    }
   }
   // `source` cropped to fill `canvas`, at `scale` pixels to each of its CSS pixels: the middle
   // across, and `down` of the way down. The answer in the left half has more cropped off the top than
@@ -747,16 +785,12 @@ function brollView(video, broll) {
     // The answer has ended with b-roll still to play: it plays on, alone.
     if (video.ended && runsPast() && !over) {
       over = true;
-      clip.play().catch(() => {});
+      clipFor(last()).play().catch(() => {});
     }
     showPlaying();
   });
-  ['play', 'pause'].forEach((type) => clip.addEventListener(type, () => over && showPlaying()));
   ['timeupdate', 'seeked', 'loadedmetadata', 'durationchange'].forEach((type) => video.addEventListener(type, tick));
-  // A paused clip shows the frame it was sent to only once it has it: the blurred copy follows then.
-  ['seeked', 'loadeddata'].forEach((type) => clip.addEventListener(type, tick));
-  video.addEventListener('click', () => current && toggle());
-  clip.addEventListener('click', toggle);
+  video.addEventListener('click', () => cuts.length && toggle());
 
   const timeAt = (e) => {
     const r = bar.getBoundingClientRect();
@@ -782,28 +816,34 @@ function brollView(video, broll) {
   const view = {
     el,
     update(next) {
-      current = next?.video ? next : null;
-      el.classList.toggle('has-broll', Boolean(current));
-      el.classList.toggle('is-full', Boolean(current?.full));
-      video.controls = !current;
-      if (current) {
-        if (clip.getAttribute('src') !== current.video) clip.src = current.video;
-        if (!clip.isConnected) el.append(half, back, clip, controls);
+      cuts = (next ?? []).filter((b) => b.video && b.start != null).sort((a, b) => a.start - b.start);
+      el.classList.toggle('has-broll', cuts.length > 0);
+      video.controls = !cuts.length;
+      // Clips no longer cut to go.
+      for (const [src, clip] of clips) {
+        if (cuts.some((b) => b.video === src)) continue;
+        clip.pause();
+        clip.remove();
+        clips.delete(src);
+      }
+      if (shown && !cuts.some((b) => b.video === shown.video)) shown = null;
+      if (cuts.length) {
+        const missing = cuts.map(clipFor).filter((clip) => !clip.isConnected);
+        if (!controls.isConnected) el.append(half, back, controls);
+        controls.before(...missing);
         tick();
       } else {
         over = false;
-        el.classList.remove('is-cut', 'is-over');
-        clip.pause();
+        el.classList.remove('is-cut', 'is-over', 'is-full');
         half.remove();
         back.remove();
-        clip.remove();
         controls.remove();
       }
       return view;
     },
   };
   video.brollView = view;
-  return view.update(broll);
+  return view.update(brolls);
 }
 
 function audioPlayer(src) {
@@ -991,7 +1031,7 @@ function qaList(answers, videos) {
         'li',
         { class: 'qa' },
         h('div', { class: 'qa-q' }, questionText(q), h('div', { class: 'qa-q-meta' }, questionMeta(q), h('span', { class: 'muted small' }, `▲ ${q.votes}`))),
-        h('div', { class: 'qa-a' }, brollView(video, q.broll).el),
+        h('div', { class: 'qa-a' }, brollView(video, q.brolls).el),
       );
     }),
   );
@@ -1991,7 +2031,8 @@ async function managePage({ id }) {
   let queue = [...data.plan.queue];
   const videos = new Map([...questions.values()].map((q) => [q.id, q.answerVideo])); // draft answer URL per question
   const transcripts = new Map([...questions.values()].map((q) => [q.id, q.answerTranscript])); // and its transcript
-  const brolls = new Map([...questions.values()].map((q) => [q.id, q.broll])); // and its b-roll
+  const brolls = new Map([...questions.values()].map((q) => [q.id, q.brolls])); // and its b-roll clips
+  const clipsOf = (qid) => brolls.get(qid) ?? [];
   // The answer order saves itself whenever it changes, so leaving or refreshing never loses it.
   let edits = 0; // changes made to the answer order
   let savedEdits = 0; // how many of them the server has
@@ -2046,7 +2087,7 @@ async function managePage({ id }) {
     action(async () => {
       if (finishing || uploads.size) throw new Error('Wait for your answers to finish saving (or discard any that failed) before publishing.');
       if (brollUploads.size) throw new Error('Wait for your b-roll to finish uploading before publishing.');
-      const making = queue.find((qid) => videos.get(qid) && brolls.get(qid)?.status === 'pending');
+      const making = queue.find((qid) => videos.get(qid) && clipsOf(qid).some((b) => b.status === 'pending'));
       if (making) throw new Error(`The b-roll for question ${queue.indexOf(making) + 1} is still being made. Wait for it, or remove it, before publishing.`);
       const answered = queue.filter((qid) => videos.get(qid)).length;
       const unanswered = queue.length - answered;
@@ -2097,7 +2138,7 @@ async function managePage({ id }) {
         keepLocal(qid, take.url);
         videos.set(qid, res.video);
         transcripts.set(qid, res.transcript);
-        brolls.set(qid, res.broll); // its b-roll moves to where it fits in the new take
+        brolls.set(qid, res.brolls); // its b-roll moves to where it fits in the new take
       } catch (err) {
         if (uploads.get(qid) !== take) return;
         if (err.status === 401) return requireLogin();
@@ -2159,10 +2200,9 @@ async function managePage({ id }) {
     }
     const url = videos.get(qid);
     const video = url ? player(local.get(qid) ?? url, transcripts.get(qid)) : null;
-    const broll = brolls.get(qid);
     setChildren(
       box,
-      video ? brollView(video, broll?.status === 'ready' && broll.start != null ? broll : null).el : null,
+      video ? brollView(video, clipsOf(qid).filter((b) => b.status === 'ready')).el : null,
       video ? answerTranscript(video, transcripts.get(qid), { questionId: qid, pick: (q) => q.answerTranscript, onUpdate: (t) => transcripts.set(qid, t), editable: true }) : null,
       video && brollOn ? brollPanel(qid, video) : null,
       buttons(
@@ -2179,42 +2219,70 @@ async function managePage({ id }) {
     keepLocal(qid, null);
     videos.set(qid, null);
     transcripts.set(qid, null);
-    brolls.set(qid, res.broll); // kept for the next take
+    brolls.set(qid, res.brolls); // kept for the next take
     drawAnswer(qid);
   }
 
   // ----- b-roll -----
-  // Under a recorded answer, the expert describes a shot to cut away to while they talk, or uploads
-  // a video of their own, split screen or, if they tick Full screen first, full screen. The server
-  // makes the shot, which takes a few minutes, or gets the video ready, and places it where it fits
-  // what they're saying; the answer's video above then plays with it cut in. They can then cut in to
-  // it where the answer's video is instead, and let full-screen b-roll keep playing past the end of
-  // the answer. What they've typed, and ticked, is kept across redraws.
+  // Under a recorded answer, the expert adds b-roll clips to cut away to while they talk: each a shot
+  // they describe, or a video of their own, split screen or, if they tick Full screen, full screen.
+  // The server makes the shot, which takes a few minutes, or gets the video ready, and places it where
+  // it fits what they're saying, around the answer's other clips; the answer's video above then plays
+  // with them cut in. They can then cut in to any clip where the answer's video is instead, switch an
+  // uploaded one between split screen and full screen, and let a full-screen one keep playing past
+  // the end of the answer. What they've typed, and ticked, is kept across redraws.
   const MAX_BROLL_UPLOAD = 500_000_000; // bytes, as the server allows
-  const brollDrafts = new Map(); // question id -> description being typed
-  const brollFull = new Map(); // question id -> whether a video uploaded as its b-roll is to be full screen
+  const brollDrafts = new Map(); // question id -> description being typed, while the form is open
+  const brollFull = new Map(); // question id -> whether a video uploaded from the form is to be full screen
+  const brollReplacing = new Map(); // question id -> the clip the form makes or uploads another in place of
   const brollWatched = new Set();
   const brollUploads = new Map(); // question id -> { name, sent (0 to 1), stop, show } for a video being uploaded
 
   function brollPanel(qid, video) {
-    const broll = brolls.get(qid);
+    const clips = clipsOf(qid);
     const box = h('div', { class: 'broll' });
     const set = (next) => {
       brolls.set(qid, next);
       drawAnswer(qid);
     };
-    const remove = action(async () => set((await api('DELETE', `/api/questions/${qid}/broll`)).broll));
-    // Changes how it plays; refused, the panel goes back to how it was (a box ticked, say).
-    const patch = (body) =>
+    const closeForm = () => {
+      brollDrafts.delete(qid);
+      brollFull.delete(qid);
+      brollReplacing.delete(qid);
+    };
+    // Opens the form: empty to add a clip, or as `clip` was, to make or upload another in its place.
+    const openForm = (clip = null) => {
+      brollDrafts.set(qid, clip?.prompt ?? '');
+      brollFull.set(qid, Boolean(clip?.full));
+      if (clip) brollReplacing.set(qid, clip.id);
+      else brollReplacing.delete(qid);
+      drawAnswer(qid);
+    };
+    const remove = (clip) => action(async () => set((await api('DELETE', `/api/questions/${qid}/broll/${clip.id}`)).brolls));
+    // Changes how a clip plays; refused, the panel goes back to how it was (a box ticked, say).
+    const patch = (clip, body) =>
       action(async () => {
         try {
-          set((await api('PATCH', `/api/questions/${qid}/broll`, body())).broll);
+          set((await api('PATCH', `/api/questions/${qid}/broll/${clip.id}`, body())).brolls);
         } catch (err) {
           drawAnswer(qid);
           throw err;
         }
       });
-    const form = ({ again = false } = {}) => {
+    // Once any clip being made or placed is ready, or failed, it's shown; the rest are watched on.
+    const pendingIds = (list) => list.filter((b) => b.status === 'pending').map((b) => b.id).join();
+    if (pendingIds(clips) && !brollWatched.has(qid)) {
+      brollWatched.add(qid);
+      const watching = pendingIds(clips);
+      watchQuestion(qid, right, (q) => pendingIds(q.brolls) !== watching, (q) => {
+        brollWatched.delete(qid);
+        if (pendingIds(clipsOf(qid)) === watching) set(q.brolls);
+        else drawAnswer(qid); // changed here meanwhile: watched again for what's pending now
+      });
+    }
+
+    // The form that makes or uploads a clip: a new one, or one in place of `replacing`.
+    const form = (replacing = null) => {
       const text = h('textarea', {
         rows: 2,
         maxlength: 500,
@@ -2222,12 +2290,12 @@ async function managePage({ id }) {
         placeholder: makesBroll
           ? 'What to cut to while you talk, e.g. "Hands sketching a wireframe on paper" or "An animated diagram of a cache going stale"'
           : 'What your video shows, e.g. "Hands sketching a wireframe on paper"',
-        value: brollDrafts.get(qid) ?? (again ? broll?.prompt : ''),
+        value: brollDrafts.get(qid) ?? '',
         oninput: () => brollDrafts.set(qid, text.value),
       });
-      const submit = makesBroll ? h('button', { type: 'submit', class: 'btn btn-primary btn-small' }, broll ? 'Make new b-roll' : 'Make b-roll') : null;
-      const full = h('input', { type: 'checkbox', checked: brollFull.get(qid) ?? (again && Boolean(broll?.full)), onchange: () => brollFull.set(qid, full.checked) });
-      const file = h('input', { type: 'file', accept: 'video/*', hidden: true, onchange: () => file.files[0] && uploadBroll(qid, file.files[0], text.value, full.checked) });
+      const submit = makesBroll ? h('button', { type: 'submit', class: 'btn btn-primary btn-small' }, replacing ? 'Make new b-roll' : 'Make b-roll') : null;
+      const full = h('input', { type: 'checkbox', checked: brollFull.get(qid) ?? false, onchange: () => brollFull.set(qid, full.checked) });
+      const file = h('input', { type: 'file', accept: 'video/*', hidden: true, onchange: () => file.files[0] && uploadBroll(qid, file.files[0], text.value, full.checked, replacing?.id) });
       const el = h(
         'form',
         { class: 'broll-form' },
@@ -2240,8 +2308,7 @@ async function managePage({ id }) {
           submit,
           h('button', { type: 'button', class: makesBroll ? 'btn btn-small' : 'btn btn-primary btn-small', onclick: () => file.click() }, 'Upload a video'),
           file,
-          broll ? h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove b-roll') : null,
-          broll?.status === 'ready' ? h('button', { type: 'button', class: 'link-btn small', onclick: () => (brollDrafts.delete(qid), brollFull.delete(qid), drawAnswer(qid)) }, 'Cancel') : null,
+          replacing || clips.length ? h('button', { type: 'button', class: 'link-btn small', onclick: () => (closeForm(), drawAnswer(qid)) }, 'Cancel') : null,
         ),
         makesBroll
           ? brollModel && h('p', { class: 'hint' }, `model: ${brollModel}`)
@@ -2251,94 +2318,125 @@ async function managePage({ id }) {
         e.preventDefault();
         if (!submit) return;
         action(async () => {
-          const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: text.value });
-          brollDrafts.delete(qid);
-          brollFull.delete(qid);
-          set(res.broll);
+          const res = await api('POST', `/api/questions/${qid}/broll`, { prompt: text.value, ...(replacing ? { replaces: replacing.id } : {}) });
+          closeForm();
+          set(res.brolls);
         })({ currentTarget: submit });
       });
       return el;
     };
-    const head = (...extra) => h('div', { class: 'broll-head' }, h('span', { class: 'broll-label' }, 'B-roll'), extra);
-    const described = broll?.prompt ? h('span', { class: 'broll-prompt' }, `“${broll.prompt}”`) : null;
-    const uploaded = broll?.upload ? h('span', { class: 'broll-file' }, broll.upload) : null;
 
-    const up = brollUploads.get(qid);
-    if (up) {
-      // Cancel stops sending it; once it's all sent, the server's getting it ready.
+    // How far a video being uploaded has got. Cancel stops sending it; once it's all sent, the
+    // server's getting it ready.
+    const progress = (up) => {
       const bar = h('progress', { class: 'broll-progress', max: 1, value: up.sent });
       const said = h('span', { class: 'muted small' });
       up.show = () => {
         bar.value = up.sent;
-        said.textContent = up.sent < 1 ? `Uploading… ${Math.floor(up.sent * 100)}%` : 'Getting your video ready…';
+        said.textContent = up.sent < 1 ? `Uploading ${up.name}… ${Math.floor(up.sent * 100)}%` : `Getting ${up.name} ready…`;
       };
       up.show();
       const cancel = up.sent < 1 ? h('button', { type: 'button', class: 'link-btn small', onclick: () => up.stop.abort() }, 'Cancel') : null;
-      setChildren(box, head(h('span', { class: 'broll-file' }, up.name)), bar, h('div', { class: 'row gap-sm wrap' }, said, cancel));
-    } else if (!broll) {
-      setChildren(box, head(), form());
-    } else if (broll.status === 'pending') {
-      if (!brollWatched.has(qid)) {
-        brollWatched.add(qid);
-        watchQuestion(qid, right, (q) => q.broll?.status !== 'pending', (q) => {
-          brollWatched.delete(qid);
-          if (brolls.get(qid)?.status === 'pending') set(q.broll);
-        });
+      return [bar, h('div', { class: 'row gap-sm wrap' }, said, cancel)];
+    };
+
+    // Each clip is a card of its own, numbered, with everything that's done to it inside it.
+    const badge = (n, cls = '') => h('span', { class: `broll-badge ${cls}`, 'aria-hidden': 'true' }, String(n));
+    const head = (clip, i) =>
+      h(
+        'div',
+        { class: 'broll-head' },
+        badge(i + 1),
+        h('span', { class: 'broll-label' }, `Clip ${i + 1}`),
+        clip.prompt ? h('span', { class: 'broll-prompt' }, `“${clip.prompt}”`) : null,
+        clip.upload ? h('span', { class: 'broll-file' }, clip.upload) : null,
+      );
+    const up = brollUploads.get(qid);
+
+    // A clip: where it's cut in, and what can be done with it. Being changed, the form to make or
+    // upload another in its place, or the one uploading, is in its card.
+    const card = (clip, i) => {
+      const cardOf = (...children) => h('div', { class: 'broll-clip-card', role: 'group', 'aria-label': `B-roll clip ${i + 1}` }, head(clip, i), children);
+      const buttons = (...children) => h('div', { class: 'row gap-sm wrap' }, children);
+      if (up?.replaces === clip.id) return cardOf(h('p', { class: 'muted small' }, 'Replacing this clip:'), progress(up));
+      if (brollReplacing.get(qid) === clip.id && !up) return cardOf(h('p', { class: 'muted small' }, 'Replace this clip with a new one:'), form(clip));
+      if (clip.status === 'pending') {
+        const doing = clip.upload ? 'Finding the best place for your video…' : 'Making your b-roll and finding the best place for it… This takes a few minutes; you can keep working.';
+        return cardOf(buttons(h('span', { class: 'muted small' }, doing), h('button', { type: 'button', class: 'link-btn small', onclick: remove(clip) }, 'Cancel')));
       }
-      const doing = broll.upload ? 'Finding the best place for your video…' : 'Making your b-roll and finding the best place for it… This takes a few minutes; you can keep working.';
-      setChildren(box, head(described, uploaded), h('div', { class: 'row gap-sm wrap' }, h('span', { class: 'muted small' }, doing), h('button', { type: 'button', class: 'link-btn small', onclick: remove }, 'Cancel')));
-    } else if (broll.status === 'failed') {
-      const why = broll.upload ? "⚠ Your video couldn't be used. Upload it again, or try another." : "⚠ This b-roll couldn't be made. Try again, or describe it differently.";
-      setChildren(box, head(described, uploaded), h('p', { class: 'warn small' }, why), form({ again: true }));
-    } else if (brollDrafts.has(qid)) {
-      setChildren(box, head(described, uploaded), form({ again: true }));
-    } else {
-      const change = h('button', { type: 'button', class: 'btn btn-small', onclick: () => (brollDrafts.set(qid, broll.prompt ?? ''), brollFull.set(qid, broll.full), drawAnswer(qid)) }, 'Change');
-      const chosen = broll.chosen != null;
-      const where = broll.start != null
-        ? h('span', { class: 'muted small' }, `Cut in ${broll.full ? 'full screen ' : ''}at ${fmtDuration(broll.start)}–${fmtDuration(broll.start + broll.length)}, ${chosen ? 'where you chose' : "where it fits what you're saying"}. Play your answer to see it.`)
+      if (clip.status === 'failed') {
+        const why = clip.upload ? "⚠ Your video couldn't be used. Upload it again, or try another." : "⚠ This b-roll couldn't be made. Try again, or describe it differently.";
+        return cardOf(
+          h('p', { class: 'warn small' }, why),
+          buttons(h('button', { type: 'button', class: 'btn btn-small', onclick: () => openForm(clip) }, 'Try again'), h('button', { type: 'button', class: 'btn btn-small', onclick: remove(clip) }, 'Remove')),
+        );
+      }
+      const chosen = clip.chosen != null;
+      const where = clip.start != null
+        ? h('span', { class: 'muted small' }, `Cut in ${clip.full ? 'full screen ' : ''}at ${fmtDuration(clip.start)}–${fmtDuration(clip.start + clip.length)}, ${chosen ? 'where you chose' : "where it fits what you're saying"}. Play your answer to see it.`)
         : chosen
-          ? h('p', { class: 'warn small' }, `⚠ There's no room for b-roll after ${fmtDuration(broll.chosen)}, where you chose. Pick an earlier moment, or let the moderator choose.`)
-          : h('p', { class: 'warn small' }, `⚠ This answer is too short for its b-roll, so it’s left out. Re-record a longer answer${broll.upload ? '' : ', or make new b-roll to fit this one'}.`);
-      // Not all of a video they uploaded plays when it's longer than the time left in the answer.
-      const cut = broll.upload && broll.start != null && broll.clipLength > broll.length + 0.5
-        ? h('span', { class: 'muted small' }, `Only ${fmtDuration(broll.length)} of your ${fmtDuration(broll.clipLength)} video fits before your answer ends.`)
+          ? h('p', { class: 'warn small' }, `⚠ There's no room for this b-roll after ${fmtDuration(clip.chosen)}, where you chose. Pick an earlier moment, or let the moderator choose.`)
+          : clips.filter((b) => b.start != null).length
+            ? h('p', { class: 'warn small' }, '⚠ There’s no room left in this answer for this b-roll, so it’s left out. Remove another clip, or choose where it goes.')
+            : h('p', { class: 'warn small' }, `⚠ This answer is too short for its b-roll, so it’s left out. Re-record a longer answer${clip.upload ? '' : ', or make new b-roll to fit this one'}.`);
+      // Not all of a video they uploaded plays when it's longer than the time it has.
+      const cut = clip.upload && clip.start != null && clip.clipLength > clip.length + 0.5
+        ? h('span', { class: 'muted small' }, `Only ${fmtDuration(clip.length)} of your ${fmtDuration(clip.clipLength)} video fits${clips.some((b) => b !== clip && b.start > clip.start) ? ' before your next b-roll' : ' before your answer ends'}.`)
         : null;
       // Where it cuts in: where the answer's video is, which they play, scrub or click the transcript to.
-      const here = h('button', { type: 'button', class: 'btn btn-small', onclick: patch(() => ({ start: Math.round(video.currentTime * 1000) / 1000 })) }, 'Cut in here');
-      const auto = chosen ? h('button', { type: 'button', class: 'link-btn small', onclick: patch(() => ({ start: null })) }, 'Let the moderator choose') : null;
-      const pick = h('p', { class: 'hint' }, 'Play your answer, or click a line of its transcript, to where the b-roll should start, then press Cut in here.');
-      // Full screen, it can keep playing past the end of the answer, which gets longer.
-      const past = h('input', { type: 'checkbox', checked: broll.pastEnd, onchange: patch(() => ({ pastEnd: past.checked })) });
-      const pastEnd = broll.upload && broll.full ? h('div', {}, h('label', { class: 'check' }, past, ' Keep playing past the end of my answer'), h('p', { class: 'hint' }, 'Your answer gets longer, silent under your video.')) : null;
+      const here = h('button', { type: 'button', class: 'btn btn-small', onclick: patch(clip, () => ({ start: Math.round(video.currentTime * 1000) / 1000 })) }, 'Cut in here');
+      const auto = chosen ? h('button', { type: 'button', class: 'link-btn small', onclick: patch(clip, () => ({ start: null })) }, 'Let the moderator choose') : null;
+      // An uploaded video can fill the frame instead, and full screen, keep playing past the end of
+      // the answer, which gets longer.
+      const full = h('input', { type: 'checkbox', checked: clip.full, onchange: patch(clip, () => ({ full: full.checked })) });
+      const past = h('input', { type: 'checkbox', checked: clip.pastEnd, onchange: patch(clip, () => ({ pastEnd: past.checked })) });
+      const looks = clip.upload
+        ? h(
+            'div',
+            {},
+            h('label', { class: 'check' }, full, ' Full screen'),
+            clip.full ? h('label', { class: 'check' }, past, ' Keep playing past the end of my answer') : null,
+            clip.full ? h('p', { class: 'hint' }, 'Your answer gets longer, silent under your video.') : null,
+          )
+        : null;
       // What was filmed, which may be a scene standing for the idea they described.
-      const shot = broll.shot && broll.shot !== broll.prompt ? h('details', { class: 'broll-shot small' }, h('summary', {}, 'What was filmed'), h('p', {}, broll.shot)) : null;
-      setChildren(
-        box,
-        head(described, uploaded),
+      const shot = clip.shot && clip.shot !== clip.prompt ? h('details', { class: 'broll-shot small' }, h('summary', {}, 'What was filmed'), h('p', {}, clip.shot)) : null;
+      return cardOf(
         where,
         cut,
-        h('div', { class: 'row gap-sm wrap' }, here, auto),
-        pick,
-        pastEnd,
+        buttons(here, auto),
+        looks,
         shot,
-        h('div', { class: 'row gap-sm wrap' }, change, h('button', { type: 'button', class: 'btn btn-small', onclick: remove }, 'Remove')),
+        buttons(h('button', { type: 'button', class: 'btn btn-small', onclick: () => openForm(clip) }, 'Change'), h('button', { type: 'button', class: 'btn btn-small', onclick: remove(clip) }, 'Remove')),
       );
-    }
+    };
+
+    // Adding a clip is apart from the clips there are: outlined, and numbered as the next one.
+    const next = clips.length + 1;
+    const addHead = h('div', { class: 'broll-head' }, badge(next, 'is-new'), h('span', { class: 'broll-label' }, clips.length ? `New clip ${next}` : 'Add b-roll'));
+    let adding = null;
+    if (up && !up.replaces) adding = h('div', { class: 'broll-add', role: 'group', 'aria-label': 'New b-roll clip' }, addHead, progress(up));
+    else if (!up && (!clips.length || (brollDrafts.has(qid) && !brollReplacing.has(qid)))) adding = h('div', { class: 'broll-add', role: 'group', 'aria-label': 'New b-roll clip' }, addHead, form());
+    else if (!up && clips.length < MAX_BROLLS) adding = h('button', { type: 'button', class: 'broll-add-btn', onclick: () => openForm() }, `+ Add another b-roll clip`);
+    const count = clips.length ? h('span', { class: 'muted small' }, `${clips.length} clip${clips.length === 1 ? '' : 's'}`) : null;
+    const pick = clips.some((b) => b.status === 'ready') ? h('p', { class: 'hint' }, 'Play your answer, or click a line of its transcript, to where a clip should start, then press Cut in here on that clip.') : null;
+    setChildren(box, clips.length ? h('div', { class: 'broll-title' }, h('span', { class: 'broll-label' }, 'B-roll'), count) : null, clips.length ? pick : null, clips.map(card), adding);
     return box;
   }
 
-  // Uploads a video the expert picked as a question's b-roll, with what they typed as what it shows,
-  // full screen or split screen. The server then gets it ready, in a few seconds, and places it.
-  async function uploadBroll(qid, file, description, full) {
+  // Uploads a video the expert picked as b-roll for a question's answer, with what they typed as what
+  // it shows, full screen or split screen, added to its clips or in place of `replaces`. The server
+  // then gets it ready, in a few seconds, and places it.
+  async function uploadBroll(qid, file, description, full, replaces = null) {
     if (file.type && !file.type.startsWith('video/')) return toast('Choose a video file.', 'error');
     if (file.size > MAX_BROLL_UPLOAD) return toast('That video is too large: b-roll can be up to 500 MB. Trim it, or export it smaller.', 'error');
-    const up = { name: file.name, sent: 0, stop: new AbortController(), show: null };
+    const up = { name: file.name, replaces, sent: 0, stop: new AbortController(), show: null };
     brollUploads.set(qid, up);
     drawAnswer(qid);
     const query = new URLSearchParams({ name: file.name });
     if (description.trim()) query.set('description', description.trim());
     if (full) query.set('full', '1');
+    if (replaces) query.set('replaces', replaces);
     try {
       const res = await sendFile('PUT', `/api/questions/${qid}/broll/video?${query}`, file, {
         signal: up.stop.signal,
@@ -2351,7 +2449,8 @@ async function managePage({ id }) {
       });
       brollDrafts.delete(qid);
       brollFull.delete(qid);
-      brolls.set(qid, res.broll);
+      brollReplacing.delete(qid);
+      brolls.set(qid, res.brolls);
       if (res.trimmed) toast(`Your video is ${fmtDuration(res.trimmed.from)} long, and b-roll can be up to ${fmtDuration(res.trimmed.to)}, so its start is used.`);
     } catch (err) {
       if (err.status === 401) requireLogin();

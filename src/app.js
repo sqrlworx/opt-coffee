@@ -27,6 +27,7 @@ const MAX_REPLY = 2000; // characters of a reply in a discussion
 const MAX_BROLL_PROMPT = 500; // characters describing b-roll
 const MAX_BROLL_VIDEO = 500_000_000; // an uploaded b-roll clip: a minute or two of 4K from a phone
 const MAX_BROLL_SECONDS = MAX_ANSWER_START; // of it kept, at most: as long as the longest take
+const MAX_BROLLS = 8; // b-roll clips in one answer
 const MAX_FILE_NAME = 200; // characters kept of an uploaded file's name
 const MAX_SEEDS = 20; // seed questions added at once
 const MAX_SEARCH = 200; // characters of a search on Explore
@@ -188,33 +189,43 @@ function loadQuestions(db, ohId, viewer) {
 const clock = (secs) => `${Math.floor(secs / 60)}:${String(Math.floor(secs % 60)).padStart(2, '0')}`;
 
 /**
- * The b-roll the expert asked for in an answer, as only they see it before publishing. `video` once
- * it's made, with `shot`, what was filmed for their description; `start` and `length` place it in
- * the take once it's placed, and stay null if the take is too short for it (or if it's too late
- * in it where they chose); `clipLength` is how long the clip is, so they can be told when not all
- * of it plays. `chosen` is where they chose to cut in to it, seconds into the take, or null when
- * the moderator places it. A clip they uploaded has `upload`, its file's name, and `prompt` only if
- * they said what it shows. `full` is true when it's full screen rather than split screen, which
- * only an uploaded clip can be, and `pastEnd` when, full screen, it plays to its end even past the
- * end of the answer.
+ * A b-roll clip the expert asked for in an answer, as only they see it before publishing. `id`
+ * names it to change or remove it. `video` once it's made, with `shot`, what was filmed for their
+ * description; `start` and `length` place it in the take once it's placed, and stay null if there's
+ * no room for it (the take is too short, or full of other b-roll, or it's too late in it where they
+ * chose); `clipLength` is how long the clip is, so they can be told when not all of it plays.
+ * `chosen` is where they chose to cut in to it, seconds into the take, or null when the moderator
+ * places it. A clip they uploaded has `upload`, its file's name, and `prompt` only if they said what
+ * it shows. `full` is true when it's full screen rather than split screen, which only an uploaded
+ * clip can be, and `pastEnd` when, full screen, it plays to its end even past the end of the answer.
  */
-function brollOf(q) {
-  if (!q.broll_status) return null;
-  const ready = q.broll_status === 'ready';
+function brollOf(b) {
+  const ready = b.status === 'ready';
   return {
-    prompt: q.broll_prompt,
-    upload: q.broll_upload,
-    status: q.broll_status,
-    shot: ready ? q.broll_shot : null,
-    video: ready ? mediaUrl(q.broll_video) : null,
-    start: ready ? q.broll_start : null,
-    length: ready ? q.broll_length : null,
-    clipLength: ready ? q.broll_seconds : null,
-    chosen: q.broll_chosen,
-    full: Boolean(q.broll_full),
-    pastEnd: Boolean(q.broll_past_end),
+    id: b.id,
+    prompt: b.prompt,
+    upload: b.upload,
+    status: b.status,
+    shot: ready ? b.shot : null,
+    video: ready ? mediaUrl(b.video) : null,
+    start: ready ? b.start : null,
+    length: ready ? b.length : null,
+    clipLength: ready ? b.seconds : null,
+    chosen: b.chosen,
+    full: Boolean(b.full),
+    pastEnd: Boolean(b.past_end),
   };
 }
+
+/** An answer's b-roll clips as the expert sees them before publishing (see brollOf), in the order they asked for them. */
+const brollsOf = (db, questionId) => db.prepare('SELECT * FROM brolls WHERE question_id = ? ORDER BY id').all(questionId).map(brollOf);
+
+/** The b-roll published with an answer, in the order it plays (see publishedAnswer). */
+const publishedBrollsOf = (db, questionId) =>
+  db
+    .prepare('SELECT * FROM brolls WHERE question_id = ? AND published = 1 ORDER BY start')
+    .all(questionId)
+    .map((b) => ({ video: mediaUrl(b.video), start: b.start, length: b.length, full: Boolean(b.full), pastEnd: Boolean(b.past_end) }));
 
 function questionView(db, q, viewer) {
   const audioTranscript = q.asked_with === 'audio' ? transcriptOf(db, q.audio) : null;
@@ -248,25 +259,23 @@ function questionView(db, q, viewer) {
     publishedAnswerStart: q.published_answer_start,
     publishedAnswerTranscript: answerTranscriptOf(db, q.published_answer_video, q.published_answer_start),
     publishedQuestionCues: questionCaptions({ body: q.body, cues: audioTranscript?.cues }, q.published_answer_start).cues,
-    broll: brollOf(q),
-    publishedBroll: q.published_broll
-      ? { video: mediaUrl(q.published_broll), start: q.published_broll_start, length: q.published_broll_length, full: Boolean(q.published_broll_full), pastEnd: Boolean(q.published_broll_past_end) }
-      : null,
+    brolls: brollsOf(db, q.id),
+    publishedBrolls: q.published_position != null ? publishedBrollsOf(db, q.id) : [],
     publishedAvatar: q.avatar_rig ? rigOf(q.avatar_rig, q.avatar_base) : null,
   };
 }
 
 function stripPrivate(q) {
-  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, broll, publishedBroll, publishedAvatar, ...rest } = q;
+  const { planPosition, answerVideo, answerStart, answerTranscript, publishedPosition, publishedAnswerVideo, publishedAnswerStart, publishedAnswerTranscript, publishedQuestionCues, brolls, publishedBrolls, publishedAvatar, ...rest } = q;
   return rest;
 }
 
 /**
  * A published answer as readers see it. `answerStart` is where the answer begins, after the
  * question; `questionCues` caption the question until then, timed from the start of the take.
- * `broll` is cut away to during the answer, from `start` for `length` seconds into the take, split
- * screen or, with `full`, full screen; with `pastEnd`, full screen, it may run past the end of the
- * take, which the joined video lengthens for it. `avatar` is the rig of the asker's character, which
+ * `brolls` are cut away to during the answer, in the order they play, each from `start` for `length`
+ * seconds into the take, split screen or, with `full`, full screen; with `pastEnd`, full screen, the
+ * last may run past the end of the take, which the joined video lengthens for it. `avatar` is the rig of the asker's character, which
  * says the question in the joined video instead of the fox, if it was their profile picture when the
  * answers were published (and they asked under their name, but not on camera).
  */
@@ -276,7 +285,7 @@ const publishedAnswer = (q) => ({
   answerStart: q.publishedAnswerStart,
   questionCues: q.publishedQuestionCues,
   transcript: q.publishedAnswerTranscript,
-  broll: q.publishedBroll,
+  brolls: q.publishedBrolls,
   avatar: q.publishedAvatar,
 });
 
@@ -483,8 +492,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
 
   /** Deletes b-roll clips that no draft or published answer points to any more. */
   function pruneBroll(names) {
-    const used = db.prepare('SELECT 1 FROM questions WHERE broll_video = ? OR published_broll = ?');
-    for (const name of names) if (name && !used.get(name, name)) rmSync(join(mediaDir, name), { force: true });
+    const used = db.prepare('SELECT 1 FROM brolls WHERE video = ?');
+    for (const name of names) if (name && !used.get(name)) rmSync(join(mediaDir, name), { force: true });
   }
 
   /** Deletes a spoken question's recording that was never asked, with its transcript (and video, if it was on camera). */
@@ -512,13 +521,17 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     if (avatar) return !avatar.offered || avatar.user_id === user?.id;
     if (db.prepare('SELECT 1 FROM questions WHERE audio = ? OR asker_video = ? OR asker_video_copy = ?').get(name, name, name)) return true;
     if (db.prepare('SELECT 1 FROM office_hours WHERE video = ? OR video_mobile = ?').get(name, name)) return true; // only set once published
+    const clip = db
+      .prepare('SELECT b.published, oh.expert_id FROM brolls b JOIN questions q ON q.id = b.question_id JOIN office_hours oh ON oh.id = q.office_hour_id WHERE b.video = ?')
+      .get(name);
+    if (clip) return Boolean(clip.published || clip.expert_id === user?.id);
     const owner = db
       .prepare(
-        `SELECT q.published_answer_video, q.published_broll, oh.expert_id FROM questions q JOIN office_hours oh ON oh.id = q.office_hour_id
-         WHERE q.answer_video = ? OR q.published_answer_video = ? OR q.broll_video = ? OR q.published_broll = ?`,
+        `SELECT q.published_answer_video, oh.expert_id FROM questions q JOIN office_hours oh ON oh.id = q.office_hour_id
+         WHERE q.answer_video = ? OR q.published_answer_video = ?`,
       )
-      .get(name, name, name, name);
-    return Boolean(owner && (owner.published_answer_video === name || owner.published_broll === name || owner.expert_id === user?.id));
+      .get(name, name);
+    return Boolean(owner && (owner.published_answer_video === name || owner.expert_id === user?.id));
   }
 
   function subscribe(userId, type, id) {
@@ -1300,7 +1313,7 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const name = randomName(ext);
       await saveUpload(req, join(mediaDir, name), { max: MAX_VIDEO, label: 'Video' });
       // The office hour may have been published while the video was uploading.
-      const current = db.prepare('SELECT answer_video, broll_status FROM questions WHERE id = ?').get(q.id);
+      const current = db.prepare('SELECT answer_video FROM questions WHERE id = ?').get(q.id);
       try {
         requireUnpublished(getOfficeHour(q.office_hour_id));
       } catch (err) {
@@ -1308,13 +1321,15 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         throw err;
       }
       // Where the expert chose to cut in to b-roll was a moment in the old take.
-      db.prepare('UPDATE questions SET answer_video = ?, answer_start = ?, broll_chosen = NULL WHERE id = ?').run(name, answerStart, q.id);
+      transaction(db, () => {
+        db.prepare('UPDATE questions SET answer_video = ?, answer_start = ? WHERE id = ?').run(name, answerStart, q.id);
+        db.prepare('UPDATE brolls SET chosen = NULL WHERE question_id = ?').run(q.id);
+      });
       pruneVideos([current.answer_video]);
       speechJobs?.transcribe(name);
-      // B-roll moves to where it fits in the new take. One still being made or placed goes in it anyway.
-      if (current.broll_status === 'ready') brollJobs?.place(q.id);
-      const broll = brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id));
-      return { video: mediaUrl(name), transcript: answerTranscriptOf(db, name, answerStart), broll };
+      // B-roll moves to where it fits in the new take. Clips still being made go in it once they are.
+      brollJobs?.placeAll(q.id);
+      return { video: mediaUrl(name), transcript: answerTranscriptOf(db, name, answerStart), brolls: brollsOf(db, q.id) };
     },
     { auth: true, raw: true },
   );
@@ -1325,30 +1340,64 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
     ({ params, user }) => {
       const q = editableQuestion(params.id, user);
       // Its b-roll is kept, unplaced, for the next take.
-      db.prepare('UPDATE questions SET answer_video = NULL, answer_start = NULL, broll_start = NULL, broll_length = NULL, broll_chosen = NULL WHERE id = ?').run(q.id);
+      transaction(db, () => {
+        db.prepare('UPDATE questions SET answer_video = NULL, answer_start = NULL WHERE id = ?').run(q.id);
+        db.prepare('UPDATE brolls SET start = NULL, length = NULL, chosen = NULL WHERE question_id = ?').run(q.id);
+      });
       pruneVideos([q.answer_video]);
-      return { video: null, broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+      return { video: null, brolls: brollsOf(db, q.id) };
     },
     { auth: true },
   );
 
-  /** How much b-roll a question's answer has room for (see brollJobs.room), for a clip `clip` seconds long; refused if none. */
-  async function brollRoom(q, clip) {
+  /**
+   * How much b-roll a question's answer has room for, around its other clips but `replaces` (see
+   * brollJobs.room), for a clip `clip` seconds long; refused if none. So is a clip more than an
+   * answer can have.
+   */
+  async function brollRoom(q, { clip, replaces = null } = {}) {
     if (!q.answer_video) throw new HttpError(409, 'Record an answer before adding b-roll to it');
+    const count = db.prepare('SELECT COUNT(*) AS n FROM brolls WHERE question_id = ? AND id IS NOT ?').get(q.id, replaces).n;
+    if (count >= MAX_BROLLS) throw new HttpError(400, `An answer can have up to ${MAX_BROLLS} b-roll clips. Remove one to add another.`);
     let room;
     try {
-      room = await brollJobs.room(q.answer_video, q.answer_start, clip);
+      room = await brollJobs.room(q, { clip, except: replaces });
     } catch (err) {
       console.error(`[broll] measuring the answer to question ${q.id} failed: ${err.message}`);
       throw new HttpError(500, "Couldn't read this answer's video");
     }
-    if (!room) throw new HttpError(400, 'This answer is too short for b-roll');
+    if (!room) throw new HttpError(400, count ? "There's no room left in this answer for more b-roll. Remove a clip, or choose where yours go to make room." : 'This answer is too short for b-roll');
     return room;
   }
 
+  /** A b-roll clip of a question's answer, by `id` as the expert gave it; refused if it isn't one. */
+  function clipIn(q, id, label = 'b-roll') {
+    const clip = /^\d+$/.test(String(id ?? '')) ? db.prepare('SELECT * FROM brolls WHERE id = ? AND question_id = ?').get(Number(id), q.id) : null;
+    if (!clip) throw new HttpError(404, `This answer has no such ${label}`);
+    return clip;
+  }
+
+  // Adds a clip to a question's answer, in place of `replaces` if it's given (removed, and its
+  // making stopped), and returns what the expert sees of it and the answer's clips.
+  function addBroll(q, values, replaces) {
+    const { lastInsertRowid } = transaction(db, () => {
+      if (replaces) db.prepare('DELETE FROM brolls WHERE id = ?').run(replaces.id);
+      return db
+        .prepare(`INSERT INTO brolls (question_id, prompt, upload, status, video, full, created_at) VALUES (?, ?, ?, 'pending', ?, ?, ?)`)
+        .run(q.id, values.prompt, values.upload ?? null, values.video, values.full ? 1 : 0, now());
+    });
+    if (replaces) {
+      pruneBroll([replaces.video]);
+      brollJobs.cancel(replaces.id);
+    }
+    return Number(lastInsertRowid);
+  }
+  const brollReply = (q, id) => ({ broll: brollOf(db.prepare('SELECT * FROM brolls WHERE id = ?').get(id)), brolls: brollsOf(db, q.id) });
+
   // B-roll for an answer: the expert describes a shot to cut away to while they talk. A clip of it
-  // is made in the background, as long as the answer has room for, and placed in the take where
-  // it fits what's being said (src/broll/jobs.js). Asking again replaces it.
+  // is made in the background, as long as the answer has room for around its other clips, and
+  // placed in the take where it fits what's being said (src/broll/jobs.js). It's added to the
+  // answer's clips, or takes the place of the one `replaces` names, as asking again does.
   route(
     'POST',
     '/api/questions/:id/broll',
@@ -1357,17 +1406,13 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       if (!broll.generate) throw new HttpError(503, "B-roll can't be made on this server, only uploaded");
       const q = editableQuestion(params.id, user);
       const prompt = str(body.prompt, 'Description', { min: 3, max: MAX_BROLL_PROMPT }).replace(/\s+/g, ' ');
-      await brollRoom(q);
-      // The office hour may have been published meanwhile.
+      const replaces = body.replaces == null ? null : clipIn(q, body.replaces);
+      await brollRoom(q, { replaces: replaces?.id });
+      // The office hour may have been published meanwhile, or the clip it replaces removed.
       const current = editableQuestion(params.id, user);
-      db.prepare(
-        `UPDATE questions SET broll_prompt = ?, broll_upload = NULL, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL,
-         broll_full = 0, broll_past_end = 0, broll_chosen = NULL, broll_seconds = NULL WHERE id = ?`,
-      ).run(prompt, randomName('mp4'), q.id);
-      pruneBroll([current.broll_video]);
-      brollJobs.cancel(q.id);
-      brollJobs.generate(q.id);
-      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+      const id = addBroll(current, { prompt, video: randomName('mp4') }, replaces && clipIn(current, replaces.id));
+      brollJobs.generate(id);
+      return brollReply(q, id);
     },
     { auth: true },
   );
@@ -1376,7 +1421,8 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
   // MOV, say), with `?name=`, its file's name, `?description=`, what it shows, if they say, and
   // `?full=1` for full screen rather than split screen. It's made into a clip like the ones that are
   // made, of all of it up to the longest a take can be (src/broll/index.js), then placed the same
-  // way, right away; where it's placed decides how much of it plays. It replaces any b-roll before it.
+  // way, right away; where it's placed decides how much of it plays. `?replaces=` names a clip it
+  // takes the place of; otherwise it's added to the answer's clips.
   route(
     'PUT',
     '/api/questions/:id/broll/video',
@@ -1386,11 +1432,12 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const description = str(url.searchParams.get('description'), 'Description', { max: MAX_BROLL_PROMPT, optional: true })?.replace(/\s+/g, ' ') || null;
       const name = Array.from(String(url.searchParams.get('name') ?? '').replace(/[\p{C}\s]+/gu, ' ').trim()).slice(0, MAX_FILE_NAME).join('') || 'video';
       const full = url.searchParams.get('full') === '1';
+      const replaces = url.searchParams.has('replaces') ? clipIn(q, url.searchParams.get('replaces')) : null;
       // Cross-site forms can't send these content types, so this also blocks CSRF. What the file
       // really is, ffmpeg finds out.
       const type = contentType(req);
       if (!type.startsWith('video/') && type !== 'application/octet-stream') throw new HttpError(415, 'Expected a video');
-      await brollRoom(q, Infinity);
+      await brollRoom(q, { clip: Infinity, replaces: replaces?.id });
       const upload = join(mediaDir, randomName('upload'));
       const clip = randomName('mp4');
       let made;
@@ -1403,96 +1450,102 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
         });
         // The answer may have been recorded again while it was uploading, or the office hour published.
         const latest = editableQuestion(params.id, user);
-        if (latest.answer_video && !(await brollJobs.room(latest.answer_video, latest.answer_start, made.seconds))) throw new HttpError(400, 'This clip is too short for b-roll');
+        if (latest.answer_video && !(await brollJobs.room(latest, { clip: made.seconds, except: replaces?.id }))) throw new HttpError(400, 'This clip is too short for b-roll');
         current = editableQuestion(params.id, user); // and as it is now, after measuring
+        if (replaces) clipIn(current, replaces.id); // the clip it replaces may have been removed meanwhile
       } catch (err) {
         await rm(join(mediaDir, clip), { force: true });
         throw err;
       } finally {
         await rm(upload, { force: true });
       }
-      db.prepare(
-        `UPDATE questions SET broll_prompt = ?, broll_upload = ?, broll_status = 'pending', broll_shot = NULL, broll_video = ?, broll_start = NULL, broll_length = NULL,
-         broll_full = ?, broll_past_end = 0, broll_chosen = NULL, broll_seconds = NULL WHERE id = ?`,
-      ).run(description, name, clip, full ? 1 : 0, q.id);
-      pruneBroll([current.broll_video]);
-      brollJobs.cancel(q.id);
-      brollJobs.place(q.id);
+      const id = addBroll(current, { prompt: description, upload: name, video: clip, full }, replaces);
+      brollJobs.place(id);
       // Only the start of a clip longer than a take can be is kept, which is worth saying.
       const trimmed = made.original > made.seconds + 0.5 ? { from: made.original, to: made.seconds } : null;
-      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)), trimmed };
+      return { ...brollReply(q, id), trimmed };
     },
     { auth: true, raw: true },
   );
 
-  // How b-roll plays, changed without making or uploading it again: a clip the expert uploaded goes
+  // How a clip plays, changed without making or uploading it again: a clip the expert uploaded goes
   // full screen with `full: true`, or back to split screen, and full screen, `pastEnd: true` lets it
   // play to its end even past the end of the answer, which gets longer. `start` cuts it in there,
   // seconds into the take, rather than where the moderator places it, which `start: null` goes back
-  // to. It's placed again, since where it fits depends on all of these. Where the expert chose is
-  // placed at once, so it comes back placed; the moderator may take a few seconds, so that doesn't.
+  // to. It's placed again, since where it fits depends on all of these, and clips the moderator put
+  // where the expert chose move out of its way. Where the expert chose is placed at once, so it
+  // comes back placed; the moderator may take a few seconds, so that doesn't.
   route(
     'PATCH',
-    '/api/questions/:id/broll',
+    '/api/questions/:id/broll/:brollId',
     async ({ params, user, body }) => {
       if (!brollJobs) throw new HttpError(503, 'B-roll is not available on this server');
       const q = editableQuestion(params.id, user);
-      if (!q.broll_status) throw new HttpError(404, 'This answer has no b-roll');
+      const clip = clipIn(q, params.brollId);
       const has = (key) => body[key] !== undefined;
       if (!['full', 'pastEnd', 'start'].some(has)) throw new HttpError(400, 'Say full, pastEnd or start');
       for (const key of ['full', 'pastEnd']) if (has(key) && typeof body[key] !== 'boolean') throw new HttpError(400, `Say ${key}: true or false`);
-      if ((body.full || body.pastEnd) && !q.broll_upload) throw new HttpError(400, 'Only a video you upload can be full screen');
+      if ((body.full || body.pastEnd) && !clip.upload) throw new HttpError(400, 'Only a video you upload can be full screen');
       if (has('start') && body.start !== null && !Number.isFinite(body.start)) throw new HttpError(400, 'Say start: seconds into your answer, or null');
-      const full = has('full') ? body.full : Boolean(q.broll_full);
-      const pastEnd = has('pastEnd') ? body.pastEnd : Boolean(q.broll_past_end);
-      const start = has('start') ? body.start && Math.round(body.start * 1000) / 1000 : q.broll_chosen;
-      if (has('start') && start != null) await checkCut(q, start, { full, pastEnd: full && pastEnd });
-      const latest = editableQuestion(params.id, user); // the office hour may have been published meanwhile
-      if (Boolean(latest.broll_full) !== full || Boolean(latest.broll_past_end) !== pastEnd || latest.broll_chosen !== start) {
-        db.prepare('UPDATE questions SET broll_full = ?, broll_past_end = ?, broll_chosen = ? WHERE id = ?').run(full ? 1 : 0, pastEnd ? 1 : 0, start, q.id);
-        const placing = brollJobs.place(q.id);
+      const full = has('full') ? body.full : Boolean(clip.full);
+      const pastEnd = has('pastEnd') ? body.pastEnd : Boolean(clip.past_end);
+      const start = has('start') ? body.start && Math.round(body.start * 1000) / 1000 : clip.chosen;
+      if (has('start') && start != null) await checkCut(q, clip, start, { full, pastEnd: full && pastEnd });
+      // The office hour may have been published meanwhile, or the clip removed.
+      const latest = clipIn(editableQuestion(params.id, user), clip.id);
+      if (Boolean(latest.full) !== full || Boolean(latest.past_end) !== pastEnd || latest.chosen !== start) {
+        db.prepare('UPDATE brolls SET full = ?, past_end = ?, chosen = ? WHERE id = ?').run(full ? 1 : 0, pastEnd ? 1 : 0, start, clip.id);
+        const placing = brollJobs.place(clip.id);
         if (start != null) await placing;
       }
-      return { broll: brollOf(db.prepare('SELECT * FROM questions WHERE id = ?').get(q.id)) };
+      return brollReply(q, clip.id);
     },
     { auth: true },
   );
 
-  // Refuses cutting in to a question's b-roll at `start`, seconds into its take, where it can't go:
-  // before the answer starts, or too near its end for any of it to play (see placeBroll).
-  async function checkCut(q, start, { full, pastEnd }) {
-    if (q.broll_status !== 'ready') throw new HttpError(409, 'Wait for your b-roll to be ready before choosing where it goes');
+  // Refuses cutting in to a clip at `start`, seconds into its answer's take, where it can't go:
+  // before the answer starts, during other b-roll the expert chose a place for, or too near the end
+  // of the answer, or the next of those, for any of it to play (see placeBroll).
+  async function checkCut(q, clip, start, { full, pastEnd }) {
+    if (clip.status !== 'ready') throw new HttpError(409, 'Wait for your b-roll to be ready before choosing where it goes');
     if (!q.answer_video) throw new HttpError(409, 'Record an answer before choosing where its b-roll goes');
     const answerStart = q.answer_start ?? 0;
     // A moment before it, as the players show it, is close enough.
     if (start < answerStart - 1) throw new HttpError(400, `That's still the question. Cut in after your answer starts, at ${clock(Math.ceil(answerStart))}.`);
+    const at = Math.max(answerStart, start);
+    const chosen = db.prepare("SELECT * FROM brolls WHERE question_id = ? AND id != ? AND status = 'ready' AND start IS NOT NULL AND chosen IS NOT NULL").all(q.id, clip.id);
+    const during = chosen.find((o) => at >= o.start && at < o.start + o.length);
+    if (during) throw new HttpError(400, `That's during your other b-roll, at ${clock(during.start)}–${clock(during.start + during.length)}. Cut in before or after it.`);
     let end;
-    let clip;
+    let seconds;
     try {
-      [end, clip] = await Promise.all([broll.duration(join(mediaDir, q.answer_video)), broll.duration(join(mediaDir, q.broll_video))]);
+      [end, seconds] = await Promise.all([broll.duration(join(mediaDir, q.answer_video)), broll.duration(join(mediaDir, clip.video))]);
     } catch (err) {
       console.error(`[broll] measuring the answer to question ${q.id} or its b-roll failed: ${err.message}`);
       throw new HttpError(500, "Couldn't read this answer's video");
     }
-    const placed = await moderator.placeBroll({ description: '', question: '', clip, answerStart, end, cues: null, words: null, full, pastEnd, start });
+    const others = chosen.map((o) => ({ start: o.start, length: o.length }));
+    const placed = await moderator.placeBroll({ description: '', question: '', clip: seconds, answerStart, end, cues: null, words: null, full, pastEnd, start, others });
     if (!placed) {
+      const next = chosen.filter((o) => o.start > at).sort((a, b) => a.start - b.start)[0];
+      if (next && next.start < end) throw new HttpError(400, `There's too little time after ${clock(start)} before your other b-roll at ${clock(next.start)}. Cut in earlier.`);
       const instead = full && !pastEnd ? ', or let it keep playing past the end of your answer' : '';
       throw new HttpError(400, `There's too little of your answer left after ${clock(start)} for b-roll. Cut in earlier${instead}.`);
     }
   }
 
+  // Removes a clip, stopping it being made; clips left out for want of room may fit now.
   route(
     'DELETE',
-    '/api/questions/:id/broll',
+    '/api/questions/:id/broll/:brollId',
     ({ params, user }) => {
       const q = editableQuestion(params.id, user);
-      db.prepare(
-        `UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL,
-         broll_full = 0, broll_past_end = 0, broll_chosen = NULL, broll_seconds = NULL WHERE id = ?`,
-      ).run(q.id);
-      pruneBroll([q.broll_video]);
-      brollJobs?.cancel(q.id);
-      return { broll: null };
+      const clip = clipIn(q, params.brollId);
+      db.prepare('DELETE FROM brolls WHERE id = ?').run(clip.id);
+      pruneBroll([clip.video]);
+      brollJobs?.cancel(clip.id);
+      brollJobs?.placeAll(q.id, { leftOut: true });
+      return { brolls: brollsOf(db, q.id) };
     },
     { auth: true },
   );
@@ -1520,31 +1573,30 @@ export function createApp({ db, moderator, devLogin = false, mediaDir = 'media',
       const questions = loadQuestions(db, oh.id, user);
       const working = workingAnswers(questions);
       if (working.length === 0) throw new HttpError(400, 'Record an answer for at least one queued question before publishing');
-      const making = questions.find((q) => working.some(([id]) => id === q.id) && q.broll?.status === 'pending');
+      const making = questions.find((q) => working.some(([id]) => id === q.id) && q.brolls.some((b) => b.status === 'pending'));
       if (making) throw new HttpError(409, `The b-roll for question ${making.planPosition} is still being made. Wait for it, or remove it, before publishing.`);
       const t = now();
       const [unused, unusedBroll] = transaction(db, () => {
-        // B-roll goes with an answer if it's made and placed.
-        const placed = "broll_status = 'ready' AND broll_start IS NOT NULL";
         // The asker's character says a question they asked under their name, unless they're on camera.
         const said = "source = 'asker' AND is_anonymous = 0 AND asker_video IS NULL";
         const snapshot = db.prepare(
           `UPDATE questions SET published_position = ?, published_answer_video = answer_video, published_answer_start = answer_start,
-             published_broll = IIF(${placed}, broll_video, NULL), published_broll_start = IIF(${placed}, broll_start, NULL), published_broll_length = IIF(${placed}, broll_length, NULL),
-             published_broll_full = IIF(${placed}, broll_full, NULL), published_broll_past_end = IIF(${placed}, broll_full AND broll_past_end, NULL),
              published_avatar = IIF(${said}, (SELECT avatar_id FROM users WHERE users.id = questions.author_id), NULL)
            WHERE id = ?`,
         );
         working.forEach(([id], i) => snapshot.run(i + 1, id));
+        // B-roll goes with an answer if it's made and placed.
+        const publish = db.prepare("UPDATE brolls SET published = 1, past_end = full AND past_end WHERE question_id = ? AND status = 'ready' AND start IS NOT NULL");
+        working.forEach(([id]) => publish.run(id));
         db.prepare('UPDATE office_hours SET published_at = ?, closed_at = COALESCE(closed_at, ?) WHERE id = ?').run(t, t, oh.id);
         // Videos recorded for questions that didn't make the cut can never be published now.
         const leftover = 'FROM questions WHERE office_hour_id = ? AND published_position IS NULL AND answer_video IS NOT NULL';
         const names = db.prepare(`SELECT answer_video ${leftover}`).all(oh.id).map((r) => r.answer_video);
         db.prepare(`UPDATE questions SET answer_video = NULL, answer_start = NULL WHERE id IN (SELECT id ${leftover})`).run(oh.id);
         // Nor can b-roll that wasn't published with an answer.
-        const leftoverBroll = 'FROM questions WHERE office_hour_id = ? AND broll_video IS NOT NULL AND published_broll IS NOT broll_video';
-        const clips = db.prepare(`SELECT broll_video ${leftoverBroll}`).all(oh.id).map((r) => r.broll_video);
-        db.prepare(`UPDATE questions SET broll_prompt = NULL, broll_upload = NULL, broll_status = NULL, broll_shot = NULL, broll_video = NULL, broll_start = NULL, broll_length = NULL, broll_full = 0 WHERE id IN (SELECT id ${leftoverBroll})`).run(oh.id);
+        const leftoverBroll = 'FROM brolls WHERE published = 0 AND question_id IN (SELECT id FROM questions WHERE office_hour_id = ?)';
+        const clips = db.prepare(`SELECT video ${leftoverBroll}`).all(oh.id).map((r) => r.video);
+        db.prepare(`DELETE ${leftoverBroll}`).run(oh.id);
         return [names, clips];
       });
       pruneVideos(unused);

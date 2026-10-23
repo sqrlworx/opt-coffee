@@ -14,8 +14,9 @@ const CACHE_LIMIT = 500;
  * - suggestOrder: always local and deterministic, computed from the groups.
  * - summarizeAnswer: sync, cached and refreshed in the background like groupQuestions. Until the
  *   LLM's summary is ready it returns the heuristic one marked `pending`, so pages can check back.
- * - placeBroll: async; where b-roll goes in an answer. The LLM picks the moment when available,
- *   unless the expert chose it; how long it plays, and where it may go, are always the heuristic's.
+ * - placeBroll: async; where b-roll goes in an answer, around any other b-roll in it. The LLM picks
+ *   the moment when available, unless the expert chose it; how long it plays, and where it may go,
+ *   are always the heuristic's.
  *
  * In `auto` mode the LLM is Muse if META_API_KEY is set, else Claude if Anthropic credentials are.
  * `llm` stands in for it (tests).
@@ -134,20 +135,32 @@ export async function createModerator({ mode = process.env.FORUM_MODERATOR ?? 'a
     /**
      * @param {{description: string, question: string, clip: number, answerStart: number|null, end: number,
      *   words: [number, number, string][]|null, cues: [number, number, string][]|null, full?: boolean, pastEnd?: boolean,
-     *   start?: number|null}} input  the b-roll's description and length (`clip`), and the take: where its answer
-     *   starts, how long it is, and its transcript; `full` when the b-roll is full screen rather than split screen,
-     *   `pastEnd` when it may run past the end of the answer, and `start` where the expert chose to cut in, if they did
-     * @returns {Promise<{start: number, length: number} | null>}  null when the answer is too short for b-roll
+     *   start?: number|null, others?: {start: number, length: number, description: string}[]}} input  the b-roll's description
+     *   and length (`clip`), and the take: where its answer starts, how long it is, and its transcript; `full` when the b-roll
+     *   is full screen rather than split screen, `pastEnd` when it may run past the end of the answer, `start` where the
+     *   expert chose to cut in, if they did, and `others`, the b-roll already in the answer, which it can't overlap
+     * @returns {Promise<{start: number, length: number} | null>}  null when there's no room for it
      */
     async placeBroll(input) {
       const placed = heuristic.placeBroll(input);
-      const range = heuristic.brollRange(input);
+      const windows = heuristic.brollWindows(input);
       const cues = (input.cues ?? []).filter(([start, end]) => (start + end) / 2 >= (input.answerStart ?? 0));
       if (!llm || !placed || !cues.length || input.start != null) return placed;
       try {
-        const { start } = await llm.placeBroll({ description: input.description, question: input.question, cues, ...range, ...(input.full ? { full: true } : {}) });
-        // LLM output is untrusted: kept where the b-roll can go.
-        if (Number.isFinite(start)) return { start: Math.round(Math.min(range.to, Math.max(range.from, start)) * 1000) / 1000, length: placed.length };
+        const { start } = await llm.placeBroll({
+          description: input.description,
+          question: input.question,
+          cues,
+          windows,
+          others: (input.others ?? []).map(({ start, length, description }) => ({ start, length, description })),
+          ...(input.full ? { full: true } : {}),
+        });
+        // LLM output is untrusted: kept where the b-roll can go, in the gap nearest where it said.
+        if (Number.isFinite(start)) {
+          const off = (w) => Math.max(w.from - start, start - w.to, 0);
+          const w = windows.reduce((a, b) => (off(b) < off(a) ? b : a));
+          return { start: Math.round(Math.min(w.to, Math.max(w.from, start)) * 1000) / 1000, length: w.length };
+        }
       } catch (err) {
         log(`[moderator] ${llm.name} b-roll placement failed: ${err.message}`);
       }

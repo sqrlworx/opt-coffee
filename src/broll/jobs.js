@@ -10,24 +10,25 @@ const TRANSCRIPT_POLL = 1000;
 export const MAX_CLIP = 5;
 
 /**
- * Background work for answers' b-roll: making a clip from the expert's description (`broll`,
- * src/broll/index.js), one at a time, with what they say in the answer to pick the shot, then
- * placing it in the answer's take (the moderator picks where, unless the expert chose). Both wait
- * for the take's transcript. A clip the expert uploaded is placed the same way, right away rather
- * than after the clips being made, as is b-roll moved to where it fits in a new take, or to where
- * the expert chose. Progress lives in the
- * database (questions.broll_status), so `resume()` at startup picks up anything pending.
+ * Background work for answers' b-roll clips (the brolls table): making a clip from the expert's
+ * description (`broll`, src/broll/index.js), one at a time, with what they say in the answer to pick
+ * the shot, then placing it in the answer's take around the answer's other clips (the moderator picks
+ * where, unless the expert chose). Both wait for the take's transcript. A clip the expert uploaded is
+ * placed the same way, right away rather than after the clips being made, as are clips moved to where
+ * they fit in a new take, or to where the expert chose. An answer's clips are placed one at a time,
+ * each knowing where the ones before it went. Progress lives in the database (brolls.status), so
+ * `resume()` at startup picks up anything pending.
  */
 export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.error, transcriptWait = TRANSCRIPT_WAIT }) {
   let tail = Promise.resolve();
   const enqueue = (job) => {
     tail = tail.then(job).catch((err) => log(err));
   };
+  const answers = new Map(); // question id -> the placements in its answer, one after another
   const placing = new Set(); // placements under way outside the queue
+  const clipOf = (id) => db.prepare('SELECT * FROM brolls WHERE id = ?').get(id);
   const question = (id) => db.prepare('SELECT * FROM questions WHERE id = ?').get(id);
-  // Still the b-roll this job is for: the expert may have asked for another, or removed it, meanwhile.
-  const wanted = (id, clip) => question(id)?.broll_video === clip;
-  let making = null; // the clip being made: { id, clip, stop: AbortController }
+  let making = null; // the clip being made: { id, stop: AbortController }
 
   // A take's transcript, once it's no longer being made (or the wait runs out): {cues, words}, or null.
   async function transcript(take) {
@@ -37,119 +38,173 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
     return t ? { cues: JSON.parse(t.cues), words: t.words ? JSON.parse(t.words) : null } : null;
   }
 
-  /** How much b-roll an answer has room for (see moderator.brollRange), or null if it's too short for any. */
-  const longest = broll.maxSeconds ?? MAX_CLIP;
-  async function room(take, answerStart, clip = longest) {
-    return moderator.brollRange({ clip, answerStart, end: await broll.duration(join(mediaDir, take)) });
+  // The clips placed in a question's answer other than `except`, which another can't overlap; with
+  // `chosen`, only those cut in where the expert chose, which b-roll they choose a place for can't.
+  function others(questionId, except, { chosen = false } = {}) {
+    return db
+      .prepare(`SELECT * FROM brolls WHERE question_id = ? AND id IS NOT ? AND status = 'ready' AND start IS NOT NULL${chosen ? ' AND chosen IS NOT NULL' : ''} ORDER BY start`)
+      .all(questionId, except)
+      .map((b) => ({ id: b.id, start: b.start, length: b.length, description: shows(b) }));
   }
 
-  /** Queues making a question's b-roll clip (broll_video names the file to make), then placing it. */
+  /**
+   * How much b-roll a question's answer has room for, around its clips other than `except` (see
+   * moderator.brollRange), for a clip `clip` seconds long, or null if there's no room for any.
+   */
+  const longest = broll.maxSeconds ?? MAX_CLIP;
+  async function room(q, { clip = longest, except = null } = {}) {
+    return moderator.brollRange({ clip, answerStart: q.answer_start, end: await broll.duration(join(mediaDir, q.answer_video)), others: others(q.id, except) });
+  }
+
+  /** Queues making a clip (brolls.video names the file to make), then placing it. */
   function generate(id) {
     enqueue(async () => {
-      const q = question(id);
-      if (q?.broll_status !== 'pending' || !q.broll_video) return;
-      const file = join(mediaDir, q.broll_video);
+      const b = clipOf(id);
+      if (b?.status !== 'pending') return;
+      const file = join(mediaDir, b.video);
       // An uploaded clip that's gone can't be made again, nor can anything without a way to make it.
-      if (!existsSync(file) && (q.broll_upload || !broll.generate)) {
-        db.prepare("UPDATE questions SET broll_status = 'failed' WHERE id = ? AND broll_video = ?").run(id, q.broll_video);
-        return log(`[broll] the b-roll for question ${id} is missing, and can't be made`);
+      if (!existsSync(file) && (b.upload || !broll.generate)) {
+        db.prepare("UPDATE brolls SET status = 'failed' WHERE id = ?").run(id);
+        return log(`[broll] b-roll clip ${id} is missing, and can't be made`);
       }
       if (!existsSync(file)) {
-        making = { id, clip: q.broll_video, stop: new AbortController() };
+        making = { id, stop: new AbortController() };
         try {
+          const q = question(b.question_id);
           // Only as long as this take has room for, so no time goes into frames nobody sees.
-          const fits = q.answer_video ? await room(q.answer_video, q.answer_start) : null;
+          const fits = q.answer_video ? await room(q, { except: id }) : null;
           // What they say in the answer, after the question, so the shot can show their example.
           const said = q.answer_video ? (await transcript(q.answer_video))?.cues.filter(([start, end]) => (start + end) / 2 >= (q.answer_start ?? 0)) : null;
-          const { shot } = await broll.generate(q.broll_prompt, file, {
+          const { shot } = await broll.generate(b.prompt, file, {
             seconds: fits?.length ?? longest,
             question: q.body,
             answer: said?.length ? said.map(([, , text]) => text).join(' ') : null,
             signal: making.stop.signal,
           });
-          db.prepare('UPDATE questions SET broll_shot = ? WHERE id = ? AND broll_video = ?').run(shot ?? null, id, q.broll_video);
+          db.prepare('UPDATE brolls SET shot = ? WHERE id = ?').run(shot ?? null, id);
         } catch (err) {
           rmSync(file, { force: true });
-          const { changes } = db.prepare("UPDATE questions SET broll_status = 'failed' WHERE id = ? AND broll_video = ?").run(id, q.broll_video);
-          if (changes) log(`[broll] making b-roll for question ${id} failed: ${err.message}`);
+          const { changes } = db.prepare("UPDATE brolls SET status = 'failed' WHERE id = ?").run(id);
+          if (changes) log(`[broll] making b-roll clip ${id} failed: ${err.message}`);
           return;
         } finally {
           making = null;
         }
-        if (!wanted(id, q.broll_video)) return rmSync(file, { force: true });
+        // The expert may have removed it meanwhile.
+        if (!clipOf(id)) return rmSync(file, { force: true });
       }
-      await placeNow(id);
+      await inAnswer(b.question_id, () => placeNow(id));
     });
   }
 
-  /**
-   * Places a question's b-roll, already there, in its current take: after a new take was recorded,
-   * a clip uploaded, or the expert changed how it plays or chose where it goes. Right away, not
-   * after clips being made, which can take minutes each. Resolves once it's placed.
-   */
-  function place(id) {
-    db.prepare("UPDATE questions SET broll_status = 'pending', broll_start = NULL, broll_length = NULL WHERE id = ?").run(id);
-    const job = placeNow(id)
-      .catch((err) => log(err))
-      .finally(() => placing.delete(job));
-    placing.add(job);
-    return job;
+  // Runs `job` once the placements in a question's answer before it are done; resolves once it is.
+  function inAnswer(questionId, job) {
+    const run = (answers.get(questionId) ?? Promise.resolve()).then(job).catch((err) => log(err));
+    answers.set(questionId, run);
+    placing.add(run);
+    run.finally(() => {
+      placing.delete(run);
+      if (answers.get(questionId) === run) answers.delete(questionId);
+    });
+    return run;
   }
 
-  // Places the b-roll in the take the question has now, as it's to play now; if either changes
-  // meanwhile (it's re-recorded, say), again for that. A new clip asked for meanwhile is placed by
-  // its own job.
+  /**
+   * Places a clip, already there, in its answer's current take: after it was uploaded, or the expert
+   * changed how it plays or chose where it goes. Right away, not after clips being made, which can
+   * take minutes each. Resolves once it's placed, with any clip it moved.
+   */
+  function place(id) {
+    const b = clipOf(id);
+    if (!b) return Promise.resolve();
+    db.prepare("UPDATE brolls SET status = 'pending', start = NULL, length = NULL WHERE id = ?").run(id);
+    if (!existsSync(join(mediaDir, b.video))) return Promise.resolve(); // still being made: placed once it is
+    return inAnswer(b.question_id, () => placeNow(id));
+  }
+
+  /**
+   * Places all of a question's clips that are there again, one after another: after a new take was
+   * recorded. One still being made is placed once it's made. With `leftOut`, only those that were
+   * left out for want of room, which may have some now: after a clip was removed.
+   */
+  function placeAll(questionId, { leftOut = false } = {}) {
+    const which = leftOut ? "status = 'ready' AND start IS NULL AND chosen IS NULL" : "status IN ('ready', 'pending')";
+    const ids = db
+      .prepare(`SELECT id, video FROM brolls WHERE question_id = ? AND ${which} ORDER BY id`)
+      .all(questionId)
+      .filter((b) => existsSync(join(mediaDir, b.video)))
+      .map((b) => b.id);
+    if (!ids.length) return Promise.resolve();
+    const unplace = db.prepare("UPDATE brolls SET status = 'pending', start = NULL, length = NULL WHERE id = ?");
+    ids.forEach((id) => unplace.run(id));
+    return inAnswer(questionId, async () => {
+      for (const id of ids) await placeNow(id);
+    });
+  }
+
+  // Places a pending clip in the take its answer has now, as it's to play now, around the answer's
+  // other clips. If either changes meanwhile (it's re-recorded, say), whatever changed it places it
+  // again, after this. Cut in where the expert chose, it moves clips the moderator placed there.
   async function placeNow(id) {
-    const clip = question(id)?.broll_video;
-    for (;;) {
-      const q = question(id);
-      if (q?.broll_status !== 'pending' || !clip || q.broll_video !== clip) return;
-      const take = q.answer_video;
-      const as = [take, q.broll_full, q.broll_past_end, q.broll_chosen];
-      const still = db.prepare(
-        `UPDATE questions SET broll_status = 'ready', broll_start = ?, broll_length = ?, broll_seconds = ?
-         WHERE id = ? AND broll_video = ? AND answer_video IS ? AND broll_full = ? AND broll_past_end = ? AND broll_chosen IS ?`,
-      );
-      if (!take) return still.run(null, null, null, id, clip, ...as); // no answer to place it in until one's recorded
-      try {
-        // Where the expert chose needs no transcript.
-        const t = q.broll_chosen == null ? await transcript(take) : null;
-        const [end, seconds] = await Promise.all([broll.duration(join(mediaDir, take)), broll.duration(join(mediaDir, clip))]);
-        const placed = await moderator.placeBroll({
-          description: shows(q),
-          question: q.body,
-          clip: seconds,
-          answerStart: q.answer_start,
-          end,
-          cues: t?.cues ?? null,
-          words: t?.words ?? null,
-          full: Boolean(q.broll_full),
-          pastEnd: Boolean(q.broll_full && q.broll_past_end),
-          start: q.broll_chosen,
-        });
-        // Too short for it, after a re-recording, or too late where the expert chose: it stays, unplaced.
-        if (still.run(placed?.start ?? null, placed?.length ?? null, seconds, id, clip, ...as).changes) return;
-      } catch (err) {
-        const { changes } = db.prepare("UPDATE questions SET broll_status = 'failed' WHERE id = ? AND broll_video = ? AND answer_video IS ?").run(id, clip, take);
-        if (changes) return log(`[broll] placing the b-roll of question ${id} failed: ${err.message}`);
-      }
-      // The take, or how it's to play, changed while this was being placed: go again with that.
+    const b = clipOf(id);
+    if (b?.status !== 'pending') return;
+    const q = question(b.question_id);
+    const take = q.answer_video;
+    const still = db.prepare(
+      `UPDATE brolls SET status = 'ready', start = ?, length = ?, seconds = ?
+       WHERE id = ? AND status = 'pending' AND full = ? AND past_end = ? AND chosen IS ? AND (SELECT answer_video FROM questions WHERE questions.id = brolls.question_id) IS ?`,
+    );
+    const as = [b.full, b.past_end, b.chosen, take];
+    if (!take) return still.run(null, null, b.seconds, id, ...as); // no answer to place it in until one's recorded
+    let placed;
+    try {
+      // Where the expert chose needs no transcript.
+      const t = b.chosen == null ? await transcript(take) : null;
+      const [end, seconds] = await Promise.all([broll.duration(join(mediaDir, take)), broll.duration(join(mediaDir, b.video))]);
+      placed = await moderator.placeBroll({
+        description: shows(b),
+        question: q.body,
+        clip: seconds,
+        answerStart: q.answer_start,
+        end,
+        cues: t?.cues ?? null,
+        words: t?.words ?? null,
+        full: Boolean(b.full),
+        pastEnd: Boolean(b.full && b.past_end),
+        start: b.chosen,
+        others: others(q.id, id, { chosen: b.chosen != null }),
+      });
+      // No room for it, after a re-recording, or too late where the expert chose: it stays, unplaced.
+      if (!still.run(placed?.start ?? null, placed?.length ?? null, seconds, id, ...as).changes) return;
+    } catch (err) {
+      const { changes } = db.prepare("UPDATE brolls SET status = 'failed' WHERE id = ? AND status = 'pending'").run(id);
+      if (changes) log(`[broll] placing b-roll clip ${id} failed: ${err.message}`);
+      return;
+    }
+    if (!placed || b.chosen == null) return;
+    const until = placed.start + placed.length;
+    const unplace = db.prepare("UPDATE brolls SET status = 'pending', start = NULL, length = NULL WHERE id = ?");
+    for (const o of others(q.id, id)) {
+      if (o.start >= until || o.start + o.length <= placed.start || clipOf(o.id).chosen != null) continue;
+      unplace.run(o.id);
+      await placeNow(o.id);
     }
   }
 
-  /** Stops making a question's clip if it's no longer wanted: the expert removed it or asked for another. */
+  /** Stops making a clip if it's no longer wanted: the expert removed it. */
   function cancel(id) {
-    if (making?.id === id && !wanted(id, making.clip)) making.stop.abort();
+    if (making?.id === id && !clipOf(id)) making.stop.abort();
   }
 
   function resume() {
-    db.prepare("SELECT id FROM questions WHERE broll_status = 'pending'").all().forEach((q) => generate(q.id));
+    db.prepare("SELECT id FROM brolls WHERE status = 'pending' ORDER BY id").all().forEach((b) => generate(b.id));
   }
 
   return {
     room,
     generate,
     place,
+    placeAll,
     cancel,
     resume,
     /** Resolves once every job, including ones started meanwhile, has finished. */
@@ -164,10 +219,10 @@ export function createBrollJobs({ db, broll, moderator, mediaDir, log = console.
 }
 
 /**
- * What a question's b-roll shows, to place it by: the expert's description, or for a clip they
- * uploaded without one, its file's name ("chopping-onions.mov"), which often says.
+ * What a clip shows, to place it by: the expert's description, or for a clip they uploaded without
+ * one, its file's name ("chopping-onions.mov"), which often says.
  */
-function shows(q) {
-  if (q.broll_prompt || !q.broll_upload) return q.broll_prompt ?? '';
-  return q.broll_upload.replace(/\.[^.]*$/, '').replace(/[._-]+/g, ' ').trim();
+export function shows(b) {
+  if (b.prompt || !b.upload) return b.prompt ?? '';
+  return b.upload.replace(/\.[^.]*$/, '').replace(/[._-]+/g, ' ').trim();
 }

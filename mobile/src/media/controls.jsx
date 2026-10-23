@@ -23,9 +23,10 @@ export function CtrlButton({ label, onPress, children, pressed, style }) {
 }
 
 // The timeline: drag along it to scrub, with `ticks` (fractions, 0-1) where each answer starts and
-// `spans` ({ from, to, color }, fractions) marking stretches of it, like b-roll. `fillRef` is the
-// played part, which the player sizes itself as it plays rather than re-rendering. `onScrub(t)`
-// hears where a finger is while it drags, and null when it lets go.
+// `spans` ({ from, to, color, ahead }, fractions) marking stretches of it, like b-roll, over the
+// played part: `color` where they've been played, and `ahead` where they haven't. `fillRef` is the
+// played part, which the player sizes itself as it plays rather than re-rendering (see showPlayed).
+// `onScrub(t)` hears where a finger is while it drags, and null when it lets go.
 export function SeekBar({ total, value, fillRef, ticks = [], spans = [], onSeek, onScrub }) {
   const bar = useRef(null);
   const scrubbing = useRef(false);
@@ -72,18 +73,29 @@ export function SeekBar({ total, value, fillRef, ticks = [], spans = [], onSeek,
       style={{ position: 'relative', flex: 1, height: 36, display: 'flex', alignItems: 'center', touchAction: 'none', cursor: 'pointer' }}
     >
       <div style={{ position: 'relative', width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.3)' }}>
-        {spans.map((sp, i) => (
-          <span key={i} style={{ position: 'absolute', top: 0, bottom: 0, left: `${100 * sp.from}%`, width: `${100 * (sp.to - sp.from)}%`, borderRadius: 2, background: sp.color }} />
-        ))}
-        <div ref={fillRef} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: '0%', borderRadius: 2, background: '#fff' }}>
-          <span style={{ position: 'absolute', right: -7, top: -5, width: 14, height: 14, borderRadius: 7, background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.4)' }} />
-        </div>
+        <div ref={fillRef} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: '0%', borderRadius: 2, background: '#fff' }} />
+        {spans.map((sp, i) => {
+          const width = sp.to - sp.from || 1;
+          const at = `calc((var(--played, 0) - ${sp.from}) / ${width} * 100%)`;
+          return <span key={i} style={{ position: 'absolute', top: 0, bottom: 0, left: `${100 * sp.from}%`, width: `${100 * (sp.to - sp.from)}%`, borderRadius: 2, background: `linear-gradient(to right, ${sp.color} ${at}, ${sp.ahead ?? sp.color} 0)` }} />;
+        })}
+        {/* The playhead, over the spans. */}
+        <span style={{ position: 'absolute', top: -5, left: 'calc(var(--played, 0) * 100%)', width: 14, height: 14, marginLeft: -7, borderRadius: 7, background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.4)' }} />
         {ticks.map((at, i) => (
           <span key={i} style={{ position: 'absolute', top: 0, bottom: 0, left: `${100 * at}%`, width: 3, marginLeft: -1.5, background: 'rgba(0,0,0,0.75)' }} />
         ))}
       </div>
     </div>
   );
+}
+
+// Shows how much of a SeekBar's timeline has played, `fraction` (0-1), on its `fillRef`: the played
+// part, and where the playhead and the spans' played parts reach.
+export function showPlayed(fillRef, fraction) {
+  const fill = fillRef.current;
+  if (!fill) return;
+  fill.style.width = `${100 * fraction}%`;
+  fill.parentElement.style.setProperty('--played', fraction);
 }
 
 export function BigPlay({ playing = false, onPress, label }) {

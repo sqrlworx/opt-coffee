@@ -6,7 +6,8 @@ import { pipBox, PIP as SERVER_PIP } from '../../src/video.js';
 import { brollAt, cover, cutCue, FOCUS, focusPosition, joinedCues, joinedParts, moment, PIP, pipRect, playLength, slot } from '../src/media/split.js';
 
 const asked = { id: 1, answerStart: 3, questionCues: [[0, 2.5, 'How do I start?']], transcript: { status: 'ready', cues: [[3.2, 6, 'Start small.']] } };
-const withBroll = { id: 2, answerStart: 4, broll: { video: '/media/b.mp4', start: 6, length: 3 }, transcript: { status: 'ready', cues: [[6.5, 8, 'Like this.']] } };
+const clip = { video: '/media/b.mp4', start: 6, length: 3 };
+const withBroll = { id: 2, answerStart: 4, brolls: [clip, { video: '/media/c.mp4', start: 10, length: 1.5 }], transcript: { status: 'ready', cues: [[6.5, 8, 'Like this.']] } };
 const chapters = [
   { questionId: 1, start: 0, end: 10, captions: false, questionStart: 0.05, expertFocus: 0.74, askerFocus: 0.638 },
   { questionId: 2, start: 10, end: 22, captions: true, questionStart: 0 },
@@ -49,26 +50,30 @@ test('b-roll takes the bottom half, timed from its start in the take', () => {
   assert.equal(m.clipAt, 1);
   assert.equal(moment(parts, 15.9).split, null);
   assert.equal(moment(parts, 19).split, null, 'it ends after its length');
+  assert.deepEqual([moment(parts, 20.5).split, moment(parts, 20.5).cut, moment(parts, 20.5).clipAt], ['broll', withBroll.brolls[1], 0.5], 'then the next clip');
 });
 
 test('full-screen b-roll doesn’t split: the joined video has it cut in', () => {
-  const full = joinedParts([asked, { ...withBroll, broll: { ...withBroll.broll, full: true } }], chapters);
+  const full = joinedParts([asked, { ...withBroll, brolls: [{ ...clip, full: true }, withBroll.brolls[1]] }], chapters);
   const m = moment(full, 17);
   assert.deepEqual([m.split, m.cut], [null, null]);
-  assert.equal(brollAt(full[1].q.broll, 17 - 10), true, 'an answer’s own video still cuts to it, over the whole stage');
+  assert.equal(brollAt(full[1].q.brolls, 17 - 10), full[1].q.brolls[0], 'an answer’s own video still cuts to it, over the whole stage');
+  assert.equal(moment(full, 20.5).split, 'broll', 'a split-screen clip after it still splits');
 });
 
 test('an answer’s own video splits for its b-roll the same way', () => {
-  assert.equal(brollAt(withBroll.broll, 7), true);
-  assert.equal(brollAt(withBroll.broll, 9), false);
-  assert.equal(brollAt({ ...withBroll.broll, start: null }, 7), false, 'not placed (the take is too short for it)');
+  assert.equal(brollAt(withBroll.brolls, 7), clip);
+  assert.equal(brollAt(withBroll.brolls, 9), null);
+  assert.equal(brollAt(withBroll.brolls, 10.5), withBroll.brolls[1], 'each of its clips in turn');
+  assert.equal(brollAt([{ ...clip, start: null }], 7), null, 'not placed (the take is too short for it)');
+  assert.equal(brollAt(undefined, 7), null);
 });
 
 test('an answer’s own video plays on to the end of b-roll that runs past the end of the answer', () => {
-  assert.equal(playLength(withBroll.broll, 12), 12, 'b-roll within the answer');
-  assert.equal(playLength({ ...withBroll.broll, length: 8 }, 12), 14, 'past its end');
-  assert.equal(playLength({ ...withBroll.broll, start: null, length: 8 }, 12), 12, 'not placed');
-  assert.equal(playLength(null, 12), 12);
+  assert.equal(playLength(withBroll.brolls, 12), 12, 'b-roll within the answer');
+  assert.equal(playLength([clip, { ...clip, start: 9, length: 5 }], 12), 14, 'past its end');
+  assert.equal(playLength([{ ...clip, start: null, length: 8 }], 12), 12, 'not placed');
+  assert.equal(playLength([], 12), 12);
 });
 
 test('captions burned into the picture are drawn while b-roll covers them', () => {

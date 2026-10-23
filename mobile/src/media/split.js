@@ -43,8 +43,8 @@ export const partAt = (parts, t) => parts.find((p) => t < p.end) ?? parts.at(-1)
 
 // What's on screen `t` seconds into the joined video (once it's `started`): `asking`, the question
 // being played at the start of its take, up to where the answer starts, with `at`, how far into the
-// question's sound (which starts a little after the take does); or `cut`, the answer's split-screen
-// b-roll, with `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under
+// question's sound (which starts a little after the take does); or `cut`, the clip of the answer's
+// split-screen b-roll playing then, with `clipAt`, how far into the clip. `split` is which of them takes the bottom half, under
 // the expert, if either: a question only when it was asked on camera, for the asker's video (the fox
 // saying any other is in a bubble over the expert instead). Full-screen b-roll is cut into the joined
 // video itself, so it needs no split.
@@ -55,19 +55,22 @@ export function moment(parts, t, started = true) {
   const into = t - part.start;
   const asking = q.answerStart != null && into >= 0 && into < q.answerStart ? q : null;
   const at = asking ? into - (part.questionStart ?? 0) : 0;
-  const b = q.broll;
-  const cut = !asking && b?.video && !b.full && b.start != null && into >= b.start && into < b.start + b.length ? b : null;
-  return { part, split: asking?.askerVideo ? 'question' : cut ? 'broll' : null, asking, cut, at, clipAt: cut ? into - b.start : 0 };
+  const clip = asking ? null : brollAt(q.brolls, into);
+  const cut = clip && !clip.full ? clip : null;
+  return { part, split: asking?.askerVideo ? 'question' : cut ? 'broll' : null, asking, cut, at, clipAt: cut ? into - cut.start : 0 };
 }
 
-// Whether one answer's own video is in its b-roll at `t` (the planner, and published answers when
-// they weren't joined): split screen, the expert in the top half while the b-roll plays in the
-// bottom half, or full screen, the b-roll over all of it.
-export const brollAt = (broll, t) => Boolean(broll?.video && broll.start != null && t >= broll.start && t < broll.start + broll.length);
+// The clip of an answer's b-roll that its own video is in at `t`, or null (the planner, and published
+// answers when they weren't joined): split screen, the expert in the top half while the clip plays in
+// the bottom half, or full screen, the clip over all of it.
+export const brollAt = (brolls, t) => (brolls ?? []).find((b) => b.video && b.start != null && t >= b.start && t < b.start + b.length) ?? null;
 
 // How long one answer's own video plays for with its b-roll, the video being `length` seconds long:
-// to where full-screen b-roll that runs past the end of the answer ends, if it does.
-export const playLength = (broll, length) => (broll?.video && broll.start != null && length && broll.start + broll.length > length + 0.05 ? broll.start + broll.length : length);
+// to where full-screen b-roll that runs past the end of the answer ends, if any does.
+export function playLength(brolls, length) {
+  const end = Math.max(0, ...(brolls ?? []).filter((b) => b.video && b.start != null).map((b) => b.start + b.length));
+  return length && end > length + 0.05 ? end : length;
+}
 
 // The captions over the joined video, [start, end, text] over all of it: each answer's question and
 // transcript, shifted by where its answer starts, except where they're burned into the picture.

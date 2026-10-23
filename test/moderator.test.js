@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { brollRange, followUpQuestions, groupQuestions, placeBroll, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
+import { brollRange, brollWindows, followUpQuestions, groupQuestions, placeBroll, suggestOrder, suggestQuestions, summarizeAnswer } from '../src/moderator/heuristic.js';
 import { createModerator } from '../src/moderator/index.js';
 import { createMuseModerator } from '../src/moderator/muse.js';
 
@@ -331,6 +331,38 @@ test("b-roll that matches nothing said goes about a third of the way in, at a se
   assert.ok(placeBroll({ description: 'A sunset', clip: 2, answerStart: 2, end: 12, words }).start >= 2);
 });
 
+test('more b-roll goes in the gaps around what is already in the answer, at least a second from it, preferring one all of it fits in', () => {
+  const others = [{ start: 8, length: 5 }]; // 8s to 13s
+  // Before it, from where the answer starts, to a second before it; after it, a second after, to the end.
+  assert.deepEqual(brollWindows({ clip: 4, answerStart: 2, end: 20, others }), [{ length: 4, from: 2.5, to: 3 }, { length: 4, from: 14, to: 15 }]);
+  assert.deepEqual(brollRange({ clip: 4, answerStart: 2, end: 20, others }), { length: 4, from: 2.5, to: 3 });
+  // A clip too long for either gap plays for as long as the longer one has room for.
+  assert.deepEqual(brollRange({ clip: 10, answerStart: 2, end: 20, others }), { length: 6, from: 14, to: 14 });
+  // No gap long enough to cut away in: no room.
+  assert.equal(brollRange({ clip: 4, answerStart: 2, end: 12, others: [{ start: 3, length: 7.5 }] }), null);
+  // Let run past the end, it can only do that after the last of them.
+  assert.deepEqual(brollWindows({ clip: 8, answerStart: 2, end: 20, pastEnd: true, others }), [{ length: 5, from: 2, to: 2 }, { length: 8, from: 14, to: 14 }]);
+
+  // Placed where the words match, unless that's taken; then in the gap nearest that matches.
+  const description = 'Close-up of hands chopping fresh vegetables on a board';
+  const alone = placeBroll({ description, clip: 4, answerStart: 3, end: 20, words: kitchen });
+  const around = placeBroll({ description, clip: 4, answerStart: 3, end: 20, words: kitchen, others: [{ start: alone.start - 1, length: 4 }] });
+  assert.ok(around.start >= alone.start + 4 || around.start + around.length <= alone.start - 2, `${JSON.stringify(around)} clear of it`);
+  // Without a transcript, as near a third of the way in as there's room for all of it.
+  assert.deepEqual(placeBroll({ description: 'A sunset', clip: 4, answerStart: 2, end: 20, words: null, others: [{ start: 6, length: 6 }] }), { start: 13, length: 4 });
+  // Full of b-roll, there's nowhere for more.
+  assert.equal(placeBroll({ description: 'A sunset', clip: 4, answerStart: 2, end: 20, words: kitchen, others: [{ start: 2, length: 7 }, { start: 10, length: 9 }] }), null);
+});
+
+test('b-roll the expert cuts in among other b-roll they placed stops where the next starts, and cannot start during one', () => {
+  const at = (start, others) => placeBroll({ description: 'anything', clip: 6, answerStart: 2, end: 20, words: kitchen, start, others });
+  const others = [{ start: 10, length: 3 }];
+  assert.deepEqual(at(5, others), { start: 5, length: 5 }); // up to where the next starts
+  assert.deepEqual(at(13, others), { start: 13, length: 5.5 }); // right after it, to a moment before the answer ends
+  assert.equal(at(11, others), null); // during it
+  assert.equal(at(9, others), null); // too little time before it
+});
+
 test('The LLM picks where b-roll goes when configured, kept where it can go, with the heuristic as fallback', async () => {
   const calls = [];
   let reply;
@@ -342,7 +374,7 @@ test('The LLM picks where b-roll goes when configured, kept where it can go, wit
   reply = () => ({ start: 7.2 });
   assert.deepEqual(await moderator.placeBroll(input), { start: 7.2, length: 4 });
   // It sees the answer, not the question at the start of the take, and where the b-roll can go.
-  assert.deepEqual(calls[0], { description: 'Hands chopping vegetables', question: 'How do you cook a weeknight dinner?', cues: cues.slice(1), length: 4, from: 5.5, to: 14.5 });
+  assert.deepEqual(calls[0], { description: 'Hands chopping vegetables', question: 'How do you cook a weeknight dinner?', cues: cues.slice(1), windows: [{ length: 4, from: 5.5, to: 14.5 }], others: [] });
   reply = () => ({ start: 19 });
   assert.deepEqual(await moderator.placeBroll(input), { start: 14.5, length: 4 }); // can't end after the answer does
   reply = () => Promise.reject(new Error('overloaded'));
@@ -357,4 +389,10 @@ test('The LLM picks where b-roll goes when configured, kept where it can go, wit
   // Where the expert chose isn't the LLM's to change.
   assert.deepEqual(await moderator.placeBroll({ ...input, start: 12 }), { start: 12, length: 4 });
   assert.equal(calls.length, 4);
+  // Around other b-roll, it's told what that shows and where, and where this can go, and kept in the
+  // gap nearest where it says.
+  const others = [{ start: 8, length: 5, description: 'A pot of water boiling' }];
+  reply = () => ({ start: 10 });
+  assert.deepEqual(await moderator.placeBroll({ ...input, others }), { start: 14, length: 4 });
+  assert.deepEqual([calls.at(-1).others, calls.at(-1).windows], [others, [{ length: 4, from: 3, to: 3 }, { length: 4, from: 14, to: 15 }]]);
 });

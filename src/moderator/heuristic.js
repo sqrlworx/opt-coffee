@@ -353,39 +353,68 @@ export function summarizeAnswer({ question, answer }) {
 const MIN_BROLL = 1.5; // seconds; a cutaway shorter than this isn't worth it
 const LEAD = 2.5; // seconds the expert is on camera, at most, before cutting away
 const TAIL = 1.5; // and after cutting back, before the answer ends
+const BETWEEN = 1; // and at least, between one cutaway the moderator places and another
 const PHRASE_GAP = 0.25; // seconds of silence before a word that starts a phrase
 const SENTENCE_GAP = 0.6;
 
 /**
- * Where b-roll can go in an answer, and for how long: all of it, unless it's longer than the
- * answer. The expert is seen first and last, as far as there's room: the b-roll starts a little
- * after the answer does and ends a little before. With `pastEnd` (full-screen b-roll the expert
- * lets run past the end of their answer), it's all of the clip, and one longer than the answer
- * starts as early as it can and runs on past the end. The take starts with the question, up to
- * `answerStart`; `end` is how long the take is, and `clip` how long the b-roll is.
- * @returns {{length: number, from: number, to: number} | null}  the length it plays for, and the
- *   earliest and latest it can start; null when the answer is too short for any
+ * Where b-roll can go in an answer, and for how long, around the b-roll already in it (`others`,
+ * each placed from `start` for `length` seconds into the take): in each gap between them, all of the
+ * clip, unless it's longer than the gap. The expert is seen first and last, as far as there's room:
+ * the b-roll starts a little after the answer does and ends a little before, and it's at least
+ * BETWEEN from the others. With `pastEnd` (full-screen b-roll the expert lets run past the end of
+ * their answer), it's all of the clip in the last gap, and one longer than that starts as early as it
+ * can and runs on past the end. The take starts with the question, up to `answerStart`; `end` is how
+ * long the take is, and `clip` how long the b-roll is.
+ * @returns {{length: number, from: number, to: number}[]}  for each gap with room for it, in order,
+ *   the length it plays for, and the earliest and latest it can start
  */
-export function brollRange({ clip, answerStart, end, pastEnd = false }) {
-  const from = answerStart ?? 0;
-  const answer = end - from;
-  const length = pastEnd ? clip : Math.min(clip, answer);
-  if (!(length >= MIN_BROLL && answer > 0)) return null;
-  const spare = Math.max(0, answer - length);
-  const earliest = from + Math.min(LEAD, spare / 2);
-  return { length: round3(length), from: round3(earliest), to: round3(Math.max(earliest, end - length - Math.min(TAIL, spare / 2))) };
+export function brollWindows({ clip, answerStart, end, pastEnd = false, others = [] }) {
+  const start = answerStart ?? 0;
+  if (!(end - start > 0)) return [];
+  const taken = others.map((o) => [o.start, o.start + o.length]).sort((a, b) => a[0] - b[0]);
+  const windows = [];
+  let a = start;
+  for (const [from, to] of [...taken, [Infinity, Infinity]]) {
+    const first = a === start;
+    const last = from === Infinity;
+    const b = last ? end : Math.min(end, from - BETWEEN);
+    const room = b - a;
+    const length = pastEnd && last ? clip : Math.min(clip, room);
+    if (room > 0 && length >= MIN_BROLL) {
+      const spare = Math.max(0, room - length);
+      const earliest = a + (first ? Math.min(LEAD, spare / 2) : 0);
+      const latest = Math.max(earliest, b - length - (last ? Math.min(TAIL, spare / 2) : 0));
+      windows.push({ length: round3(length), from: round3(earliest), to: round3(latest) });
+    }
+    a = Math.max(a, to + BETWEEN);
+  }
+  return windows;
+}
+
+/**
+ * How much b-roll an answer has room for, around the b-roll already in it: the gap that fits most of
+ * it (see brollWindows).
+ * @returns {{length: number, from: number, to: number} | null}  null when there's no room for any
+ */
+export function brollRange(input) {
+  return brollWindows(input).reduce((best, w) => (w.length > (best?.length ?? 0) ? w : best), null);
 }
 
 /**
  * B-roll cut in where the expert chose, `start` seconds into the take (not before the answer
  * starts): from there until a little before the answer ends, or all of it if it's shorter; with
- * `pastEnd`, all of it, past the end of the answer if need be. Null when it would cut in less than
- * MIN_BROLL before the answer ends, or play for less than that.
+ * `pastEnd`, all of it, past the end of the answer if need be. The b-roll already in it (`others`,
+ * which are only those the expert chose too) isn't covered: it can't cut in during one, and stops
+ * where the next one starts. Null when it would cut in less than MIN_BROLL before the answer ends,
+ * or play for less than that.
  * @returns {{start: number, length: number} | null}
  */
-function placeAt({ start, clip, answerStart, end, pastEnd = false }) {
+function placeAt({ start, clip, answerStart, end, pastEnd = false, others = [] }) {
   const at = Math.max(answerStart ?? 0, start);
-  const length = pastEnd ? clip : Math.min(clip, end - at - TAIL);
+  if (others.some((o) => at >= o.start && at < o.start + o.length)) return null;
+  const next = others.filter((o) => o.start > at).reduce((first, o) => Math.min(first, o.start), Infinity);
+  const length = next < Infinity ? Math.min(clip, next - at, end - at - TAIL) : pastEnd ? clip : Math.min(clip, end - at - TAIL);
   return end - at >= MIN_BROLL && length >= MIN_BROLL ? { start: round3(at), length: round3(length) } : null;
 }
 
@@ -394,33 +423,45 @@ function placeAt({ start, clip, answerStart, end, pastEnd = false }) {
  * it's described with), on a sentence or phrase starting. A word said just before the cut counts
  * nearly as much as one said during it, and less the later it comes. Without a transcript, or when
  * nothing said matches, it goes about a third of the way into the answer, at a phrase if there is
- * one there. See brollRange for how long it plays and where it can go. With a `start`, it goes
- * where the expert chose instead (see placeAt).
+ * one there. It goes around the b-roll already in the answer (`others`), preferring a gap all of it
+ * fits in. See brollWindows for how long it plays and where it can go. With a `start`, it goes where
+ * the expert chose instead (see placeAt).
  * @param {{description: string, clip: number, answerStart: number|null, end: number, words?: [number, number, string][] | null,
- *   start?: number|null, pastEnd?: boolean}} input  `words` are the take's, from speech-to-text, timed from its start
- * @returns {{start: number, length: number} | null}  null when the answer is too short for b-roll
+ *   start?: number|null, pastEnd?: boolean, others?: {start: number, length: number}[]}} input  `words` are the take's, from
+ *   speech-to-text, timed from its start
+ * @returns {{start: number, length: number} | null}  null when there's no room for it
  */
 export function placeBroll(input) {
   if (input.start != null) return placeAt(input);
-  const range = brollRange(input);
-  if (!range) return null;
-  const { length, from, to } = range;
+  const windows = brollWindows(input);
+  if (!windows.length) return null;
+  const longest = Math.max(...windows.map((w) => w.length));
   const answerStart = input.answerStart ?? 0;
   const answer = input.end - answerStart;
-  const wanted = new Set(tokenize(input.description).map((t) => t.stem));
+  const third = answerStart + answer / 3;
   const said = (input.words ?? [])
     .filter(([start, end]) => (start + end) / 2 >= answerStart)
     .map(([start, end, text]) => ({ start, end, text: String(text).trim(), stems: tokenize(String(text)).map((t) => t.stem) }));
+  // Without a transcript there are no phrases to go by, so it goes as near a third of the way in as
+  // it can, where all of it fits if anywhere does.
+  if (!said.length) {
+    const nearest = windows
+      .filter((w) => w.length === longest)
+      .map((w) => ({ start: Math.min(w.to, Math.max(w.from, third)), length: w.length }))
+      .reduce((a, b) => (Math.abs(b.start - third) < Math.abs(a.start - third) ? b : a));
+    return { start: round3(nearest.start), length: nearest.length };
+  }
+  const wanted = new Set(tokenize(input.description).map((t) => t.stem));
   // Cuts can start where a phrase does: after a pause or punctuation. A sentence is better still.
-  const starts = [{ at: from, boundary: 0 }];
-  said.forEach((w, i) => {
-    if (w.start < from || w.start > to) return;
+  const starts = windows.map((w) => ({ at: w.from, boundary: 0, w }));
+  said.forEach((word, i) => {
     const before = said[i - 1];
-    const gap = before ? w.start - before.end : Infinity;
+    const gap = before ? word.start - before.end : Infinity;
     const boundary = !before || gap >= SENTENCE_GAP || /[.?!]["')\]]?$/.test(before.text) ? 0.25 : gap >= PHRASE_GAP || /[,;:]$/.test(before.text) ? 0.1 : 0;
-    if (boundary) starts.push({ at: w.start, boundary });
+    if (!boundary) return;
+    for (const w of windows) if (word.start >= w.from && word.start <= w.to) starts.push({ at: word.start, boundary, w });
   });
-  const relevance = (at) => {
+  const relevance = (at, length) => {
     const best = new Map(); // stem -> its weight, counted once
     for (const w of said) {
       if (w.end < at - 1 || w.start >= at + length) continue;
@@ -429,11 +470,10 @@ export function placeBroll(input) {
     }
     return [...best.values()].reduce((a, b) => a + b, 0);
   };
-  const score = ({ at, boundary }) => relevance(at) + boundary - 0.3 * Math.abs((at - answerStart) / answer - 1 / 3);
+  // Less of it, squeezed into a gap between other b-roll, counts against a place.
+  const score = ({ at, boundary, w }) => relevance(at, w.length) + boundary - 0.3 * Math.abs((at - answerStart) / answer - 1 / 3) - (1 - w.length / longest);
   const best = starts.reduce((a, b) => (score(b) > score(a) ? b : a));
-  // Without a transcript there are no phrases to go by, so it goes a third of the way in.
-  const at = said.length ? best.at : Math.min(to, Math.max(from, answerStart + answer / 3));
-  return { start: round3(at), length };
+  return { start: round3(best.at), length: best.w.length };
 }
 
 const round3 = (secs) => Math.round(secs * 1000) / 1000;

@@ -4,8 +4,8 @@
 //
 // The expert has the top half whenever it splits. While a question asked on camera is played (the
 // start of each take, up to its `answerStart`), the asker's video is under them from the moment it
-// starts, kept in step with the question. While an answer's split-screen b-roll plays, all of the
-// clip is, in step, on a blurred copy of itself where its shape leaves room. The rest of the time
+// starts, kept in step with the question. While a clip of an answer's split-screen b-roll plays, all
+// of it is, in step, on a blurred copy of itself where its shape leaves room. The rest of the time
 // the joined video has the whole stage, full-screen b-roll included, which the server cuts into it. The halves crop the expert and the asker to frame their faces, where the server found
 // them (the chapters' expertFocus and askerFocus). Any other question doesn't split: the asker's
 // character says it, if it has one (`avatar`), or else the fox, in a bubble at the top left, over the
@@ -28,7 +28,7 @@ import { blinkAt, character, FOX } from '../../../public/fox.js';
 import { api } from '../api.js';
 import { askerLabel, fmtDuration } from '../format.js';
 import { Icon } from '../ui/icons.jsx';
-import { BigPlay, CtrlButton, SeekBar } from './controls.jsx';
+import { BigPlay, CtrlButton, SeekBar, showPlayed } from './controls.jsx';
 import { cover, cueAt, cutCue, focusPosition, joinedCues, joinedParts, moment, partAt, pipRect } from './split.js';
 import { advancing, backStyle, caughtUp, drawBack, fixDuration, HOLD_LIMIT, layer, stageStyle, stageWidth, toggleFullscreen, useFullscreen, useStage } from './Video.jsx';
 
@@ -86,12 +86,12 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     for (const p of [parts[i], parts[i + 1]]) {
       if (!r.started || !p) continue;
       if (p.q.askerVideo) face(p).preload = 'auto';
-      if (p.q.broll?.video && !p.q.broll.full) clip(p.q).preload = 'auto';
+      for (const b of p.q.brolls ?? []) if (b.video && !b.full) clip(b).preload = 'auto';
       if (!p.q.askerVideo) speaker(p.q);
       lipSync(p.q);
     }
     showFace(m.asking?.askerVideo ? face(m.part) : null, m.at);
-    showClip(m.cut ? clip(m.part.q) : null, m.clipAt);
+    showClip(m.cut ? clip(m.cut) : null, m.clipAt);
     hold([r.shownFace, r.shownClip].filter(Boolean));
     if (m.cut && clipBack.current) drawBack(clipBack.current, r.shownClip);
     r.level = m.asking && r.analyser && !v.paused ? 0.6 * r.level + 0.4 * loudness() : 0.85 * r.level;
@@ -103,7 +103,7 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
     const pip = v.videoWidth > v.videoHeight; // the page's video, with the b-roll cut in
     if (m.cut && pip) drawCrop();
     if (m.asking) [r.asker, r.backdrop] = [askerLabel(m.asking), (m.asking.avatar ?? FOX).backdrop]; // kept while the half or the bubble fades out
-    if (fillRef.current) fillRef.current.style.width = `${total ? (100 * t) / total : 0}%`;
+    showPlayed(fillRef, total ? t / total : 0);
     // Which answer is playing, for Skip to under the player: nothing before it's played.
     const current = v.paused && t < 0.05 ? null : (m.part?.q.id ?? null);
     if (current !== r.current) {
@@ -129,14 +129,14 @@ export const JointPlayer = forwardRef(function JointPlayer({ answers, video, onC
   // The answers' b-roll clips, muted: the expert's sound carries on under them. Each is shown whole,
   // on the blurred copy of itself drawn under it, which follows a paused clip once it has the frame
   // it was sent to.
-  function clip(q) {
+  function clip(b) {
     const r = rt.current;
-    if (!r.clips.has(q.id)) {
-      const el = sideVideo(q.broll.video, 'contain', 'transparent');
+    if (!r.clips.has(b.video)) {
+      const el = sideVideo(b.video, 'contain', 'transparent');
       ['seeked', 'loadeddata', 'canplay', 'playing', 'error'].forEach((type) => el.addEventListener(type, tick)); // and see hold
-      r.clips.set(q.id, el);
+      r.clips.set(b.video, el);
     }
-    return r.clips.get(q.id);
+    return r.clips.get(b.video);
   }
   // Kept in step with the joined video: it plays and pauses with it, holds still while the joined
   // video waits for data (see advancing), and seeks once it's drifted, but not again while it's

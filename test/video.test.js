@@ -531,7 +531,7 @@ test('ffmpeg cuts away to b-roll split screen: the answer fills the left half, a
     ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=360x640:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=660:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
     const out = join(dir, 'joined.mp4');
     const broll = { file: join(dir, 'b.mp4'), start: 1.5, length: 2 };
-    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4'), broll }], out);
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), brolls: [broll] }, { file: join(dir, 'c.mp4'), brolls: [broll] }], out);
     assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`); // the answer's timing doesn't change
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
@@ -560,7 +560,7 @@ test('ffmpeg cuts away to full-screen b-roll: all of it shows, over a blurred co
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=5', '-f', 'lavfi', '-i', 'sine=f=440:duration=5', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=360x780:rate=24:duration=3,drawbox=y=0:w=iw:h=60:color=green:t=fill,drawbox=y=ih-60:w=iw:h=60:color=green:t=fill', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, 'b.mp4'));
     const out = join(dir, 'joined.mp4');
-    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { file: join(dir, 'b.mp4'), start: 1.5, length: 2, full: true } }], out);
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), brolls: [{ file: join(dir, 'b.mp4'), start: 1.5, length: 2, full: true }] }], out);
     assert.ok(Math.abs(durations[0] - 5) < 0.1, `${durations[0]}s`);
     assert.deepEqual(probe(out, 'stream=codec_name,width,height').split('\n').sort(), ['aac', 'h264,1280,720']);
     const [red, blue, green] = [[255, 0, 0], [0, 0, 255], [0, 128, 0]];
@@ -595,7 +595,7 @@ test('ffmpeg lengthens a take whose full-screen b-roll runs past its end: it end
     ffmpeg('-f', 'lavfi', '-i', 'color=c=green:size=1280x720:rate=30:duration=2', '-f', 'lavfi', '-i', 'sine=f=660:duration=2', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'c.mp4'));
     const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
     const broll = { file: join(dir, 'b.mp4'), start: 3, length: 4, full: true, pastEnd: true };
-    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }], out, phone);
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), brolls: [broll] }, { file: join(dir, 'c.mp4') }], out, phone);
     assert.ok(Math.abs(durations[0] - 7) < 0.1, `${durations[0]}s, to where the b-roll ends`);
     const [red, blue, green] = [[255, 0, 0], [0, 0, 255], [0, 128, 0]];
     const [x, y, w, h] = pipBox(1280).map((n, i) => n / (i % 2 ? 720 : 1280));
@@ -607,8 +607,37 @@ test('ffmpeg lengthens a take whose full-screen b-roll runs past its end: it end
     assert.ok(Math.abs(seconds(out, 'a') - 9) < 0.15, `sound under it too: ${seconds(out, 'a')}s`);
     assert.ok(loudest(out, 4, 0.8) > -30 && loudest(out, 5.3, 1.5) < -60, 'silent once the answer has ended');
     // Without pastEnd, b-roll that fits isn't lengthened.
-    const fits = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), broll: { ...broll, start: 1, length: 2 } }], join(dir, 'fits.mp4'));
+    const fits = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), brolls: [{ ...broll, start: 1, length: 2 }] }], join(dir, 'fits.mp4'));
     assert.ok(Math.abs(fits.durations[0] - 5) < 0.1, `${fits.durations[0]}s`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ffmpeg cuts away to each of a take\'s b-roll clips in turn, split screen or full screen, and only the full-screen ones into the phone\'s copy', { skip: !hasFfmpeg && 'ffmpeg is not installed' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forum_video_brolls_'));
+  const ffmpeg = (...args) => execFileSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', ...args]);
+  try {
+    // A red answer, with blue b-roll split screen, then green full screen, then yellow split screen.
+    ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=6', '-f', 'lavfi', '-i', 'sine=f=440:duration=6', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
+    for (const [name, c] of [['b', 'blue'], ['g', 'green'], ['y', 'yellow']]) ffmpeg('-f', 'lavfi', '-i', `color=c=${c}:size=1024x576:rate=24:duration=2`, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', join(dir, `${name}.mp4`));
+    const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
+    const brolls = [
+      { file: join(dir, 'y.mp4'), start: 4.3, length: 1.5 },
+      { file: join(dir, 'b.mp4'), start: 0.5, length: 1.5 },
+      { file: join(dir, 'g.mp4'), start: 2.5, length: 1.5, full: true },
+    ]; // in any order
+    const { durations } = await createVideoJoiner().join([{ file: join(dir, 'a.mp4'), brolls }], out, phone);
+    assert.ok(Math.abs(durations[0] - 6) < 0.1, `${durations[0]}s`);
+    const [red, blue, green, yellow] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [255, 255, 0]];
+    assert.ok(near(pixel(out, 0.2, 0.75, 0.5), red));
+    assert.ok(near(pixel(out, 1.2, 0.25, 0.5), red) && near(pixel(out, 1.2, 0.75, 0.5), blue), 'the first beside the answer');
+    assert.ok(near(pixel(out, 2.2, 0.75, 0.5), red), 'back to the answer between them');
+    const [x, y, w, h] = pipBox(1280).map((n, i) => n / (i % 2 ? 720 : 1280));
+    assert.ok(near(pixel(out, 3.2, 0.5, 0.5), green) && near(pixel(out, 3.2, x + w / 2, y + h / 2), red), 'the second full screen, the answer in the corner');
+    assert.ok(near(pixel(out, 5, 0.25, 0.5), red) && near(pixel(out, 5, 0.75, 0.5), yellow), 'the third beside it again');
+    assert.ok(near(pixel(phone, 1.2, 0.5, 0.5), red) && near(pixel(phone, 5, 0.5, 0.5), red), "the phone plays split-screen b-roll in its other half");
+    assert.ok(near(pixel(phone, 3.2, 0.5, 0.5), green), 'and has the full-screen one cut in');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -629,7 +658,7 @@ test("ffmpeg makes the phone's copy upright, each take filling it, with full-scr
     const joiner = createVideoJoiner();
     const [out, phone] = [join(dir, 'joined.mp4'), join(dir, 'phone.mp4')];
     const broll = { file: join(dir, 'b.mp4'), start: 1, length: 2 };
-    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'c.mp4') }, { file: join(dir, 'a.mp4'), broll: { ...broll, file: join(dir, 'w.mp4'), full: true } }], out, phone);
+    const { mobile } = await joiner.join([{ file: join(dir, 'a.mp4'), brolls: [broll] }, { file: join(dir, 'c.mp4') }, { file: join(dir, 'a.mp4'), brolls: [{ ...broll, file: join(dir, 'w.mp4'), full: true }] }], out, phone);
     assert.equal(mobile, true);
     assert.equal(size(phone), '720,960'); // 3:4, as the app records answers
     const [red, blue, green, black] = [[255, 0, 0], [0, 0, 255], [0, 128, 0], [0, 0, 0]];
@@ -664,32 +693,33 @@ test('a finisher is given the b-roll and the filters that cut it in: beside the 
     ffmpeg('-f', 'lavfi', '-i', 'color=c=red:size=1280x720:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=f=440:duration=4', '-c:v', 'libx264', '-c:a', 'aac', '-shortest', join(dir, 'a.mp4'));
     ffmpeg('-f', 'lavfi', '-i', 'color=c=blue:size=1024x576:rate=24:duration=2', '-c:v', 'libx264', join(dir, 'b.mp4'));
     // Stands in for src/finish: its picture at 1080p is [pic], its sound is input 1 and the b-roll
-    // input 2. Split screen takes the take filling the left half too, [half]; full screen also cuts
+    // input 2. Split screen takes the take filling the left half too, [half0]; full screen also cuts
     // into the phone's copy, from [phonepic] to [phonecut].
     const finisher = {
       async finish(jobs) {
-        for (const { input, output, mobile_output: copy, mobile_size: [pw, ph], cutaway } of jobs) {
-          assert.equal(cutaway.input, join(dir, 'b.mp4'));
-          assert.deepEqual([cutaway.start, cutaway.length], [1, 1.8]); // when it plays
-          const split = cutaway.layout === 'split';
-          assert.equal(cutaway.mobile_filter == null, split);
+        for (const { input, output, mobile_output: copy, mobile_size: [pw, ph], cutaways } of jobs) {
+          assert.deepEqual(cutaways.inputs, [join(dir, 'b.mp4')]);
+          const split = cutaways.halves.length > 0;
+          if (split) assert.deepEqual(cutaways.halves, [[1, 1.8]]); // when it plays, to frame the expert then
+          assert.equal(cutaways.mobile_filter == null, split);
+          assert.equal(cutaways.end, null);
           const fill = `scale=${pw}:${ph}:force_original_aspect_ratio=increase,crop=${pw}:${ph}`;
           const graph = [
             `[0:v]fps=30,split=${split ? 3 : 2}[d][p]${split ? '[f]' : ''}`,
             '[d]scale=1920:1080[pic]',
-            ...(split ? ['[f]scale=960:1080:force_original_aspect_ratio=increase,crop=960:1080[half]'] : []),
-            `${cutaway.filter};[cut]format=yuv420p[v]`,
-            split ? `[p]${fill},format=yuv420p[vm]` : `[p]${fill}[phonepic];${cutaway.mobile_filter};[phonecut]format=yuv420p[vm]`,
+            ...(split ? ['[f]scale=960:1080:force_original_aspect_ratio=increase,crop=960:1080[half0]'] : []),
+            `${cutaways.filter};[cut]format=yuv420p[v]`,
+            split ? `[p]${fill},format=yuv420p[vm]` : `[p]${fill}[phonepic];${cutaways.mobile_filter};[phonecut]format=yuv420p[vm]`,
           ];
           const encode = ['-map', '1:a', '-c:v', 'libx264', '-c:a', 'aac'];
-          ffmpeg('-i', input, '-i', input, '-i', cutaway.input, '-filter_complex', graph.join(';'), '-map', '[v]', ...encode, output, '-map', '[vm]', ...encode, copy);
+          ffmpeg('-i', input, '-i', input, ...cutaways.inputs.flatMap((f) => ['-i', f]), '-filter_complex', graph.join(';'), '-map', '[v]', ...encode, output, '-map', '[vm]', ...encode, copy);
         }
         return {};
       },
     };
     const [out, phone] = [join(dir, 'finished.mp4'), join(dir, 'phone.mp4')];
     const broll = { file: join(dir, 'b.mp4'), start: 1, length: 1.8 };
-    await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), broll }, { file: join(dir, 'a.mp4'), broll: { ...broll, full: true } }], out, phone);
+    await createVideoJoiner({ finisher }).join([{ file: join(dir, 'a.mp4'), brolls: [broll] }, { file: join(dir, 'a.mp4'), brolls: [{ ...broll, full: true }] }], out, phone);
     assert.equal(size(out), '1920,1080'); // finished, not joined as recorded
     const [red, blue] = [[255, 0, 0], [0, 0, 255]];
     // Split screen: the take on the left and the b-roll on the right; the phone plays it in its other half.

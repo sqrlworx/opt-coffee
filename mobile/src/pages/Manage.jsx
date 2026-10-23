@@ -52,13 +52,14 @@ function Planner({ data, reload }) {
       queue: [...data.plan.queue],
       videos: new Map(all.map((q) => [q.id, q.answerVideo])), // draft answer URL per question
       transcripts: new Map(all.map((q) => [q.id, q.answerTranscript])), // and its transcript
-      brolls: new Map(all.map((q) => [q.id, q.broll])), // and its b-roll
+      brolls: new Map(all.map((q) => [q.id, q.brolls])), // and its b-roll clips
       uploads: new Map(), // question id -> { blob, url, answerStart, failed } for a take that's saving or failed to save
       uploading: Promise.resolve(), // takes upload one at a time, in the order they were recorded
       finishing: 0, // takes kept but still being finished by the browser, about to start saving
       local: new Map(), // question id -> object URL of its saved take, to keep playing from
       brollDrafts: new Map(), // question id -> b-roll description being typed, while its box is open
-      brollChanging: new Set(), // question ids whose b-roll is being changed: making or uploading another is offered
+      brollReplacing: new Map(), // question id -> the clip being changed: making or uploading another in its place is offered
+      brollAdding: new Set(), // question ids whose answer is having another clip added: making or uploading one is offered
       brollUploads: new Map(), // question id -> { name, sent (0 to 1), stop } for a video being uploaded
       // The answer order saves itself whenever it changes, so leaving or refreshing never loses it.
       edits: 0,
@@ -78,7 +79,7 @@ function Planner({ data, reload }) {
       if (!s.questions.has(q.id)) {
         s.videos.set(q.id, q.answerVideo);
         s.transcripts.set(q.id, q.answerTranscript);
-        s.brolls.set(q.id, q.broll);
+        s.brolls.set(q.id, q.brolls);
       }
       s.questions.set(q.id, q);
     }
@@ -145,7 +146,7 @@ function Planner({ data, reload }) {
         keepLocal(qid, take.url);
         s.videos.set(qid, res.video);
         s.transcripts.set(qid, res.transcript);
-        s.brolls.set(qid, res.broll); // its b-roll moves to where it fits in the new take
+        s.brolls.set(qid, res.brolls); // its b-roll moves to where it fits in the new take
       } catch (err) {
         if (s.uploads.get(qid) !== take) return;
         if (err.status === 401) return requireLogin();
@@ -200,22 +201,24 @@ function Planner({ data, reload }) {
       keepLocal(qid, null);
       s.videos.set(qid, null);
       s.transcripts.set(qid, null);
-      s.brolls.set(qid, res.broll); // kept for the next take
+      s.brolls.set(qid, res.brolls); // kept for the next take
       bump();
     },
-    setBroll(qid, broll) {
-      s.brolls.set(qid, broll);
+    setBrolls(qid, brolls) {
+      s.brolls.set(qid, brolls);
       bump();
     },
-    // Uploads a video the expert picked as a question's b-roll. The server then gets it ready, in
-    // a few seconds, and places it, by its file's name for want of a description.
-    async uploadBroll(qid, file) {
+    // Uploads a video the expert picked as b-roll for a question's answer, added to its clips or in
+    // place of `replaces`. The server then gets it ready, in a few seconds, and places it, by its
+    // file's name for want of a description.
+    async uploadBroll(qid, file, replaces = null) {
       if (file.type && !file.type.startsWith('video/')) return toast('Choose a video file.', 'error');
       if (file.size > MAX_BROLL_UPLOAD) return toast('That video is too large: b-roll can be up to 500 MB. Trim it, or export it smaller.', 'error');
-      const up = { name: file.name, sent: 0, stop: new AbortController() };
+      const up = { name: file.name, replaces, sent: 0, stop: new AbortController() };
       s.brollUploads.set(qid, up);
       bump();
       const query = new URLSearchParams({ name: file.name });
+      if (replaces) query.set('replaces', replaces);
       try {
         const res = await sendFile('PUT', `/api/questions/${qid}/broll/video?${query}`, file, {
           signal: up.stop.signal,
@@ -225,8 +228,9 @@ function Planner({ data, reload }) {
           },
         });
         s.brollDrafts.delete(qid);
-        s.brollChanging.delete(qid);
-        s.brolls.set(qid, res.broll);
+        s.brollReplacing.delete(qid);
+        s.brollAdding.delete(qid);
+        s.brolls.set(qid, res.brolls);
         if (res.trimmed) toast(`Your video is ${fmtDuration(res.trimmed.from)} long, and b-roll can be up to ${fmtDuration(res.trimmed.to)}, so its start is used.`);
       } catch (err) {
         if (err.status === 401) requireLogin();
@@ -241,7 +245,7 @@ function Planner({ data, reload }) {
   async function publish() {
     if (s.finishing || s.uploads.size) throw new Error('Wait for your answers to finish saving (or discard any that failed) before publishing.');
     if (s.brollUploads.size) throw new Error('Wait for your b-roll to finish uploading before publishing.');
-    const making = s.queue.find((qid) => s.videos.get(qid) && s.brolls.get(qid)?.status === 'pending');
+    const making = s.queue.find((qid) => s.videos.get(qid) && (s.brolls.get(qid) ?? []).some((b) => b.status === 'pending'));
     if (making) throw new Error(`The b-roll for question ${s.queue.indexOf(making) + 1} is still being made. Wait for it, or remove it, before publishing.`);
     const answered = s.queue.filter((qid) => s.videos.get(qid)).length;
     const unanswered = s.queue.length - answered;
